@@ -1,0 +1,1494 @@
+{
+  "enums": [
+    {
+      "members": {
+        "bind": 1,
+        "bind_rejected": 3,
+        "bound": 2,
+        "cancel": 14,
+        "close": 12,
+        "closed": 13,
+        "data": 7,
+        "end_write": 11,
+        "failed": 15,
+        "flush": 9,
+        "flushed": 10,
+        "open": 4,
+        "open_failed": 6,
+        "opened": 5,
+        "window": 8
+      },
+      "name": "MessageKind"
+    },
+    {
+      "members": {
+        "driver": 2,
+        "local": 1
+      },
+      "name": "EndpointRole"
+    },
+    {
+      "members": {
+        "https": 2,
+        "ssh": 1
+      },
+      "name": "Scheme"
+    },
+    {
+      "members": {
+        "anonymous": 3,
+        "gh": 4,
+        "ssh_ambient": 1,
+        "ssh_explicit": 2
+      },
+      "name": "AuthPolicy"
+    },
+    {
+      "members": {
+        "receive_pack_advertisement": 3,
+        "receive_pack_exchange": 4,
+        "upload_pack_advertisement": 1,
+        "upload_pack_exchange": 2
+      },
+      "name": "GitService"
+    },
+    {
+      "members": {
+        "ambient": 1,
+        "credentials_disabled": 3,
+        "explicit_key": 2
+      },
+      "name": "IdentityMode"
+    },
+    {
+      "members": {
+        "authentication": 8,
+        "cancelled": 7,
+        "capacity": 5,
+        "carrier_lost": 12,
+        "invalid_request": 4,
+        "io": 10,
+        "protocol": 11,
+        "timeout": 6,
+        "trust": 9,
+        "unavailable": 3,
+        "unsupported_operation": 2,
+        "unsupported_version": 1
+      },
+      "name": "ErrorCode"
+    },
+    {
+      "members": {
+        "none": 1,
+        "possible": 2
+      },
+      "name": "Effect"
+    },
+    {
+      "members": {
+        "discarded": 2,
+        "reusable": 1
+      },
+      "name": "Disposition"
+    },
+    {
+      "members": {
+        "gh": 4,
+        "none": 1,
+        "ssh_agent": 2,
+        "ssh_key": 3
+      },
+      "name": "AuthMethod"
+    }
+  ],
+  "extensions": [],
+  "messages": [
+    {
+      "fields": [
+        {
+          "merge": null,
+          "name": "encoded_frame",
+          "optional": false,
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "data_payload",
+          "optional": false,
+          "tag": 2,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "metadata_bytes",
+          "optional": false,
+          "tag": 3,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "nesting",
+          "optional": false,
+          "tag": 4,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "collection_entries",
+          "optional": false,
+          "tag": 5,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "decode_allocation",
+          "optional": false,
+          "tag": 6,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "queued_bytes",
+          "optional": false,
+          "tag": 7,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "queued_frames",
+          "optional": false,
+          "tag": 8,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "receive_window",
+          "optional": false,
+          "tag": 9,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "control_reserve_bytes",
+          "optional": false,
+          "tag": 10,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "control_reserve_frames",
+          "optional": false,
+          "tag": 11,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        }
+      ],
+      "name": "Limits",
+      "next_id": null,
+      "reserved_names": [],
+      "reserved_tags": []
+    },
+    {
+      "fields": [
+        {
+          "merge": null,
+          "name": "versions",
+          "optional": false,
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "elem": {
+              "k": "scalar",
+              "scalar": "int"
+            },
+            "k": "list"
+          }
+        },
+        {
+          "merge": null,
+          "name": "role",
+          "optional": false,
+          "tag": 2,
+          "transient": false,
+          "type": {
+            "k": "enum",
+            "name": "EndpointRole"
+          }
+        },
+        {
+          "merge": null,
+          "name": "schemes",
+          "optional": false,
+          "tag": 3,
+          "transient": false,
+          "type": {
+            "elem": {
+              "k": "enum",
+              "name": "Scheme"
+            },
+            "k": "list"
+          }
+        },
+        {
+          "merge": null,
+          "name": "policies",
+          "optional": false,
+          "tag": 4,
+          "transient": false,
+          "type": {
+            "elem": {
+              "k": "enum",
+              "name": "AuthPolicy"
+            },
+            "k": "list"
+          }
+        },
+        {
+          "merge": null,
+          "name": "receive_limits",
+          "optional": false,
+          "tag": 5,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Limits"
+          }
+        }
+      ],
+      "name": "Bind",
+      "next_id": null,
+      "reserved_names": [],
+      "reserved_tags": []
+    },
+    {
+      "fields": [
+        {
+          "merge": null,
+          "name": "version",
+          "optional": false,
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "endpoint_id",
+          "optional": false,
+          "tag": 2,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "str"
+          }
+        },
+        {
+          "merge": null,
+          "name": "role",
+          "optional": false,
+          "tag": 3,
+          "transient": false,
+          "type": {
+            "k": "enum",
+            "name": "EndpointRole"
+          }
+        },
+        {
+          "merge": null,
+          "name": "schemes",
+          "optional": false,
+          "tag": 4,
+          "transient": false,
+          "type": {
+            "elem": {
+              "k": "enum",
+              "name": "Scheme"
+            },
+            "k": "list"
+          }
+        },
+        {
+          "merge": null,
+          "name": "policies",
+          "optional": false,
+          "tag": 5,
+          "transient": false,
+          "type": {
+            "elem": {
+              "k": "enum",
+              "name": "AuthPolicy"
+            },
+            "k": "list"
+          }
+        },
+        {
+          "merge": null,
+          "name": "receive_limits",
+          "optional": false,
+          "tag": 6,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Limits"
+          }
+        },
+        {
+          "merge": null,
+          "name": "trust_owner",
+          "optional": false,
+          "tag": 7,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "str"
+          }
+        }
+      ],
+      "name": "Bound",
+      "next_id": null,
+      "reserved_names": [],
+      "reserved_tags": []
+    },
+    {
+      "fields": [
+        {
+          "merge": null,
+          "name": "code",
+          "optional": false,
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "k": "enum",
+            "name": "ErrorCode"
+          }
+        },
+        {
+          "merge": null,
+          "name": "effect",
+          "optional": false,
+          "tag": 2,
+          "transient": false,
+          "type": {
+            "k": "enum",
+            "name": "Effect"
+          }
+        }
+      ],
+      "name": "Failure",
+      "next_id": null,
+      "reserved_names": [],
+      "reserved_tags": []
+    },
+    {
+      "fields": [
+        {
+          "merge": null,
+          "name": "scheme",
+          "optional": false,
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "k": "enum",
+            "name": "Scheme"
+          }
+        },
+        {
+          "merge": null,
+          "name": "host",
+          "optional": false,
+          "tag": 2,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "str"
+          }
+        },
+        {
+          "merge": null,
+          "name": "port",
+          "optional": false,
+          "tag": 3,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "path",
+          "optional": false,
+          "tag": 4,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "str"
+          }
+        },
+        {
+          "merge": null,
+          "name": "ssh_username",
+          "optional": true,
+          "tag": 5,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "str"
+          }
+        }
+      ],
+      "name": "Destination",
+      "next_id": null,
+      "reserved_names": [],
+      "reserved_tags": []
+    },
+    {
+      "fields": [
+        {
+          "merge": null,
+          "name": "mode",
+          "optional": false,
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "k": "enum",
+            "name": "IdentityMode"
+          }
+        },
+        {
+          "merge": null,
+          "name": "key_path",
+          "optional": true,
+          "tag": 2,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "str"
+          }
+        },
+        {
+          "merge": null,
+          "name": "path_base",
+          "optional": true,
+          "tag": 3,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "str"
+          }
+        }
+      ],
+      "name": "Identity",
+      "next_id": null,
+      "reserved_names": [],
+      "reserved_tags": []
+    },
+    {
+      "fields": [
+        {
+          "merge": null,
+          "name": "allocation_ms",
+          "optional": false,
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "connect_ms",
+          "optional": false,
+          "tag": 2,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "io_ms",
+          "optional": false,
+          "tag": 3,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "interaction_ms",
+          "optional": false,
+          "tag": 4,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "cleanup_ms",
+          "optional": false,
+          "tag": 5,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        }
+      ],
+      "name": "Deadlines",
+      "next_id": null,
+      "reserved_names": [],
+      "reserved_tags": []
+    },
+    {
+      "fields": [
+        {
+          "merge": null,
+          "name": "endpoint_id",
+          "optional": false,
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "str"
+          }
+        },
+        {
+          "merge": null,
+          "name": "operation_id",
+          "optional": false,
+          "tag": 2,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "str"
+          }
+        },
+        {
+          "merge": null,
+          "name": "destination",
+          "optional": false,
+          "tag": 3,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Destination"
+          }
+        },
+        {
+          "merge": null,
+          "name": "service",
+          "optional": false,
+          "tag": 4,
+          "transient": false,
+          "type": {
+            "k": "enum",
+            "name": "GitService"
+          }
+        },
+        {
+          "merge": null,
+          "name": "identity",
+          "optional": false,
+          "tag": 5,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Identity"
+          }
+        },
+        {
+          "merge": null,
+          "name": "policy",
+          "optional": false,
+          "tag": 6,
+          "transient": false,
+          "type": {
+            "k": "enum",
+            "name": "AuthPolicy"
+          }
+        },
+        {
+          "merge": null,
+          "name": "deadlines",
+          "optional": false,
+          "tag": 7,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Deadlines"
+          }
+        },
+        {
+          "merge": null,
+          "name": "receive_limits",
+          "optional": false,
+          "tag": 8,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Limits"
+          }
+        }
+      ],
+      "name": "Open",
+      "next_id": null,
+      "reserved_names": [],
+      "reserved_tags": []
+    },
+    {
+      "fields": [
+        {
+          "merge": null,
+          "name": "method",
+          "optional": false,
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "k": "enum",
+            "name": "AuthMethod"
+          }
+        },
+        {
+          "merge": null,
+          "name": "credential_offered",
+          "optional": false,
+          "tag": 2,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "bool"
+          }
+        },
+        {
+          "merge": null,
+          "name": "authenticated",
+          "optional": true,
+          "tag": 3,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "bool"
+          }
+        },
+        {
+          "merge": null,
+          "name": "key_fingerprint",
+          "optional": true,
+          "tag": 4,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "str"
+          }
+        },
+        {
+          "merge": null,
+          "name": "http_status",
+          "optional": true,
+          "tag": 5,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "ssh_exit_status",
+          "optional": true,
+          "tag": 6,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        }
+      ],
+      "name": "Facts",
+      "next_id": null,
+      "reserved_names": [],
+      "reserved_tags": []
+    },
+    {
+      "fields": [
+        {
+          "merge": null,
+          "name": "connection_id",
+          "optional": false,
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "str"
+          }
+        },
+        {
+          "merge": null,
+          "name": "reused",
+          "optional": false,
+          "tag": 2,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "bool"
+          }
+        },
+        {
+          "merge": null,
+          "name": "endpoint_id",
+          "optional": false,
+          "tag": 3,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "str"
+          }
+        },
+        {
+          "merge": null,
+          "name": "trust_owner",
+          "optional": false,
+          "tag": 4,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "str"
+          }
+        },
+        {
+          "merge": null,
+          "name": "facts",
+          "optional": false,
+          "tag": 5,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Facts"
+          }
+        },
+        {
+          "merge": null,
+          "name": "receive_limits",
+          "optional": false,
+          "tag": 6,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Limits"
+          }
+        }
+      ],
+      "name": "Opened",
+      "next_id": null,
+      "reserved_names": [],
+      "reserved_tags": []
+    },
+    {
+      "fields": [
+        {
+          "merge": null,
+          "name": "offset",
+          "optional": false,
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "payload",
+          "optional": false,
+          "tag": 2,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "bytes"
+          }
+        }
+      ],
+      "name": "Data",
+      "next_id": null,
+      "reserved_names": [],
+      "reserved_tags": []
+    },
+    {
+      "fields": [
+        {
+          "merge": null,
+          "name": "max_offset",
+          "optional": false,
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        }
+      ],
+      "name": "Window",
+      "next_id": null,
+      "reserved_names": [],
+      "reserved_tags": []
+    },
+    {
+      "fields": [
+        {
+          "merge": null,
+          "name": "barrier_id",
+          "optional": false,
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "offset",
+          "optional": false,
+          "tag": 2,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        }
+      ],
+      "name": "Barrier",
+      "next_id": null,
+      "reserved_names": [],
+      "reserved_tags": []
+    },
+    {
+      "fields": [
+        {
+          "merge": null,
+          "name": "final_offset",
+          "optional": false,
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        }
+      ],
+      "name": "EndWrite",
+      "next_id": null,
+      "reserved_names": [],
+      "reserved_tags": []
+    },
+    {
+      "fields": [
+        {
+          "merge": null,
+          "name": "final_offset",
+          "optional": false,
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        }
+      ],
+      "name": "Close",
+      "next_id": null,
+      "reserved_names": [],
+      "reserved_tags": []
+    },
+    {
+      "fields": [
+        {
+          "merge": null,
+          "name": "disposition",
+          "optional": false,
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "k": "enum",
+            "name": "Disposition"
+          }
+        },
+        {
+          "merge": null,
+          "name": "unread_response_discarded",
+          "optional": false,
+          "tag": 2,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "bool"
+          }
+        },
+        {
+          "merge": null,
+          "name": "facts",
+          "optional": false,
+          "tag": 3,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Facts"
+          }
+        },
+        {
+          "merge": null,
+          "name": "failure",
+          "optional": true,
+          "tag": 4,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Failure"
+          }
+        }
+      ],
+      "name": "Closed",
+      "next_id": null,
+      "reserved_names": [],
+      "reserved_tags": []
+    },
+    {
+      "fields": [
+        {
+          "merge": null,
+          "name": "reason",
+          "optional": false,
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "k": "enum",
+            "name": "ErrorCode"
+          }
+        }
+      ],
+      "name": "Cancel",
+      "next_id": null,
+      "reserved_names": [],
+      "reserved_tags": []
+    },
+    {
+      "fields": [
+        {
+          "merge": null,
+          "name": "version",
+          "optional": false,
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "session_id",
+          "optional": false,
+          "tag": 2,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "str"
+          }
+        },
+        {
+          "merge": null,
+          "name": "stream_id",
+          "optional": false,
+          "tag": 3,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "kind",
+          "optional": false,
+          "tag": 4,
+          "transient": false,
+          "type": {
+            "k": "enum",
+            "name": "MessageKind"
+          }
+        },
+        {
+          "merge": null,
+          "name": "bind",
+          "optional": true,
+          "tag": 10,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Bind"
+          }
+        },
+        {
+          "merge": null,
+          "name": "bound",
+          "optional": true,
+          "tag": 11,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Bound"
+          }
+        },
+        {
+          "merge": null,
+          "name": "bind_rejected",
+          "optional": true,
+          "tag": 12,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Failure"
+          }
+        },
+        {
+          "merge": null,
+          "name": "open",
+          "optional": true,
+          "tag": 13,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Open"
+          }
+        },
+        {
+          "merge": null,
+          "name": "opened",
+          "optional": true,
+          "tag": 14,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Opened"
+          }
+        },
+        {
+          "merge": null,
+          "name": "open_failed",
+          "optional": true,
+          "tag": 15,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Failure"
+          }
+        },
+        {
+          "merge": null,
+          "name": "data",
+          "optional": true,
+          "tag": 16,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Data"
+          }
+        },
+        {
+          "merge": null,
+          "name": "window",
+          "optional": true,
+          "tag": 17,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Window"
+          }
+        },
+        {
+          "merge": null,
+          "name": "flush",
+          "optional": true,
+          "tag": 18,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Barrier"
+          }
+        },
+        {
+          "merge": null,
+          "name": "flushed",
+          "optional": true,
+          "tag": 19,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Barrier"
+          }
+        },
+        {
+          "merge": null,
+          "name": "end_write",
+          "optional": true,
+          "tag": 20,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "EndWrite"
+          }
+        },
+        {
+          "merge": null,
+          "name": "close",
+          "optional": true,
+          "tag": 21,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Close"
+          }
+        },
+        {
+          "merge": null,
+          "name": "closed",
+          "optional": true,
+          "tag": 22,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Closed"
+          }
+        },
+        {
+          "merge": null,
+          "name": "cancel",
+          "optional": true,
+          "tag": 23,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Cancel"
+          }
+        },
+        {
+          "merge": null,
+          "name": "failed",
+          "optional": true,
+          "tag": 24,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Failure"
+          }
+        }
+      ],
+      "name": "Envelope",
+      "next_id": null,
+      "reserved_names": [],
+      "reserved_tags": []
+    }
+  ],
+  "services": [],
+  "shapes": {
+    "atom": {
+      "class": "engine",
+      "contract_version": "v1",
+      "core": "atom",
+      "delivery": "stream",
+      "events": [
+        "replace"
+      ],
+      "fixed_profile": {},
+      "history": "latest",
+      "initiation": "pull|push",
+      "lifecycle": "mailbox_terminal",
+      "merge": "sequential_overwrite",
+      "name": "atom",
+      "operations": [
+        "read",
+        "replace",
+        "subscribe"
+      ],
+      "ordering": "scalar_version",
+      "payload": "whole-state",
+      "position": "version",
+      "recovery": "latest_refresh",
+      "retention": "latest",
+      "writers": "single"
+    },
+    "crdt": {
+      "class": "engine",
+      "contract_version": "v1",
+      "core": "crdt",
+      "delivery": "stream",
+      "events": [
+        "op",
+        "sync"
+      ],
+      "fixed_profile": {},
+      "history": "reconstructible",
+      "initiation": "push-bidi",
+      "lifecycle": "replica_sync",
+      "merge": "profile_defined_convergent",
+      "name": "crdt",
+      "operations": [
+        "apply",
+        "bootstrap",
+        "read",
+        "sync"
+      ],
+      "ordering": "causal_per_origin",
+      "payload": "opaque-ops",
+      "position": "causal_vector",
+      "recovery": "anti_entropy",
+      "retention": "convergence_safe",
+      "writers": "multi-merge"
+    },
+    "log": {
+      "class": "engine",
+      "contract_version": "v1",
+      "core": "log",
+      "delivery": "stream",
+      "events": [
+        "append"
+      ],
+      "fixed_profile": {},
+      "history": "append-only",
+      "initiation": "pull|push",
+      "lifecycle": "mailbox_terminal",
+      "merge": "none",
+      "name": "log",
+      "operations": [
+        "append",
+        "read",
+        "subscribe"
+      ],
+      "ordering": "scalar_sequence",
+      "payload": "whole",
+      "position": "cursor",
+      "recovery": "expire_below_floor",
+      "retention": "bounded_records",
+      "writers": "source"
+    },
+    "snapshot_delta": {
+      "class": "profile",
+      "contract_version": "v1",
+      "core": "swmr",
+      "delivery": "stream",
+      "events": [
+        "delta",
+        "snapshot"
+      ],
+      "fixed_profile": {
+        "recovery": "expire"
+      },
+      "history": "reconstructible",
+      "initiation": "push",
+      "lifecycle": "mailbox_terminal",
+      "merge": "sequential_single_writer",
+      "name": "snapshot_delta",
+      "operations": [
+        "publish_delta",
+        "publish_snapshot",
+        "read",
+        "subscribe"
+      ],
+      "ordering": "scalar_epoch_sequence",
+      "payload": "delta",
+      "position": "epoch_cursor",
+      "recovery": "expire",
+      "retention": "snapshot_bounded_deltas",
+      "writers": "single"
+    },
+    "stream": {
+      "class": "engine",
+      "contract_version": "v1",
+      "core": "stream",
+      "delivery": "stream",
+      "events": [
+        "event"
+      ],
+      "fixed_profile": {},
+      "history": "none",
+      "initiation": "push",
+      "lifecycle": "live_terminal",
+      "merge": "none",
+      "name": "stream",
+      "operations": [
+        "publish",
+        "subscribe"
+      ],
+      "ordering": "live_session",
+      "payload": "whole-or-delta",
+      "position": "none",
+      "recovery": "none",
+      "retention": "none",
+      "writers": "source"
+    },
+    "swmr": {
+      "class": "engine",
+      "contract_version": "v1",
+      "core": "swmr",
+      "delivery": "stream",
+      "events": [
+        "delta",
+        "reset",
+        "snapshot"
+      ],
+      "fixed_profile": {},
+      "history": "reconstructible",
+      "initiation": "push",
+      "lifecycle": "mailbox_terminal",
+      "merge": "sequential_single_writer",
+      "name": "swmr",
+      "operations": [
+        "publish_delta",
+        "publish_snapshot",
+        "read",
+        "reset",
+        "subscribe"
+      ],
+      "ordering": "scalar_epoch_sequence",
+      "payload": "delta",
+      "position": "epoch_cursor",
+      "recovery": "in_band_reset_repair",
+      "retention": "snapshot_bounded_deltas",
+      "writers": "single"
+    },
+    "text_crdt": {
+      "class": "profile",
+      "contract_version": "v1",
+      "core": "crdt",
+      "delivery": "stream",
+      "events": [
+        "op",
+        "sync"
+      ],
+      "fixed_profile": {
+        "payload": "text_crdt.profile/v1"
+      },
+      "history": "reconstructible",
+      "initiation": "push-bidi",
+      "lifecycle": "replica_sync",
+      "merge": "stable_item_text",
+      "name": "text_crdt",
+      "operations": [
+        "bootstrap",
+        "delete",
+        "insert",
+        "read",
+        "sync"
+      ],
+      "ordering": "causal_per_origin",
+      "payload": "text-ops",
+      "position": "causal_vector",
+      "recovery": "anti_entropy",
+      "retention": "convergence_safe",
+      "writers": "multi-merge"
+    },
+    "unary": {
+      "class": "interaction",
+      "contract_version": "v1",
+      "core": null,
+      "delivery": "once",
+      "events": [
+        "value"
+      ],
+      "fixed_profile": {},
+      "history": "none",
+      "initiation": "pull",
+      "lifecycle": "request_response",
+      "merge": "none",
+      "name": "unary",
+      "operations": [
+        "call"
+      ],
+      "ordering": "none",
+      "payload": "whole",
+      "position": "none",
+      "recovery": "not_applicable",
+      "retention": "none",
+      "writers": "single"
+    },
+    "value": {
+      "class": "engine",
+      "contract_version": "v0",
+      "core": "value",
+      "delivery": "once",
+      "events": [
+        "value"
+      ],
+      "fixed_profile": {},
+      "history": "materialized",
+      "initiation": "pull|push",
+      "lifecycle": "persistent_register",
+      "merge": "attributed_lww",
+      "name": "value",
+      "operations": [
+        "read",
+        "set"
+      ],
+      "ordering": "lww_lamport_origin",
+      "payload": "whole-state",
+      "position": "op_identity",
+      "recovery": "materialized_read",
+      "retention": "materialized_winner",
+      "writers": "multi-attributed"
+    }
+  },
+  "version": 1
+}

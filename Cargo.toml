@@ -1,0 +1,18 @@
+[package]
+name = "gwz-transport"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "GPL-2.0-only"
+description = "Bounded taut message conversations for endpoint-owned Git transport"
+readme = "README.md"
+include = ["/Cargo.toml", "/src/**", "/protocol/**", "/LICENSE", "/LICENSE-taut", "/README.md"]
+publish = false
+
+[workspace]
+resolver = "2"
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"

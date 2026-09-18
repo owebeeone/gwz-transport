@@ -1,0 +1,6 @@
+{
+  "taut-proto": "0.9.1",
+  "rustfmt": "rustfmt from Rust 1.96.0",
+  "codec": "fail-closed",
+  "forward_compat": false
+}
