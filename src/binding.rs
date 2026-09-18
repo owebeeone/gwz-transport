@@ -95,6 +95,9 @@ fn failure(code: ErrorCode) -> Failure {
 
 impl EndpointConfig {
     pub fn accept(&self, message: &Envelope) -> Result<(Envelope, Binding), Failure> {
+        if !crate::policy::capabilities(&self.schemes, &self.policies) {
+            return Err(failure(ErrorCode::UnsupportedOperation));
+        }
         codec::admit(message).map_err(|_| failure(ErrorCode::InvalidRequest))?;
         let bind = message
             .bind
@@ -107,18 +110,20 @@ impl EndpointConfig {
             return Err(failure(ErrorCode::UnsupportedOperation));
         }
         codec::validate_limits(&self.limits).map_err(|_| failure(ErrorCode::InvalidRequest))?;
-        let schemes: Vec<_> = self
+        let mut schemes: Vec<_> = self
             .schemes
             .iter()
             .copied()
             .filter(|s| bind.schemes.contains(s))
             .collect();
-        let policies: Vec<_> = self
+        let mut policies: Vec<_> = self
             .policies
             .iter()
             .copied()
             .filter(|p| bind.policies.contains(p))
             .collect();
+        schemes.retain(|s| policies.iter().any(|p| crate::policy::supports(*s, *p)));
+        policies.retain(|p| schemes.iter().any(|s| crate::policy::supports(*s, *p)));
         if schemes.is_empty() || policies.is_empty() {
             return Err(failure(ErrorCode::UnsupportedOperation));
         }
@@ -183,7 +188,7 @@ pub fn verify(offer: &Envelope, reply: &Envelope) -> Result<Binding, Failure> {
     })
 }
 
-fn usable(limits: &Limits) -> Result<(), Failure> {
+pub(crate) fn usable(limits: &Limits) -> Result<(), Failure> {
     // Enough space for one worst-case frame plus its decode reservation and
     // independent control progress. Smaller offers are refused, never enlarged.
     if limits.encoded_frame < 4096

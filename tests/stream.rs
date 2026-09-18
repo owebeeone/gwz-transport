@@ -225,3 +225,83 @@ fn premature_close_and_data_after_eof_fail_closed() {
         assert_eq!(b.read(&mut [0]), Err(Error::Protocol));
     }
 }
+
+#[test]
+fn typed_failure_code_and_effect_survive_prefixes_and_failed_close() {
+    for code in [
+        ErrorCode::InvalidRequest,
+        ErrorCode::Authentication,
+        ErrorCode::Trust,
+        ErrorCode::Io,
+        ErrorCode::Protocol,
+    ] {
+        for effect in [Effect::None, Effect::Possible] {
+            let expected = Error::PeerFailed { code, effect };
+            let (mut a, mut b) = pair(8, 8, 4);
+            a.write(b"data").unwrap();
+            assert!(transfer(&mut a, &mut b));
+            b.receive(Envelope {
+                version: 1,
+                session_id: "memory-session".into(),
+                stream_id: 1,
+                kind: MessageKind::Failed,
+                failed: Some(Failure { code, effect }),
+                ..Default::default()
+            })
+            .unwrap();
+            let mut bytes = [0; 8];
+            assert_eq!(b.read(&mut bytes), Ok(4));
+            assert_eq!(&bytes[..4], b"data");
+            assert_eq!(b.read(&mut bytes), Err(expected));
+            assert_eq!(b.write(b"more"), Err(expected));
+
+            let (mut a, mut b) = pair(8, 8, 4);
+            b.write(b"data").unwrap();
+            b.end_write().unwrap();
+            while transfer(&mut b, &mut a) {}
+            assert_eq!(a.read(&mut bytes), Ok(4));
+            assert_eq!(&bytes[..4], b"data");
+            // Close explicitly gives up unread response data; consume the prefix
+            // first, then verify the exact failure remains observable afterward.
+            a.start_close().unwrap();
+            while transfer(&mut a, &mut b) {}
+            a.receive(Envelope {
+                version: 1,
+                session_id: "memory-session".into(),
+                stream_id: 1,
+                kind: MessageKind::Closed,
+                closed: Some(Closed {
+                    disposition: Disposition::Discarded,
+                    facts: Facts::default(),
+                    unread_response_discarded: false,
+                    failure: Some(Failure { code, effect }),
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(a.close_result(), Err(expected));
+            assert_eq!(a.read(&mut bytes), Err(expected));
+        }
+    }
+}
+
+#[test]
+fn cancellation_preserves_supported_reasons_and_refuses_unrepresentable_ones() {
+    for (reason, expected) in [
+        (ErrorCode::Cancelled, Error::Cancelled),
+        (ErrorCode::Timeout, Error::Timeout),
+        (ErrorCode::Io, Error::Protocol),
+    ] {
+        let (_, mut b) = pair(8, 8, 4);
+        let result = b.receive(Envelope {
+            version: 1,
+            session_id: "memory-session".into(),
+            stream_id: 1,
+            kind: MessageKind::Cancel,
+            cancel: Some(Cancel { reason }),
+            ..Default::default()
+        });
+        assert_eq!(result.is_ok(), reason != ErrorCode::Io);
+        assert_eq!(b.read(&mut [0]), Err(expected));
+    }
+}

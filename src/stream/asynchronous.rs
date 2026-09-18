@@ -13,8 +13,12 @@ use std::{
 
 struct Runtime {
     machine: StreamMachine,
-    waiters: BTreeMap<u64, Waker>,
+    waiters: BTreeMap<u64, Registration>,
     serial: u64,
+}
+struct Registration {
+    waker: Waker,
+    dispatcher: bool,
 }
 struct Shared {
     runtime: Mutex<Runtime>,
@@ -27,7 +31,11 @@ impl Shared {
             let before = state.machine.revision;
             let result = action(&mut state.machine);
             let wakes: Vec<_> = if before != state.machine.revision {
-                state.waiters.values().cloned().collect()
+                state
+                    .waiters
+                    .values()
+                    .map(|entry| entry.waker.clone())
+                    .collect()
             } else {
                 Vec::new()
             };
@@ -44,12 +52,14 @@ impl Shared {
 struct Waiter {
     shared: Arc<Shared>,
     id: Option<u64>,
+    dispatcher: bool,
 }
 impl Waiter {
     fn new(shared: &Arc<Shared>) -> Self {
         Self {
             shared: shared.clone(),
             id: None,
+            dispatcher: false,
         }
     }
     fn poll<T>(
@@ -66,9 +76,17 @@ impl Waiter {
                 .is_err_and(|error| *error == Error::WouldBlock)
             {
                 if self.id.is_none() {
-                    if state.waiters.len() >= state.machine.config.max_waiters
-                        || state.serial == u64::MAX
-                    {
+                    let occupied = state
+                        .waiters
+                        .values()
+                        .filter(|entry| entry.dispatcher == self.dispatcher)
+                        .count();
+                    let limit = if self.dispatcher {
+                        1
+                    } else {
+                        state.machine.config.max_waiters
+                    };
+                    if occupied >= limit || state.serial == u64::MAX {
                         result = Err(Error::WaiterCapacity);
                     } else {
                         state.serial += 1;
@@ -76,7 +94,13 @@ impl Waiter {
                     }
                 }
                 if let Some(id) = self.id {
-                    state.waiters.insert(id, cx.waker().clone());
+                    state.waiters.insert(
+                        id,
+                        Registration {
+                            waker: cx.waker().clone(),
+                            dispatcher: self.dispatcher,
+                        },
+                    );
                 }
             } else if let Some(id) = self.id.take() {
                 state.waiters.remove(&id);
@@ -86,7 +110,7 @@ impl Waiter {
                     .waiters
                     .iter()
                     .filter(|(id, _)| Some(**id) != self.id)
-                    .map(|(_, waker)| waker.clone())
+                    .map(|(_, entry)| entry.waker.clone())
                     .collect()
             } else {
                 Vec::new()
@@ -215,6 +239,7 @@ impl Drop for Stream {
 impl MessageEndpoint {
     pub async fn next_message(&self) -> Result<Option<Envelope>, Error> {
         let mut waiter = Waiter::new(&self.shared);
+        waiter.dispatcher = true;
         poll_fn(|cx| {
             waiter.poll(cx, |machine| {
                 if let Some(message) = machine.next_message() {

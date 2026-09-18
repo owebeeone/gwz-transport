@@ -21,7 +21,8 @@ impl StreamMachine {
             return Err(Error::Protocol);
         }
         // Admission inspects the typed value without serialization or copying it.
-        crate::codec::admit(&message).map_err(|_| Error::Protocol)?;
+        crate::codec::admit_limited(&message, &self.config.receive_limits)
+            .map_err(|_| Error::Protocol)?;
         match message.kind {
             MessageKind::Data => {
                 let data = message.data.ok_or(Error::Protocol)?;
@@ -113,8 +114,14 @@ impl StreamMachine {
                     return Err(Error::Protocol);
                 }
                 let closed = message.closed.ok_or(Error::Protocol)?;
-                if closed.failure.is_some() {
-                    self.fail(Error::PeerFailed, false);
+                if let Some(failure) = closed.failure {
+                    self.fail(
+                        Error::PeerFailed {
+                            code: failure.code,
+                            effect: failure.effect,
+                        },
+                        false,
+                    );
                 } else {
                     self.completed = Some(CloseResult {
                         disposition: closed.disposition,
@@ -136,7 +143,14 @@ impl StreamMachine {
                 );
             }
             MessageKind::Failed => {
-                self.fail(Error::PeerFailed, false);
+                let failure = message.failed.ok_or(Error::Protocol)?;
+                self.fail(
+                    Error::PeerFailed {
+                        code: failure.code,
+                        effect: failure.effect,
+                    },
+                    false,
+                );
             }
             _ => {
                 return Err(Error::Protocol);

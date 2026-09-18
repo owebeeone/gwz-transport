@@ -39,9 +39,16 @@ a stream's lifetime and initialize it before the first write.
 `StreamMachine` exposes the same deterministic transitions with `WouldBlock`
 results for custom adapters and testing. The default limits are 64 KiB each for
 send buffer and receive window, 16 KiB per payload, 100 ms coalescing from the
-first byte, a 5 second close deadline, and 64 registered async waiters. Set
+first byte, a 5 second close deadline, and 64 registered application waiters.
+One additional wake slot is reserved for the outgoing message dispatcher, so
+application concurrency cannot evict the control path. Set
 `peer_receive_window` to the peer's advertised window; set `max_payload` to a
-common negotiated cap. Host code must validate session/stream ownership before
+common negotiated cap. Supply `receive_limits` and `peer_limits` from negotiation;
+construction refuses buffer/window/payload settings that expand those limits.
+Typed ingress uses the receiver's policy, and caller-supplied close facts are
+admitted against the peer's policy before the crate retains or clones them.
+Invalid local close facts return `Protocol` without completing or failing the
+stream; the host can retry with valid facts. Host code must validate session/stream ownership before
 routing messages. Buffer limits apply per stream; the host owns aggregate limits.
 
 Credit is returned only after reads or the initiator's explicit close drain.
@@ -53,6 +60,18 @@ reverse direction. Close drains/discards unread response data and exposes that
 fact in its result. The endpoint host calls `complete_close` only after backend
 cleanup has proved whether a connection is reusable. This crate does not infer
 that health or implement pooling, SSH, HTTPS or credentials.
+
+Peer failures expose their exact `ErrorCode` and `Effect` through
+`Error::PeerFailed { code, effect }`, after any received byte prefix. `Cancel`
+supports `Cancelled` and `Timeout`; other reasons are invalid messages. Local
+protocol failures and endpoint timeouts emit `Failed` with `Effect::Possible`;
+delivery loss remains `CarrierLost` and cannot imply a retry-safe outcome.
+
+Capability lists mean only pairs allowed by the central policy relation:
+SSH ambient uses ambient identity, SSH explicit uses an explicit key, HTTPS
+anonymous uses credentials-disabled identity, and HTTPS gh uses ambient endpoint
+identity. All other combinations are rejected before effects. A binding cannot
+advertise a scheme or policy without a compatible partner in its capability set.
 
 ## Reproducible randomized tests
 

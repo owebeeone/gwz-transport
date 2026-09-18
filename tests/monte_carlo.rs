@@ -301,7 +301,15 @@ impl Case {
 }
 
 fn run_case(seed: u64, run_seed: u64, index: usize) -> (u64, Coverage) {
-    let mut case = Case::new(seed);
+    let mut case = match catch_unwind(|| Case::new(seed)) {
+        Ok(case) => case,
+        Err(failure) => {
+            eprintln!(
+                "generator={GENERATOR} run_seed={run_seed:#018x} case={index} case_seed={seed:#018x} failed during construction\nReplay from gwz-transport:\nGWZ_TRANSPORT_MC_CASE_SEED={seed:#018x} cargo test --locked --test monte_carlo seeded_message_streams -- --exact --nocapture"
+            );
+            std::panic::resume_unwind(failure);
+        }
+    };
     let result = catch_unwind(AssertUnwindSafe(|| case.run()));
     if let Err(failure) = result {
         eprintln!(
@@ -323,7 +331,7 @@ fn campaign(seed: u64, count: usize) -> Coverage {
             assert_eq!(
                 result,
                 run_case(case_seed, seed, index),
-                "same seed must reproduce trace and coverage"
+                "same seed must reproduce trace and coverage; generator={GENERATOR} run_seed={seed:#018x} case={index}; replay: GWZ_TRANSPORT_MC_CASE_SEED={case_seed:#018x} cargo test --locked --test monte_carlo seeded_message_streams -- --exact --nocapture"
             );
         }
         coverage.add(&result.1);

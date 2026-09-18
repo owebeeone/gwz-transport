@@ -91,3 +91,51 @@ fn bootstrap_unknown_fields_cannot_use_stream_allocation_budget() {
     }
     assert!(codec::decode(&cbor::encode(&tree)).is_err());
 }
+
+#[test]
+fn typed_and_encoded_admission_agree_at_depth_entry_size_and_allocation_boundaries() {
+    let messages = [
+        data(vec![1, 2, 3]),
+        gwz_transport::binding::offer("depth", EndpointRole::Local),
+    ];
+    for message in messages {
+        let bytes = codec::encode(&message).unwrap();
+        for axis in 0..4 {
+            let end = match axis {
+                0 => 17,
+                1 => 100,
+                2 => bytes.len() + 2,
+                _ => 20000,
+            };
+            let stride = if axis == 3 { 137 } else { 1 };
+            for limit in (1..end).step_by(stride) {
+                let mut limits = gwz_transport::binding::default_limits();
+                match axis {
+                    0 => {
+                        limits.nesting = limit as i64;
+                    }
+                    1 => {
+                        limits.collection_entries = limit as i64;
+                    }
+                    2 => {
+                        limits.encoded_frame = limit as i64;
+                    }
+                    _ => {
+                        limits.decode_allocation = limit as i64;
+                    }
+                }
+                let admitted = codec::admit_limited(&message, &limits).is_ok();
+                assert_eq!(
+                    admitted,
+                    codec::decode_limited(&bytes, &limits).is_ok(),
+                    "axis={axis}, limit={limit}"
+                );
+                assert_eq!(
+                    admitted,
+                    codec::encode_limited(&message, &limits).is_ok(),
+                    "axis={axis}, limit={limit}"
+                );
+            }
+        }
+    }
+}

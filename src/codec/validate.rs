@@ -65,7 +65,7 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
         return Err(Error::InvalidMessage);
     }
     if let Some(bind) = &value.bind {
-        if bind.versions.is_empty() || bind.schemes.is_empty() || bind.policies.is_empty() {
+        if bind.versions.is_empty() || !crate::policy::capabilities(&bind.schemes, &bind.policies) {
             return Err(Error::InvalidMessage);
         }
         limits(&bind.receive_limits)?;
@@ -74,8 +74,7 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
         if bound.version != 1
             || bound.endpoint_id.is_empty()
             || bound.trust_owner.is_empty()
-            || bound.schemes.is_empty()
-            || bound.policies.is_empty()
+            || !crate::policy::capabilities(&bound.schemes, &bound.policies)
         {
             return Err(Error::InvalidMessage);
         }
@@ -95,19 +94,7 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
         } else if identity.key_path.is_some() || identity.path_base.is_some() {
             return Err(Error::InvalidMessage);
         }
-        if open.destination.scheme == Scheme::Https
-            && (!matches!(open.policy, AuthPolicy::Gh | AuthPolicy::Anonymous)
-                || identity.mode == IdentityMode::ExplicitKey)
-        {
-            return Err(Error::InvalidMessage);
-        }
-        if open.destination.scheme == Scheme::Ssh
-            && (!matches!(
-                open.policy,
-                AuthPolicy::SshAmbient | AuthPolicy::SshExplicit
-            ) || (open.policy == AuthPolicy::SshExplicit)
-                != (identity.mode == IdentityMode::ExplicitKey))
-        {
+        if !crate::policy::allows(open.destination.scheme, open.policy, identity.mode) {
             return Err(Error::InvalidMessage);
         }
         let d = &open.deadlines;
@@ -149,6 +136,13 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
             .is_some_and(|v| v.offset < 0 || v.barrier_id <= 0)
         || value.end_write.as_ref().is_some_and(|v| v.final_offset < 0)
         || value.close.as_ref().is_some_and(|v| v.final_offset < 0)
+    {
+        return Err(Error::InvalidMessage);
+    }
+    if value
+        .cancel
+        .as_ref()
+        .is_some_and(|cancel| !matches!(cancel.reason, ErrorCode::Cancelled | ErrorCode::Timeout))
     {
         return Err(Error::InvalidMessage);
     }

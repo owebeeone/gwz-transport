@@ -238,12 +238,18 @@ impl StreamMachine {
             return Err(Error::WouldBlock);
         }
         if self.close_pending.is_none() {
-            self.close_pending = Some(Closed {
+            let mut message = self.envelope(MessageKind::Closed);
+            message.closed = Some(Closed {
                 disposition,
                 facts,
                 unread_response_discarded: self.discarded,
                 failure: None,
             });
+            // Validate before retaining or cloning caller-owned metadata. A
+            // rejected local construction leaves cleanup retryable.
+            crate::codec::admit_limited(&message, &self.config.peer_limits)
+                .map_err(|_| Error::Protocol)?;
+            self.close_pending = message.closed;
             self.touch();
         }
         Ok(())
