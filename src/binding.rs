@@ -67,7 +67,8 @@ impl Binding {
 
     /// Must precede lease allocation or any endpoint authority/network effect.
     pub fn check_open(&self, message: &Envelope) -> Result<(), Failure> {
-        codec::admit(message).map_err(|_| failure(ErrorCode::InvalidRequest))?;
+        codec::admit_limited(message, &self.bound.receive_limits)
+            .map_err(|_| failure(ErrorCode::InvalidRequest))?;
         let open = message
             .open
             .as_ref()

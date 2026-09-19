@@ -179,3 +179,58 @@ fn native_network_timeout_values_agree_for_typed_and_encoded_open_admission() {
         }
     }
 }
+
+#[test]
+fn open_binding_enforces_negotiated_metadata_before_effects() {
+    let mut limits = binding::default_limits();
+    limits.metadata_bytes = 256;
+    let endpoint = EndpointConfig {
+        endpoint_id: "endpoint".into(),
+        role: EndpointRole::Local,
+        schemes: vec![Scheme::Ssh],
+        policies: vec![AuthPolicy::SshExplicit],
+        limits,
+        trust_owner: "account".into(),
+    };
+    let (_, binding) = endpoint
+        .accept(&binding::offer("policy", EndpointRole::Local))
+        .unwrap();
+    for field in 0..3 {
+        for length in [256, 257] {
+            let mut message = open(
+                Scheme::Ssh,
+                AuthPolicy::SshExplicit,
+                IdentityMode::ExplicitKey,
+            );
+            let open = message.open.as_mut().unwrap();
+            open.receive_limits = binding.limits().clone();
+            let value = "x".repeat(length);
+            match field {
+                0 => {
+                    open.operation_id = value;
+                }
+                1 => {
+                    open.destination.path = value;
+                }
+                _ => {
+                    open.identity.key_path = Some(value);
+                }
+            }
+            assert!(codec::admit(&message).is_ok(), "default cap admits fixture");
+            assert_eq!(
+                codec::admit_limited(&message, binding.limits()).is_ok(),
+                length == 256
+            );
+            let result = binding.check_open(&message);
+            assert_eq!(
+                result.is_ok(),
+                length == 256,
+                "field={field} length={length}"
+            );
+            if let Err(failure) = result {
+                assert_eq!(failure.code, ErrorCode::InvalidRequest);
+                assert_eq!(failure.effect, Effect::None);
+            }
+        }
+    }
+}

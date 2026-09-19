@@ -224,7 +224,8 @@ or an effect-free Failure for the host to carry as BindRejected. The initiator
 uses `binding::verify(&offer, &reply)` before accepting the binding.
 
 Before credentials, connection allocation or network work, call
-`Binding::check_open(&message)`. The host also checks deadline tightening against
+`Binding::check_open(&message)`, which admits the Open under the installed
+binding's negotiated receiver limits. The host also checks deadline tightening against
 its captured endpoint policy before effects; Binding does not contain native
 timeout settings. It validates ownership and unique stream IDs in that session,
 executes only an admitted Open, and sends Opened or

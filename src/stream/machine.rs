@@ -292,7 +292,6 @@ impl StreamMachine {
         if before.state == state {
             return Ok(());
         }
-        self.touch();
         if self.io.due(self.now) {
             self.fail(Error::Timeout, true);
             return Err(Error::Timeout);
@@ -313,10 +312,6 @@ impl StreamMachine {
         self.expire_io_if_due()?;
         self.io
             .progress(self.now, bytes, self.config.io_timeout_ms)?;
-        if bytes == 0 {
-            return Ok(());
-        }
-        self.touch();
         Ok(())
     }
 

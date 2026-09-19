@@ -7,6 +7,8 @@ impl PoolMachine {
         if now_ms < self.now {
             return;
         }
+        let previous_now = self.now;
+        let before_revision = self.revision;
         self.now = now_ms;
         let expired: Vec<_> = self
             .requests
@@ -48,8 +50,30 @@ impl PoolMachine {
             self.start_closing(id, CloseReason::IdleExpired);
         }
         self.schedule();
-        // Time may make cleanup actions runnable even without a state transition.
-        self.touch();
+        // A sent cleanup command becomes abortable at its deadline. Preserve
+        // that wakeup without waking on ordinary clock bookkeeping.
+        if self.revision == before_revision
+            && previous_now < self.now
+            && self.cleanup_deadline_crossed(previous_now, self.now)
+        {
+            self.touch();
+        }
+    }
+    fn cleanup_deadline_crossed(&self, previous: u64, now: u64) -> bool {
+        self.entries.values().any(|entry| {
+            let cleanup = match &entry.state {
+                State::Opening {
+                    cancel: Some(cleanup),
+                    ..
+                }
+                | State::Closing { cleanup, .. } => cleanup,
+                _ => return false,
+            };
+            cleanup.sent
+                && !cleanup.aborted
+                && previous < cleanup.deadline
+                && now >= cleanup.deadline
+        })
     }
     pub fn next_deadline(&self) -> Option<u64> {
         let queue = self
@@ -113,7 +137,6 @@ impl PoolMachine {
             until: self.now.saturating_add(*interaction_ms),
             remaining,
         };
-        self.touch();
         Ok(())
     }
     pub fn end_interaction(&mut self, connection: ConnectionId) -> Result<(), Error> {
@@ -136,7 +159,6 @@ impl PoolMachine {
         *interaction_ms = until - self.now;
         *clock =
             ConnectClock::Network(remaining.map(|remaining| self.now.saturating_add(remaining)));
-        self.touch();
         Ok(())
     }
 }
