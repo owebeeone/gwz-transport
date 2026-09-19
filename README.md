@@ -59,7 +59,7 @@ buffer. Flush is not confirmation of a Git operation. End-write preserves the
 reverse direction. Close drains/discards unread response data and exposes that
 fact in its result. The endpoint host calls `complete_close` only after backend
 cleanup has proved whether a connection is reusable. This crate does not infer
-that health or implement pooling, SSH, HTTPS or credentials.
+that health or implement SSH, HTTPS or credentials.
 
 Peer failures expose their exact `ErrorCode` and `Effect` through
 `Error::PeerFailed { code, effect }`, after any received byte prefix. `Cancel`
@@ -72,6 +72,65 @@ SSH ambient uses ambient identity, SSH explicit uses an explicit key, HTTPS
 anonymous uses credentials-disabled identity, and HTTPS gh uses ambient endpoint
 identity. All other combinations are rejected before effects. A binding cannot
 advertise a scheme or policy without a compatible partner in its capability set.
+
+## Connection pool API
+
+`pool::Pool::new(Config)` returns a cloneable `Pool` and one `PoolDriver`.
+`checkout(Request)` returns a cancellable future for an exclusive `Lease`.
+Clones share capacity and resources. The host pairs the lease with an exchange;
+stream clones share that exchange, not extra pool allocations. Once backend
+cleanup proves health, explicitly consume the lease with
+`release(Disposition::Reusable)`. Dropping a lease discards its connection;
+dropping a pending or ready-but-unclaimed checkout cancels it. The
+`tests/pool_stream.rs` fake endpoint demonstrates the stream/lease ownership seam.
+`PoolMachine` offers the same transitions for deterministic hosts and tests.
+
+Pool keys contain scheme, SSH username, configured host and effective port.
+Repositories are not keys. The endpoint resolves explicit SSH identity before
+each checkout and supplies a current proof; an invalid or missing identity must
+never reach the pool. Ambient and explicit identities have different reuse
+eligibility within the same key. `connected` supplies the proven identity or
+`None` for a single-use resource. HTTPS pooling carries no account identity:
+the endpoint applies the permitted anonymous/gh authentication policy per request.
+
+The driver receives local `Connect`, `CancelConnect`, `AbortConnect`, `Close` and
+`Abort` actions. These are host API commands, not new wire messages. Execute
+physical work outside the pool, then call `connected`/`closed` to acknowledge its
+actual completion. Cancelled connectors and closing resources retain capacity;
+late success after cancellation must close. A failed `connected` acknowledgment
+means the connector has already disposed any partial resource. Invalid/stale
+callbacks never adopt a resource: the caller must dispose it. There is no retry
+or replay of a failed exchange inside the pool.
+
+Limits default to eight connections per key and eight per host across users,
+ports and schemes, plus 256 per endpoint and 1,024 outstanding requests.
+Opening, idle, leased and closing all count. Ready and failed unclaimed results
+still occupy request slots. Construction fixes these ceilings; operation fan-out
+limits cannot resize the pool. Compatible waiters are served in order, while an
+incompatible head does not prevent eligible reuse. Incompatible idle resources
+can be retired to make room for a new identity.
+
+Idle expiry defaults to 60 seconds from healthy release. Other defaults are
+30 seconds for allocation, 10 seconds of connect-network time, 120 seconds of
+helper interaction and 5 seconds for cleanup. Requests may shorten the first
+three non-idle budgets. `begin_interaction`/`end_interaction` pause network time;
+multiple interactions share one total allowance. None of these is an active
+stream read/write timeout.
+
+Initialize the driver clock before the first checkout and supply monotonic
+milliseconds to `advance`. The host must drive clock ticks independently of
+commands and service deadlines even while `next_action` is pending.
+`next_deadline` is a snapshot, not a timer subscription; concurrent checkouts or
+releases can introduce earlier deadlines. A host may use periodic ticks, or
+recompute timers whenever it mutates the pool. The crate owns no timer task.
+An idle connection is never expired while leased. `cancel_owner` cancels one
+operation/carrier's requests and active leases, preserving idle resources and
+other owners. `shutdown` or dropping the final Pool owner refuses new requests
+and initiates cleanup. At the cleanup deadline the host must promptly execute
+abort actions; `shutdown_complete` stays false until actual disposal is
+acknowledged. Before dropping its driver, the host must cancel connectors and
+dispose physical resources itself. Driver loss wakes pending callers and
+invalidates active leases.
 
 ## Reproducible randomized tests
 
@@ -96,3 +155,19 @@ before execution. Pin the source revision with any recorded seed: generator
 changes can change the meaning of a seed. Turn discovered failures into named
 deterministic regression tests as well as retaining their seeds. This approach
 follows the testkit in `sdax-rs`; it adds no dependency on that repository.
+
+Pool tests use fake connections and a controlled clock. The default
+`cargo test --locked --test pool_random` checks 2,000 seeded lifecycle schedules
+against a separate resource ledger: capacity including in-flight cleanup,
+identity eligibility, exclusive leases, reuse, cancellation, helper budgets and
+complete teardown. Generator `gwz-transport-pool-v1` normalizes diagnostic IDs
+for exact replay across pool instances. Every sixteenth case repeats its trace;
+the fixed suite has coverage floors for all ten event classes.
+
+```sh
+GWZ_POOL_MC_CASE_SEED=0x1234 cargo test --locked --test pool_random seeded_pool_lifecycles -- --exact --nocapture
+GWZ_POOL_MC_SEED=0x202609195eed cargo test --locked --release --test pool_random extended_pool_lifecycles -- --ignored --exact --nocapture
+```
+
+`GWZ_POOL_MC_CASES` changes the campaign size; the extended default is 50,000.
+Failures print configuration, clock, step, recent events and a replay command.

@@ -1,5 +1,5 @@
 //! Shared taut protocol and bounded streams over host-delivered discrete messages.
-//! No physical I/O, network adapter, pool or executor is implemented here.
+//! No physical I/O, network adapter or executor is implemented here.
 extern crate alloc;
 
 #[allow(clippy::collapsible_if)] // Pinned upstream codec; do not hand-edit.
@@ -15,4 +15,5 @@ pub mod binding;
 mod budget;
 pub mod codec;
 mod policy;
+pub mod pool;
 pub mod stream;
