@@ -76,11 +76,20 @@ impl PoolMachine {
             self.touch();
         }
     }
-    pub fn cancel_owner(&mut self, owner: &str) {
+    /// Cancel exactly one operation within its fresh binding session.
+    pub fn cancel_operation(&mut self, owner: &Owner) {
+        self.cancel_matching(|candidate| candidate == owner);
+    }
+    /// After the host stops admission for this lost session, cancel all of its
+    /// outstanding work. Idle resources have no session owner and survive.
+    pub fn cancel_session(&mut self, session: &str) {
+        self.cancel_matching(|candidate| candidate.session == session);
+    }
+    fn cancel_matching(&mut self, matches_owner: impl Fn(&Owner) -> bool) {
         let requests: Vec<_> = self
             .requests
             .iter()
-            .filter_map(|(id, p)| (p.request.owner == owner).then_some(*id))
+            .filter_map(|(id, p)| matches_owner(&p.request.owner).then_some(*id))
             .collect();
         for id in requests {
             let _ = self.fail_request(id, Error::Cancelled, CloseReason::Cancelled);
@@ -89,7 +98,7 @@ impl PoolMachine {
             .entries
             .iter()
             .filter_map(|(id, entry)| {
-                (entry.owner.as_deref() == Some(owner)
+                (entry.owner.as_ref().is_some_and(&matches_owner)
                     && matches!(entry.state, State::Leased { .. }))
                 .then_some(*id)
             })
@@ -139,6 +148,21 @@ impl PoolMachine {
             _ => {
                 return Err(Error::WrongState);
             }
+        }
+        self.entries.remove(&connection);
+        self.schedule();
+        self.touch();
+        Ok(())
+    }
+    /// The host observed spontaneous idle loss and has disposed the resource.
+    /// A concurrent eviction/expiry may already have marked it Closing; actual
+    /// disposal still frees capacity without waiting for a redundant command.
+    /// If checkout won first, WrongState leaves the exclusive lease untouched:
+    /// route the I/O failure to that exchange and finish its lease cleanup.
+    pub fn idle_closed(&mut self, connection: ConnectionId) -> Result<(), Error> {
+        let entry = self.entries.get(&connection).ok_or(Error::Stale)?;
+        if !matches!(entry.state, State::Idle { .. } | State::Closing { .. }) {
+            return Err(Error::WrongState);
         }
         self.entries.remove(&connection);
         self.schedule();

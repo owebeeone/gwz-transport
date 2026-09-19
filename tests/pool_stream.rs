@@ -12,7 +12,7 @@ fn transfer(from: &mut StreamMachine, to: &mut StreamMachine) {
 #[test]
 fn endpoint_returns_lease_only_after_exchange_cleanup() {
     let mut pool = pool::PoolMachine::new(pool::Config {
-        per_key: 1,
+        per_user_host: 1,
         ..Default::default()
     })
     .unwrap();
@@ -20,7 +20,7 @@ fn endpoint_returns_lease_only_after_exchange_cleanup() {
         pool::Request::new(
             pool::Key::ssh("git", "host", 22),
             pool::Identity::Ambient,
-            "carrier",
+            pool::Owner::new("carrier", "operation"),
         )
     };
     let first = pool.request(request()).unwrap();

@@ -13,7 +13,7 @@ struct Resource {
     closing: bool,
 }
 #[derive(Default, Debug, PartialEq, Eq)]
-pub struct Coverage(pub [usize; 10]);
+pub struct Coverage(pub [usize; 12]);
 impl Coverage {
     pub fn add(&mut self, other: &Self) {
         for (a, b) in self.0.iter_mut().zip(other.0) {
@@ -22,9 +22,11 @@ impl Coverage {
     }
 }
 // Coverage: connect, reuse, lease, cancel, late success, close, abort,
-// queue block, interaction, timeout.
+// queue block, interaction, timeout, idle loss, session cancellation.
 pub struct Case {
     random: Random,
+    sessions: [usize; 2],
+    next_session: usize,
     pub config: Config,
     pool: PoolMachine,
     requests: Vec<(RequestId, Request)>,
@@ -42,7 +44,7 @@ impl Case {
     pub fn new(seed: u64) -> Self {
         let mut random = Random(seed);
         let config = Config {
-            per_key: 1 + random.below(3),
+            per_user_host: 1 + random.below(3),
             per_host: 1 + random.below(4),
             total: 1 + random.below(8),
             max_requests: 1 + random.below(16),
@@ -56,6 +58,8 @@ impl Case {
             pool: PoolMachine::new(config.clone()).unwrap(),
             config,
             random,
+            sessions: [0, 1],
+            next_session: 2,
             requests: Vec::new(),
             leases: Vec::new(),
             resources: BTreeMap::new(),
@@ -95,7 +99,14 @@ impl Case {
         } else {
             Identity::Ambient
         };
-        let request = Request::new(key, identity, format!("owner{}", self.random.below(2)));
+        let request = Request::new(
+            key,
+            identity,
+            Owner::new(
+                format!("session{}", self.sessions[self.random.below(2)]),
+                format!("operation{}", self.random.below(2)),
+            ),
+        );
         let result = self.pool.request(request.clone());
         self.record(format!(
             "request {request:?}: {:?}",
@@ -322,6 +333,30 @@ impl Case {
             self.coverage.0[8] += 1;
         }
     }
+    fn idle_loss(&mut self) {
+        let candidates: Vec<_> = self
+            .resources
+            .iter()
+            .filter_map(|(id, r)| r.settled.then_some(*id))
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        let id = candidates[self.random.below(candidates.len())];
+        let result = self.pool.idle_closed(id);
+        self.record(format!("idle-loss {} {result:?}", id.sequence()));
+        match result {
+            Ok(()) => {
+                self.resources.remove(&id);
+                self.coverage.0[10] += 1;
+            }
+            // Delayed idle observations must not steal a current lease.
+            Err(Error::WrongState) => {}
+            error => {
+                panic!("unexpected idle-loss result {error:?}");
+            }
+        }
+    }
     fn check(&self) {
         let counts = self.pool.counts();
         assert!(counts.total() <= self.config.total);
@@ -339,11 +374,15 @@ impl Case {
             let key = self
                 .resources
                 .values()
-                .filter(|r| r.key == resource.key)
+                .filter(|r| {
+                    r.key.host == resource.key.host && r.key.username == resource.key.username
+                })
                 .count();
-            assert!(host <= self.config.per_host && key <= self.config.per_key);
+            assert!(host <= self.config.per_host && key <= self.config.per_user_host);
             assert!(self.pool.counts_for_host(&resource.key.host).total() <= self.config.per_host);
-            assert!(self.pool.counts_for_key(&resource.key).total() <= self.config.per_key);
+            assert!(
+                self.pool.counts_for_user_host(&resource.key).total() <= self.config.per_user_host
+            );
         }
         let mut live = BTreeSet::new();
         for lease in &self.leases {
@@ -357,7 +396,7 @@ impl Case {
     pub fn run(&mut self) {
         for step in 0..600 {
             self.step = step;
-            match self.random.below(20) {
+            match self.random.below(22) {
                 0..=4 => {
                     self.request();
                 }
@@ -380,9 +419,30 @@ impl Case {
                     self.interaction();
                 }
                 17 => {
-                    let owner = format!("owner{}", self.random.below(2));
-                    self.record(format!("cancel-owner {owner}"));
-                    self.pool.cancel_owner(&owner);
+                    let session = self.random.below(self.next_session);
+                    let owner = Owner::new(
+                        format!("session{session}"),
+                        format!("operation{}", self.random.below(2)),
+                    );
+                    if self.random.below(2) == 0 {
+                        self.record(format!("cancel-session {}", owner.session));
+                        self.pool.cancel_session(&owner.session);
+                        self.coverage.0[11] += 1;
+                        // Future requests use a fresh binding ID; delayed old
+                        // cancellations remain possible without ID reuse.
+                        for current in &mut self.sessions {
+                            if *current == session {
+                                *current = self.next_session;
+                                self.next_session += 1;
+                            }
+                        }
+                    } else {
+                        self.record(format!("cancel-operation {owner:?}"));
+                        self.pool.cancel_operation(&owner);
+                    }
+                }
+                18 => {
+                    self.idle_loss();
                 }
                 _ => {
                     self.clock += self.random.below(41) as u64;

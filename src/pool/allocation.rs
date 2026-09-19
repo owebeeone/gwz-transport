@@ -51,7 +51,7 @@ impl PoolMachine {
             }
             let key = &pending.request.key;
             if self.entries.len() >= self.config.total
-                || self.counts_for_key(key).total() >= self.config.per_key
+                || self.counts_for_user_host(key).total() >= self.config.per_user_host
                 || self.counts_for_host(&key.host).total() >= self.config.per_host
             {
                 continue;
@@ -102,14 +102,15 @@ impl PoolMachine {
                 continue;
             }
             let key = &pending.request.key;
-            let key_full = self.counts_for_key(key).total() >= self.config.per_key;
+            let user_host_full =
+                self.counts_for_user_host(key).total() >= self.config.per_user_host;
             let host_full = self.counts_for_host(&key.host).total() >= self.config.per_host;
             let victim = self
                 .entries
                 .iter()
                 .filter_map(|(connection, entry)| {
                     if let State::Idle { since } = entry.state
-                        && (!key_full || entry.key == *key)
+                        && (!user_host_full || entry.key.same_user_host(key))
                         && (!host_full || entry.key.host == key.host)
                     {
                         Some((since, *connection))

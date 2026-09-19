@@ -5,14 +5,18 @@ use gwz_transport::{
 
 fn config() -> Config {
     Config {
-        per_key: 1,
+        per_user_host: 1,
         per_host: 2,
         total: 4,
         ..Config::default()
     }
 }
 fn request(user: &str, host: &str) -> Request {
-    Request::new(Key::ssh(user, host, 22), Identity::Ambient, "owner")
+    Request::new(
+        Key::ssh(user, host, 22),
+        Identity::Ambient,
+        Owner::new("session", "owner"),
+    )
 }
 fn connect(pool: &mut PoolMachine, identity: Identity) -> ConnectionId {
     let Some(Action::Connect { connection, .. }) = pool.next_action() else {
@@ -67,7 +71,7 @@ fn opening_and_closing_count_against_key_and_host_limits() {
         .request(Request::new(
             Key::https("host", 8443),
             Identity::Https,
-            "owner",
+            Owner::new("session", "owner"),
         ))
         .unwrap();
     assert_eq!(pool.take(c), Err(Error::WouldBlock));
@@ -345,12 +349,12 @@ fn owner_loss_preserves_idle_and_other_owners_but_closes_its_active_leases() {
     connect(&mut pool, Identity::Ambient);
     let b = pool.take(b).unwrap();
     let mut other = request("c", "elsewhere");
-    other.owner = "other".into();
+    other.owner = Owner::new("session", "other");
     let c = pool.request(other).unwrap();
     connect(&mut pool, Identity::Ambient);
     let c = pool.take(c).unwrap();
     let waiting = pool.request(request("b", "elsewhere")).unwrap();
-    pool.cancel_owner("owner");
+    pool.cancel_operation(&Owner::new("session", "owner"));
     assert_eq!(pool.take(waiting), Err(Error::Cancelled));
     assert!(!pool.is_live(b));
     assert!(pool.is_live(c));
@@ -407,6 +411,10 @@ fn request_settings_cannot_resize_endpoint_limits_or_raise_timeouts() {
     let mut a = request("git", "host");
     a.identity = Identity::Https;
     assert_eq!(pool.request(a), Err(Error::InvalidRequest));
-    let a = Request::new(Key::ssh("git", "host", 0), Identity::Ambient, "owner");
+    let a = Request::new(
+        Key::ssh("git", "host", 0),
+        Identity::Ambient,
+        Owner::new("session", "owner"),
+    );
     assert_eq!(pool.request(a), Err(Error::InvalidRequest));
 }

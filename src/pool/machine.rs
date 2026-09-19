@@ -23,7 +23,7 @@ pub(super) struct Entry {
     pub key: Key,
     pub identity: Identity,
     pub reusable: bool,
-    pub owner: Option<String>,
+    pub owner: Option<Owner>,
     pub state: State,
 }
 pub(super) enum State {
@@ -178,6 +178,10 @@ impl PoolMachine {
     }
     pub fn counts_for_key(&self, key: &Key) -> Counts {
         self.count_where(|entry| entry.key == *key)
+    }
+    /// Physical capacity grouping, intentionally independent of reuse port.
+    pub fn counts_for_user_host(&self, key: &Key) -> Counts {
+        self.count_where(|entry| entry.key.same_user_host(key))
     }
     pub fn outstanding_requests(&self) -> usize {
         self.requests.len()

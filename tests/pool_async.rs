@@ -15,13 +15,17 @@ impl Wake for WakeCount {
     }
 }
 fn request() -> Request {
-    Request::new(Key::ssh("git", "host", 22), Identity::Ambient, "owner")
+    Request::new(
+        Key::ssh("git", "host", 22),
+        Identity::Ambient,
+        Owner::new("session", "owner"),
+    )
 }
 
 #[test]
 fn clones_share_capacity_and_lease_drop_discards_while_checkout_drop_cancels() {
     let (pool, mut driver) = Pool::new(Config {
-        per_key: 1,
+        per_user_host: 1,
         max_requests: 1,
         ..Config::default()
     })
@@ -124,7 +128,7 @@ fn dropping_last_pool_owner_shuts_down_even_with_a_live_lease() {
 #[test]
 fn full_request_capacity_does_not_consume_the_driver_wake_slot() {
     let (pool, mut driver) = Pool::new(Config {
-        per_key: 1,
+        per_user_host: 1,
         max_requests: 1,
         ..Config::default()
     })
@@ -187,4 +191,48 @@ fn callbacks_can_reenter_pool_without_holding_its_lock() {
     };
     lease.release(Disposition::Reusable).unwrap();
     assert_eq!(pool.counts().idle, 1);
+}
+
+#[test]
+fn spontaneous_idle_disposal_wakes_queued_checkout_and_schedules_replacement() {
+    let (pool, mut driver) = Pool::new(Config {
+        total: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let wake = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let waker = wake.clone().into();
+    let mut cx = Context::from_waker(&waker);
+    let mut checkout = pool.checkout(request()).unwrap();
+    let Poll::Ready(Some(Action::Connect { connection, .. })) =
+        pin!(driver.next_action()).poll(&mut cx)
+    else {
+        panic!("connect");
+    };
+    driver
+        .connected(connection, Ok(Some(Identity::Ambient)))
+        .unwrap();
+    let Poll::Ready(Ok(lease)) = pin!(&mut checkout).poll(&mut cx) else {
+        panic!("lease");
+    };
+    lease.release(Disposition::Reusable).unwrap();
+    let mut different = request();
+    different.key.host = "other-host".into();
+    let mut waiting = pool.checkout(different).unwrap();
+    assert!(pin!(&mut waiting).poll(&mut cx).is_pending());
+    let before = wake.0.load(Ordering::SeqCst);
+    driver.idle_closed(connection).unwrap();
+    assert!(wake.0.load(Ordering::SeqCst) > before);
+    let Poll::Ready(Some(Action::Connect {
+        connection: new, ..
+    })) = pin!(driver.next_action()).poll(&mut cx)
+    else {
+        panic!("replacement");
+    };
+    assert_ne!(new, connection);
+    driver.connected(new, Ok(Some(Identity::Ambient))).unwrap();
+    assert!(matches!(
+        pin!(&mut waiting).poll(&mut cx),
+        Poll::Ready(Ok(_))
+    ));
 }

@@ -102,8 +102,19 @@ means the connector has already disposed any partial resource. Invalid/stale
 callbacks never adopt a resource: the caller must dispose it. There is no retry
 or replay of a failed exchange inside the pool.
 
-Limits default to eight connections per key and eight per host across users,
-ports and schemes, plus 256 per endpoint and 1,024 outstanding requests.
+For spontaneous idle loss, dispose the unusable resource and call
+`idle_closed(connection)`. It removes Idle or already-Closing state, including
+an eviction that has not dispatched its Close yet, and wakes capacity waiters.
+A foreign/duplicate token returns `Stale`. If checkout won first, `WrongState`
+leaves that exclusive lease untouched: route the I/O failure to its active
+exchange, whose host must discard the lease and acknowledge cleanup. This
+callback never cancels a lease using an old idle observation.
+
+Limits default to eight connections per user/host across ports
+(`per_user_host`) and eight per host across users, ports and schemes
+(`per_host`), plus 256 per endpoint and 1,024 outstanding requests. HTTPS has a
+no-username capacity bucket for each configured host. Reuse still requires the
+full scheme/username/host/port key.
 Opening, idle, leased and closing all count. Ready and failed unclaimed results
 still occupy request slots. Construction fixes these ceilings; operation fan-out
 limits cannot resize the pool. Compatible waiters are served in order, while an
@@ -123,9 +134,15 @@ commands and service deadlines even while `next_action` is pending.
 `next_deadline` is a snapshot, not a timer subscription; concurrent checkouts or
 releases can introduce earlier deadlines. A host may use periodic ticks, or
 recompute timers whenever it mutates the pool. The crate owns no timer task.
-An idle connection is never expired while leased. `cancel_owner` cancels one
-operation/carrier's requests and active leases, preserving idle resources and
-other owners. `shutdown` or dropping the final Pool owner refuses new requests
+An idle connection is never expired while leased. Requests carry
+`Owner { session, operation }`: use the fresh, never-reused session ID from the
+host's binding and an operation identifier scoped within that session. One
+operation may own many exchanges. `cancel_operation(&Owner)` cancels just that
+operation; `cancel_session(session_id)` cancels all of that carrier session's
+requests and active leases. Both preserve idle resources and other scopes. The
+host stops admission from a lost session before cancellation. Late cancellation
+for an older session therefore cannot affect an operation with the same name in
+a fresh session. `shutdown` or dropping the final Pool owner refuses new requests
 and initiates cleanup. At the cleanup deadline the host must promptly execute
 abort actions; `shutdown_complete` stays false until actual disposal is
 acknowledged. Before dropping its driver, the host must cancel connectors and
@@ -159,10 +176,11 @@ follows the testkit in `sdax-rs`; it adds no dependency on that repository.
 Pool tests use fake connections and a controlled clock. The default
 `cargo test --locked --test pool_random` checks 2,000 seeded lifecycle schedules
 against a separate resource ledger: capacity including in-flight cleanup,
-identity eligibility, exclusive leases, reuse, cancellation, helper budgets and
-complete teardown. Generator `gwz-transport-pool-v1` normalizes diagnostic IDs
+identity eligibility, exclusive leases, reuse, session/operation cancellation,
+spontaneous idle loss, helper budgets and
+complete teardown. Generator `gwz-transport-pool-v2` normalizes diagnostic IDs
 for exact replay across pool instances. Every sixteenth case repeats its trace;
-the fixed suite has coverage floors for all ten event classes.
+the fixed suite has coverage floors for all twelve event classes.
 
 ```sh
 GWZ_POOL_MC_CASE_SEED=0x1234 cargo test --locked --test pool_random seeded_pool_lifecycles -- --exact --nocapture

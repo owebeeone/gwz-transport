@@ -13,7 +13,8 @@ pub use machine::PoolMachine;
 
 #[derive(Clone, Debug)]
 pub struct Config {
-    pub per_key: usize,
+    /// Exact configured host + username across ports; HTTPS uses no username.
+    pub per_user_host: usize,
     pub per_host: usize,
     pub total: usize,
     pub max_requests: usize,
@@ -26,7 +27,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            per_key: 8,
+            per_user_host: 8,
             per_host: 8,
             total: 256,
             max_requests: 1024,
@@ -40,7 +41,7 @@ impl Default for Config {
 }
 impl Config {
     fn validate(&self) -> Result<(), Error> {
-        if [self.per_key, self.per_host, self.total]
+        if [self.per_user_host, self.per_host, self.total]
             .iter()
             .any(|value| !(1..=4096).contains(value))
             || !(1..=16384).contains(&self.max_requests)
@@ -84,6 +85,9 @@ impl Key {
             port,
         }
     }
+    fn same_user_host(&self, other: &Self) -> bool {
+        self.host == other.host && self.username == other.username
+    }
     fn valid(&self) -> bool {
         !self.host.is_empty()
             && self.host.len() <= 255
@@ -121,22 +125,43 @@ impl Identity {
     }
 }
 
+/// Cancellation scope supplied by the host binding. `session` is the fresh,
+/// never-reused carrier session ID, not a remote name or connection address.
+/// Operations may reuse names across sessions, never across live operations in
+/// the same session. The host stops admitting a lost session before cancelling it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Owner {
+    pub session: String,
+    pub operation: String,
+}
+impl Owner {
+    pub fn new(session: impl Into<String>, operation: impl Into<String>) -> Self {
+        Self {
+            session: session.into(),
+            operation: operation.into(),
+        }
+    }
+    fn valid(&self) -> bool {
+        bounded_text(&self.session, 128) && bounded_text(&self.operation, 128)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Request {
     pub key: Key,
     pub identity: Identity,
-    /// Operation/carrier ownership; losing it must not invalidate idle entries.
-    pub owner: String,
+    /// Session-scoped operation ownership; cancellation preserves idle entries.
+    pub owner: Owner,
     pub allocation_timeout_ms: Option<u64>,
     pub connect_timeout_ms: Option<u64>,
     pub interaction_timeout_ms: Option<u64>,
 }
 impl Request {
-    pub fn new(key: Key, identity: Identity, owner: impl Into<String>) -> Self {
+    pub fn new(key: Key, identity: Identity, owner: Owner) -> Self {
         Self {
             key,
             identity,
-            owner: owner.into(),
+            owner,
             allocation_timeout_ms: None,
             connect_timeout_ms: None,
             interaction_timeout_ms: None,
@@ -145,7 +170,7 @@ impl Request {
     fn valid(&self, config: &Config) -> bool {
         self.key.valid()
             && self.identity.valid_for(&self.key)
-            && bounded_text(&self.owner, 128)
+            && self.owner.valid()
             && [
                 (self.allocation_timeout_ms, config.allocation_timeout_ms),
                 (self.connect_timeout_ms, config.connect_timeout_ms),

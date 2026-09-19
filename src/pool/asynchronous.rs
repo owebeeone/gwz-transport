@@ -107,9 +107,13 @@ impl Pool {
     pub fn shutdown(&self) {
         self.shared.change(|state| state.machine.shutdown());
     }
-    pub fn cancel_owner(&self, owner: &str) {
+    pub fn cancel_session(&self, session: &str) {
         self.shared
-            .change(|state| state.machine.cancel_owner(owner));
+            .change(|state| state.machine.cancel_session(session));
+    }
+    pub fn cancel_operation(&self, owner: &Owner) {
+        self.shared
+            .change(|state| state.machine.cancel_operation(owner));
     }
 }
 impl Clone for Pool {
@@ -242,6 +246,11 @@ impl PoolDriver {
     ) -> Result<(), Error> {
         self.shared
             .change(|state| state.machine.connected(connection, result))
+    }
+    /// Acknowledge spontaneous disposal; see PoolMachine::idle_closed for races.
+    pub fn idle_closed(&self, connection: ConnectionId) -> Result<(), Error> {
+        self.shared
+            .change(|state| state.machine.idle_closed(connection))
     }
     pub fn closed(&self, connection: ConnectionId) -> Result<(), Error> {
         self.shared.change(|state| state.machine.closed(connection))

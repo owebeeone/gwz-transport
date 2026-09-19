@@ -7,7 +7,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use support::{case_seed, setting};
 const SEED: u64 = 0x4757_5a50_2026_0919;
 const CASES: usize = 2000;
-const GENERATOR: &str = "gwz-transport-pool-v1";
+const GENERATOR: &str = "gwz-transport-pool-v2";
 fn run(seed: u64, run_seed: u64, index: usize) -> (u64, Coverage) {
     let mut case = Case::new(seed);
     if let Err(failure) = catch_unwind(AssertUnwindSafe(|| case.run())) {
@@ -36,7 +36,7 @@ fn campaign(seed: u64, count: usize) -> Coverage {
         coverage.add(&result.1);
     }
     eprintln!(
-        "coverage [connect,reuse,lease,cancel,late_success,close,abort,blocked,interaction,timeout]={:?}",
+        "coverage [connect,reuse,lease,cancel,late_success,close,abort,blocked,interaction,timeout,idle_loss,session_cancel]={:?}",
         coverage.0
     );
     coverage
