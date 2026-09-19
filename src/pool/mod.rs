@@ -48,12 +48,12 @@ impl Config {
             || [
                 self.idle_timeout_ms,
                 self.allocation_timeout_ms,
-                self.connect_timeout_ms,
                 self.interaction_timeout_ms,
                 self.cleanup_timeout_ms,
             ]
             .iter()
             .any(|value| !(1..=86_400_000).contains(value))
+            || self.connect_timeout_ms > i32::MAX as u64
         {
             return Err(Error::InvalidConfig);
         }
@@ -171,14 +171,24 @@ impl Request {
         self.key.valid()
             && self.identity.valid_for(&self.key)
             && self.owner.valid()
-            && [
-                (self.allocation_timeout_ms, config.allocation_timeout_ms),
-                (self.connect_timeout_ms, config.connect_timeout_ms),
-                (self.interaction_timeout_ms, config.interaction_timeout_ms),
-            ]
-            .iter()
-            .all(|(value, max)| value.is_none_or(|v| v > 0 && v <= *max))
+            && self
+                .allocation_timeout_ms
+                .is_none_or(|v| v > 0 && v <= config.allocation_timeout_ms)
+            && network_timeout_valid(self.connect_timeout_ms, config.connect_timeout_ms)
+            && self
+                .interaction_timeout_ms
+                .is_none_or(|v| v > 0 && v <= config.interaction_timeout_ms)
     }
+}
+fn network_timeout_valid(value: Option<u64>, configured: u64) -> bool {
+    value.is_none_or(|value| {
+        value <= i32::MAX as u64
+            && if value == 0 {
+                configured == 0
+            } else {
+                configured == 0 || value <= configured
+            }
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -255,7 +265,7 @@ pub enum Action {
         connection: ConnectionId,
         key: Key,
         identity: Identity,
-        network_deadline: u64,
+        network_deadline: Option<u64>,
     },
     CancelConnect {
         connection: ConnectionId,

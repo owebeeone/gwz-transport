@@ -248,7 +248,7 @@ impl PoolMachine {
             } = &mut entry.state
                 && clock.is_none()
             {
-                let deadline = self.now.saturating_add(*network_ms);
+                let deadline = (*network_ms > 0).then(|| self.now.saturating_add(*network_ms));
                 *clock = Some(ConnectClock::Network(deadline));
                 let action = Action::Connect {
                     connection: *connection,

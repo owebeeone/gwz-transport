@@ -29,6 +29,7 @@ pub struct StreamMachine {
     pub(super) send: VecDeque<u8>,
     pub(super) recv: VecDeque<u8>,
     pub(super) now: u64,
+    pub(super) io: io_clock::IoClock,
     pub(super) batch_deadline: Option<u64>,
     pub(super) force_send: bool,
     pub(super) sent: i64,
@@ -63,6 +64,8 @@ impl StreamMachine {
     /// This constructor has no network, pool or credential effects.
     pub fn new(config: Config) -> Result<Self, Error> {
         config.validate()?;
+        let io_timeout_ms = config.io_timeout_ms;
+        let interaction_budget_ms = config.interaction_budget_ms;
         Ok(Self {
             send: VecDeque::with_capacity(config.send_buffer),
             recv: VecDeque::with_capacity(config.receive_window),
@@ -70,6 +73,7 @@ impl StreamMachine {
             advertised_limit: config.receive_window as i64,
             config,
             now: 0,
+            io: io_clock::IoClock::new(io_timeout_ms, interaction_budget_ms),
             batch_deadline: None,
             force_send: false,
             sent: 0,
@@ -210,6 +214,7 @@ impl StreamMachine {
             return Err(Error::WrongSide);
         }
         if self.close_deadline.is_none() {
+            self.stop_io_clock();
             self.close_deadline = Some(self.now.saturating_add(self.config.close_timeout_ms));
             self.discarding = true;
             self.discarded |= !self.recv.is_empty();
@@ -271,14 +276,67 @@ impl StreamMachine {
         self.touch();
     }
 
+    /// Set the host's aggregate backend activity classification. Only the
+    /// endpoint host can make this report; message delivery never infers it.
+    pub fn set_io_state(&mut self, state: IoState) -> Result<(), Error> {
+        if self.config.side != Side::Endpoint {
+            return Err(Error::WrongSide);
+        }
+        self.live()?;
+        if self.close_deadline.is_some() || self.close_received {
+            return Err(Error::WrongState);
+        }
+        self.expire_io_if_due()?;
+        let before = self.io.status(self.now);
+        self.io.set_state(self.now, state);
+        if before.state == state {
+            return Ok(());
+        }
+        self.touch();
+        if self.io.due(self.now) {
+            self.fail(Error::Timeout, true);
+            return Err(Error::Timeout);
+        }
+        Ok(())
+    }
+
+    /// Report bytes that were actually transferred with the backend peer.
+    /// Local buffering, message delivery and EOF are deliberately excluded.
+    pub fn record_io_progress(&mut self, bytes: usize) -> Result<(), Error> {
+        if self.config.side != Side::Endpoint {
+            return Err(Error::WrongSide);
+        }
+        self.live()?;
+        if self.close_deadline.is_some() || self.close_received {
+            return Err(Error::WrongState);
+        }
+        self.expire_io_if_due()?;
+        self.io
+            .progress(self.now, bytes, self.config.io_timeout_ms)?;
+        if bytes == 0 {
+            return Ok(());
+        }
+        self.touch();
+        Ok(())
+    }
+
+    pub fn io_status(&self) -> IoStatus {
+        self.io.status(self.now)
+    }
+
     /// The host supplies monotonic time and must advance it even without writes.
     pub fn advance(&mut self, now_ms: u64) {
-        if now_ms <= self.now {
+        if now_ms < self.now {
             return;
         }
         let was_due = self.batch_deadline.is_some_and(|at| self.now >= at);
         self.now = now_ms;
+        if self.error.is_some() || self.completed.is_some() {
+            return;
+        }
         if self.close_deadline.is_some_and(|at| self.now >= at) {
+            self.fail(Error::Timeout, true);
+        } else if self.io.due(self.now) {
             self.fail(Error::Timeout, true);
         } else if !was_due && self.batch_deadline.is_some_and(|at| self.now >= at) {
             self.touch();
@@ -292,10 +350,22 @@ impl StreamMachine {
         let batch = self
             .batch_deadline
             .filter(|at| *at > self.now && !self.force_send);
-        match (batch, self.close_deadline) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
+        [self.io.deadline(), batch, self.close_deadline]
+            .into_iter()
+            .flatten()
+            .min()
+    }
+
+    pub(super) fn expire_io_if_due(&mut self) -> Result<(), Error> {
+        if self.close_deadline.is_some_and(|at| self.now >= at) || self.io.due(self.now) {
+            self.fail(Error::Timeout, true);
+            return Err(Error::Timeout);
         }
+        Ok(())
+    }
+
+    pub(super) fn stop_io_clock(&mut self) {
+        self.io.stop(self.now);
     }
 
     pub fn stats(&self) -> Snapshot {
@@ -346,6 +416,7 @@ impl StreamMachine {
         self.peer_flush = None;
         self.close_pending = None;
         self.batch_deadline = None;
+        self.io.stop(self.now);
         if notify {
             if matches!(error, Error::Cancelled | Error::Timeout)
                 && self.config.side == Side::Initiator

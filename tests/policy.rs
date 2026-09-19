@@ -134,3 +134,48 @@ fn impossible_capabilities_never_install_a_binding() {
         Effect::None
     );
 }
+
+#[test]
+fn native_network_timeout_values_agree_for_typed_and_encoded_open_admission() {
+    for field in 0..5 {
+        for value in [-1, 0, 1, i32::MAX as i64, i32::MAX as i64 + 1] {
+            let mut message = open(Scheme::Ssh, AuthPolicy::SshAmbient, IdentityMode::Ambient);
+            let deadlines = &mut message.open.as_mut().unwrap().deadlines;
+            match field {
+                0 => {
+                    deadlines.connect_ms = value;
+                }
+                1 => {
+                    deadlines.io_ms = value;
+                }
+                2 => {
+                    deadlines.allocation_ms = value;
+                }
+                3 => {
+                    deadlines.interaction_ms = value;
+                }
+                _ => {
+                    deadlines.cleanup_ms = value;
+                }
+            }
+            let allowed = if field < 2 {
+                (0..=i32::MAX as i64).contains(&value)
+            } else {
+                value > 0
+            };
+            // The generated codec creates even malformed test input. The bounded
+            // public decoder must apply the same semantic admission as typed input.
+            let bytes = gwz_transport::cbor::encode(&message.to_cbor());
+            assert_eq!(
+                codec::admit(&message).is_ok(),
+                allowed,
+                "typed field={field} value={value}"
+            );
+            assert_eq!(
+                codec::decode(&bytes).is_ok(),
+                allowed,
+                "encoded field={field} value={value}"
+            );
+        }
+    }
+}

@@ -1,7 +1,7 @@
 # gwz-transport
 
-Independent transport protocol package for GWZ. Phase 1 is under implementation;
-the protocol is not frozen and SSH/HTTPS adapters are not enabled.
+Independent transport protocol package for GWZ, providing message, stream and
+pool interfaces. This package is unpublished; SSH/HTTPS adapters are not enabled.
 
 The package owns `protocol/transport.taut.py` and exports generated Rust types
 from `protocol`. Consumers reuse these types. Other language consumers use the
@@ -73,6 +73,61 @@ anonymous uses credentials-disabled identity, and HTTPS gh uses ambient endpoint
 identity. All other combinations are rejected before effects. A binding cannot
 advertise a scheme or policy without a compatible partner in its capability set.
 
+## Backend I/O deadlines
+
+Only the endpoint host can distinguish a network stall from intentional waiting.
+After constructing the stream, call `MessageEndpoint::advance(now_ms)` before
+starting timed work. Use the same monotonic origin for every later call and
+advance to the current time before reporting a state change or progress.
+An event at the deadline is already late. Timer ticks must run independently of
+message arrival; `next_deadline()` is a snapshot, not a subscription. A pending
+`next_message()` does not supply timer service.
+
+The endpoint host sets `IoState` through `set_io_state(state)`:
+
+| State | Meaning and clock behavior |
+|---|---|
+| `Idle` (initial) | No backend operation pending; preserve the remaining I/O allowance. |
+| `Network` | At least one backend operation can make peer progress; spend I/O allowance. |
+| `Backpressure` | All pending work is held by consumers, bounded queues or credit; preserve allowance. |
+| `Interaction` | Supported visible, cancellable helper wait; spend cumulative helper allowance and preserve I/O allowance. |
+
+If one direction is backpressured while the other can make peer progress, report
+`Network`. Call `record_io_progress(bytes)` only for bytes actually transferred
+to or from the backend peer while in `Network`. Positive progress restores the
+I/O allowance; zero does nothing. Local buffering, taut delivery, polling and
+keepalives are not progress. EOF ends a backend wait: update the state instead
+of reporting it as progress. Initiators cannot set the backend state or report
+progress. Positive progress outside `Network`, or either control after close
+begins, returns `WrongState` without changing state. Terminal controls return
+the retained terminal error. Repeated states and pause/resume cycles never refill
+the allowance.
+`io_status()` exposes state, remaining network/helper milliseconds and the
+active deadline; `next_deadline()` also considers batching and close cleanup.
+
+`Config::io_timeout_ms` defaults to 3,000 ms, accepts 0–2,147,483,647, and applies
+only while `Network`. Zero disables network timing while keeping the state
+`Network`; `io_status` then reports zero remaining network milliseconds and no
+active deadline. Positive peer progress does not enable a disabled timeout. `interaction_budget_ms` defaults to 120,000 ms and accepts
+0–86,400,000; zero forbids further helper waiting. The endpoint captures native
+policy. For existing Open `connect_ms` and `io_ms`, zero means disabled and
+positive values accept the same range as native startup settings through
+`i32::MAX`. A request can only tighten policy: zero is allowed only when the
+endpoint has already disabled that timeout; a positive request can shorten a
+finite timeout or impose a finite limit on a disabled one. Other Open deadlines
+remain positive and are clamped to the configured endpoint limits. Carry the operation's **remaining**
+helper allowance from connect/auth into this stream configuration, subtracting
+time already used. Each new Open has its own policy-capped allowance, including
+when it reuses a connection. The pool and stream must not each grant a fresh
+full allowance for the same Open.
+
+Close starts its separate cleanup deadline and stops the I/O clock. I/O/helper
+expiry wakes blocked calls with `Error::Timeout` and sends endpoint `Failed`
+with `Timeout` / `Effect::Possible`. Received bytes remain readable before the
+error. A timeout is never EOF, permission to replay, or evidence of Git success.
+Discard the connection lease and acknowledge actual disposal before reclaiming
+capacity. Late progress, cancellation and drop cannot replace the first error.
+
 ## Connection pool API
 
 `pool::Pool::new(Config)` returns a cloneable `Pool` and one `PoolDriver`.
@@ -92,6 +147,10 @@ never reach the pool. Ambient and explicit identities have different reuse
 eligibility within the same key. `connected` supplies the proven identity or
 `None` for a single-use resource. HTTPS pooling carries no account identity:
 the endpoint applies the permitted anonymous/gh authentication policy per request.
+
+`Connect.network_deadline` is `Option<u64>`: `None` denotes an active connect
+with network timing disabled, not a completed connect. Bounded helper
+interaction preserves the optional remaining network budget and resumes it.
 
 The driver receives local `Connect`, `CancelConnect`, `AbortConnect`, `Close` and
 `Abort` actions. These are host API commands, not new wire messages. Execute
@@ -124,7 +183,12 @@ can be retired to make room for a new identity.
 Idle expiry defaults to 60 seconds from healthy release. Other defaults are
 30 seconds for allocation, 10 seconds of connect-network time, 120 seconds of
 helper interaction and 5 seconds for cleanup. Requests may shorten the first
-three non-idle budgets. `begin_interaction`/`end_interaction` pause network time;
+three non-idle budgets. The connect timeout accepts 0–2,147,483,647 ms; zero
+disables network timing. An omitted override inherits; `Some(0)` is allowed only
+if endpoint connect timing is disabled; a positive override may cap a disabled
+endpoint or shorten a finite setting. Allocation, helper, cleanup and idle
+settings remain bounded to 1–86,400,000 ms. Network timing does not disable
+helper limits, cancellation, shutdown or disposal deadlines. `begin_interaction`/`end_interaction` pause network time;
 multiple interactions share one total allowance. None of these is an active
 stream read/write timeout.
 
@@ -148,6 +212,86 @@ abort actions; `shutdown_complete` stays false until actual disposal is
 acknowledged. Before dropping its driver, the host must cancel connectors and
 dispose physical resources itself. Driver loss wakes pending callers and
 invalidates active leases.
+
+## Binding and admission
+
+Start with a fresh, never-reused session ID. `binding::offer(session, role)`
+advertises version 1, SSH/HTTPS and their supported policies using
+`binding::default_limits()`. Construct `EndpointConfig` with explicit endpoint
+ID, role, allowed schemes/policies, limits and trust owner; these fields have no
+implicit endpoint defaults. `accept(&offer)` returns a Bound reply and Binding,
+or an effect-free Failure for the host to carry as BindRejected. The initiator
+uses `binding::verify(&offer, &reply)` before accepting the binding.
+
+Before credentials, connection allocation or network work, call
+`Binding::check_open(&message)`. The host also checks deadline tightening against
+its captured endpoint policy before effects; Binding does not contain native
+timeout settings. It validates ownership and unique stream IDs in that session,
+executes only an admitted Open, and sends Opened or
+OpenFailed. Construct stream endpoints only after Open/Opened has established
+the agreed limits. The package does not automatically create a pool lease when
+it receives Open; the host owns that sequencing. All structured failure codes
+and effect classifications must reach the caller unchanged.
+
+For typed input use `codec::admit_limited`; for encoded input use
+`codec::decode_limited`. The latter checks limits before generic decoding.
+Never use the unbounded generated codec as ingress validation. `Limits` defaults
+and maximum negotiation ceilings are:
+
+| Setting | Default ceiling |
+|---|---:|
+| Encoded transport envelope | 128 KiB (64 KiB for bootstrap) |
+| Data payload | 64 KiB |
+| String / metadata field | 16 KiB |
+| Nesting / total collection entries | 16 / 256 |
+| Decode allocation charge | 512 KiB (256 KiB for bootstrap) |
+| Queued bytes / frames | 4 MiB / 64 |
+| Reserved control bytes / frames | 64 KiB / 8 |
+| Receive credit window | 1 MiB |
+
+Negotiation takes bounded minima; Open and stream settings may narrow these.
+The host enforces aggregate queues across streams, reserving the stated control
+capacity, and accounts for any enclosing message's overhead separately. The
+transport limits do not bound an arbitrary outer wrapper. The supplied
+communication layer must also bound allocation before constructing that wrapper,
+preserve message order, provide bounded backpressure and report closure through
+`MessageEndpoint::disconnect()` (or drop). No physical framing is provided here.
+
+`stream::Config::new` requires session ID, positive stream ID and side. Other
+initial values: both limit sets above, 64 KiB send buffer, 64 KiB local and peer
+receive windows, 16 KiB payload, 100 ms coalescing, 5,000 ms close timeout,
+64 application waiters, plus the I/O/helper defaults above. Adjust the peer
+window to its agreed advertisement. Stream IDs must be unique within a session.
+Pool key, identity and owner are mandatory in `Request::new`; optional request
+allocation/connect/interaction overrides default to `None` (use pool policy).
+
+## Try the fake host locally
+
+The package is not published. From this source directory, use Rust 1.95 or later:
+
+```sh
+cargo test --locked --test pool_stream endpoint_returns_lease_only_after_exchange_cleanup -- --exact
+cargo test --locked --test stream
+cargo test --locked --test io_clock
+```
+
+The first fixture demonstrates the complete host lifecycle: request a lease,
+receive Connect, acknowledge a fake successful connection, take the lease,
+exchange request bytes, close the stream, finish backend cleanup, then release
+Reusable. A second waiting request receives the same connection with a fresh
+exclusive lease. To end a host, call `Pool::shutdown()`, drain Close/Abort actions
+and acknowledge every disposal until `shutdown_complete()` is true. Drop the
+driver only after disposal. There are no installed services or remote resources
+to undo in these tests.
+
+For generation install `taut-proto==0.9.1` and Rust 1.96.0's rustfmt, then run
+`python3 scripts/regen.py --check`. The script verifies the exact formatter
+build recorded in `protocol/generator.json`. `.github/workflows/contracts.yml`
+runs this drift check, formatting, the MSRV suite and standalone packaging.
+The workflow is prepared for repository CI; remote execution has not been
+established while this member has no remote. Core's unpublished consumer has a
+separate archive proof and source-pinned generator check; it is not part of this
+standalone job and does not silently fetch sibling repositories.
 
 ## Reproducible randomized tests
 

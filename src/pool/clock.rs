@@ -24,10 +24,13 @@ impl PoolMachine {
                             clock: Some(clock),
                             cancel: None,
                             ..
-                        } if self.now >= clock.deadline() => Some(match clock {
-                            ConnectClock::Network(_) => Error::ConnectTimeout,
-                            ConnectClock::Interaction { .. } => Error::InteractionTimeout,
-                        }),
+                        } => clock
+                            .deadline()
+                            .filter(|deadline| self.now >= *deadline)
+                            .map(|_| match clock {
+                                ConnectClock::Network(_) => Error::ConnectTimeout,
+                                ConnectClock::Interaction { .. } => Error::InteractionTimeout,
+                            }),
                         _ => None,
                     },
                     _ => None,
@@ -79,7 +82,7 @@ impl PoolMachine {
                     clock: Some(clock),
                     cancel: None,
                     ..
-                } => Some(clock.deadline()),
+                } => clock.deadline(),
                 _ => None,
             });
         queue.chain(resources).min()
@@ -97,8 +100,10 @@ impl PoolMachine {
         else {
             return Err(Error::WrongState);
         };
-        let remaining = clock.deadline().saturating_sub(self.now);
-        if remaining == 0 {
+        let remaining = clock
+            .deadline()
+            .map(|deadline| deadline.saturating_sub(self.now));
+        if remaining == Some(0) {
             return Err(Error::ConnectTimeout);
         }
         if *interaction_ms == 0 {
@@ -129,7 +134,8 @@ impl PoolMachine {
             return Err(Error::InteractionTimeout);
         }
         *interaction_ms = until - self.now;
-        *clock = ConnectClock::Network(self.now.saturating_add(remaining));
+        *clock =
+            ConnectClock::Network(remaining.map(|remaining| self.now.saturating_add(remaining)));
         self.touch();
         Ok(())
     }

@@ -134,7 +134,7 @@ impl Case {
                 network_deadline,
             } => {
                 self.record(format!(
-                    "connect {} {key:?} {identity:?} {network_deadline}",
+                    "connect {} {key:?} {identity:?} {network_deadline:?}",
                     connection.sequence()
                 ));
                 assert!(!self.resources.contains_key(&connection));

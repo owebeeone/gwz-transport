@@ -205,7 +205,7 @@ fn queue_network_interaction_and_cleanup_use_independent_budgets() {
     else {
         panic!("connect");
     };
-    assert_eq!(network_deadline, 39_000);
+    assert_eq!(network_deadline, Some(39_000));
     pool.advance(30_000);
     pool.begin_interaction(connection).unwrap();
     assert_eq!(pool.next_deadline(), Some(150_000));

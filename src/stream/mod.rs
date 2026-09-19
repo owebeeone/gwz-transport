@@ -7,6 +7,7 @@ use std::fmt;
 
 mod asynchronous;
 mod incoming;
+mod io_clock;
 mod machine;
 mod outgoing;
 pub use asynchronous::{MessageEndpoint, Stream};
@@ -16,6 +17,22 @@ pub use machine::{Snapshot, StreamMachine};
 pub enum Side {
     Initiator,
     Endpoint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoState {
+    Idle,
+    Network,
+    Backpressure,
+    Interaction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IoStatus {
+    pub state: IoState,
+    pub remaining_network_ms: u64,
+    pub remaining_interaction_ms: u64,
+    pub active_deadline: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -33,6 +50,10 @@ pub struct Config {
     pub max_payload: usize,
     pub coalesce_delay_ms: u64,
     pub close_timeout_ms: u64,
+    /// Aggregate backend peer-progress timeout while in [`IoState::Network`].
+    pub io_timeout_ms: u64,
+    /// Cumulative helper-wait allowance while in [`IoState::Interaction`].
+    pub interaction_budget_ms: u64,
     /// Application registrations; one additional dispatcher slot is reserved.
     pub max_waiters: usize,
 }
@@ -50,6 +71,8 @@ impl Config {
             max_payload: 16384,
             coalesce_delay_ms: 100,
             close_timeout_ms: 5000,
+            io_timeout_ms: 3000,
+            interaction_budget_ms: 120_000,
             max_waiters: 64,
         }
     }
@@ -70,6 +93,8 @@ impl Config {
             || self.max_payload == 0
             || self.max_payload > 65536
             || self.close_timeout_ms == 0
+            || self.io_timeout_ms > i32::MAX as u64
+            || self.interaction_budget_ms > 86_400_000
             || self.max_waiters == 0
             || self.max_waiters > 1024
             || self.receive_window as i64 > self.receive_limits.receive_window
@@ -112,6 +137,7 @@ pub enum Error {
     Cancelled,
     CarrierLost,
     Timeout,
+    WrongState,
     WriteClosed,
     Closed,
     WrongSide,

@@ -48,13 +48,14 @@ pub(super) enum State {
 }
 #[derive(Clone, Copy)]
 pub(super) enum ConnectClock {
-    Network(u64),
-    Interaction { until: u64, remaining: u64 },
+    Network(Option<u64>),
+    Interaction { until: u64, remaining: Option<u64> },
 }
 impl ConnectClock {
-    pub fn deadline(self) -> u64 {
+    pub fn deadline(self) -> Option<u64> {
         match self {
-            Self::Network(until) | Self::Interaction { until, .. } => until,
+            Self::Network(until) => until,
+            Self::Interaction { until, .. } => Some(until),
         }
     }
 }

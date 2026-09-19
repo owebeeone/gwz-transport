@@ -16,6 +16,12 @@ from taut.ir.validate import validate_or_raise
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def verify_formatter(pin):
+    actual = subprocess.check_output(['rustfmt', '--version'], text=True).strip()
+    if actual != pin['rustfmt']:
+        raise SystemExit(f"Expected rustfmt {pin['rustfmt']!r}; got {actual!r}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true')
@@ -23,6 +29,7 @@ def main():
     pin = json.loads((ROOT / 'protocol/generator.json').read_text())
     if taut.__version__ != pin['taut-proto']:
         raise SystemExit(f"Expected taut-proto=={pin['taut-proto']}; got {taut.__version__}")
+    verify_formatter(pin)
     schema = load_schema(ROOT / 'protocol/transport.taut.py')
     validate_or_raise(schema)
     with tempfile.TemporaryDirectory() as tmp:

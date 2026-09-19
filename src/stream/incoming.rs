@@ -7,6 +7,7 @@ impl StreamMachine {
         if self.error.is_some() || self.completed.is_some() {
             return Ok(());
         }
+        self.expire_io_if_due()?;
         let result = self.accept(message);
         if result.is_err() {
             self.fail(Error::Protocol, true);
@@ -103,6 +104,7 @@ impl StreamMachine {
                 }
                 if !self.close_received {
                     self.close_received = true;
+                    self.stop_io_clock();
                     self.close_deadline =
                         Some(self.now.saturating_add(self.config.close_timeout_ms));
                 }

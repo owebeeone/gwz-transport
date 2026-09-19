@@ -98,15 +98,12 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
             return Err(Error::InvalidMessage);
         }
         let d = &open.deadlines;
-        if [
-            d.allocation_ms,
-            d.connect_ms,
-            d.io_ms,
-            d.interaction_ms,
-            d.cleanup_ms,
-        ]
-        .iter()
-        .any(|v| *v <= 0)
+        if [d.allocation_ms, d.interaction_ms, d.cleanup_ms]
+            .iter()
+            .any(|v| *v <= 0)
+            || [d.connect_ms, d.io_ms]
+                .iter()
+                .any(|v| !(0..=i32::MAX as i64).contains(v))
         {
             return Err(Error::InvalidMessage);
         }

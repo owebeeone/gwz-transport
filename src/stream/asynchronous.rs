@@ -260,6 +260,16 @@ impl MessageEndpoint {
     pub fn advance(&self, now_ms: u64) {
         self.shared.change(|machine| machine.advance(now_ms));
     }
+    pub fn set_io_state(&self, state: IoState) -> Result<(), Error> {
+        self.shared.change(|machine| machine.set_io_state(state))
+    }
+    pub fn record_io_progress(&self, bytes: usize) -> Result<(), Error> {
+        self.shared
+            .change(|machine| machine.record_io_progress(bytes))
+    }
+    pub fn io_status(&self) -> IoStatus {
+        self.shared.change(|machine| machine.io_status())
+    }
     pub fn next_deadline(&self) -> Option<u64> {
         self.shared.change(|machine| machine.next_deadline())
     }
