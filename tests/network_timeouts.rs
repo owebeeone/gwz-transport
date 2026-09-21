@@ -26,6 +26,46 @@ fn pool_config(connect_timeout_ms: u64) -> PoolConfig {
 }
 
 #[test]
+fn absolute_pool_deadline_rejects_before_allocation_and_caps_connect() {
+    let mut pool = PoolMachine::new(pool_config(100)).unwrap();
+    assert_eq!(
+        pool.request_until(request(), Some(0)),
+        Err(PoolError::AllocationTimeout)
+    );
+    let id = pool.request_until(request(), Some(25)).unwrap();
+    let Some(Action::Connect {
+        network_deadline, ..
+    }) = pool.next_action()
+    else {
+        panic!("expected connect");
+    };
+    assert_eq!(network_deadline, Some(25));
+    pool.advance(25);
+    assert_eq!(pool.take(id), Err(PoolError::ConnectTimeout));
+}
+
+#[test]
+fn absolute_pool_deadline_survives_interaction_pause_and_resume() {
+    let mut pool = PoolMachine::new(pool_config(100)).unwrap();
+    let id = pool.request_until(request(), Some(25)).unwrap();
+    let Some(Action::Connect {
+        connection,
+        network_deadline,
+        ..
+    }) = pool.next_action()
+    else {
+        panic!("expected connect");
+    };
+    assert_eq!(network_deadline, Some(25));
+    pool.begin_interaction(connection).unwrap();
+    pool.advance(5);
+    pool.end_interaction(connection).unwrap();
+    assert_eq!(pool.next_deadline(), Some(25));
+    pool.advance(25);
+    assert_eq!(pool.take(id), Err(PoolError::ConnectTimeout));
+}
+
+#[test]
 fn disabled_stream_network_has_no_deadline_or_expiry() {
     let mut config = StreamConfig::new("disabled-stream", 1, Side::Endpoint);
     config.io_timeout_ms = 0;

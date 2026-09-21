@@ -140,6 +140,15 @@ impl PoolMachine {
         Ok(())
     }
     pub fn end_interaction(&mut self, connection: ConnectionId) -> Result<(), Error> {
+        let absolute_deadline = self
+            .entries
+            .get(&connection)
+            .and_then(|entry| match &entry.state {
+                State::Opening { request, .. } => *request,
+                _ => None,
+            })
+            .and_then(|id| self.requests.get(&id))
+            .and_then(|pending| pending.absolute_deadline);
         let entry = self.entries.get_mut(&connection).ok_or(Error::Stale)?;
         let State::Opening {
             clock: Some(clock @ ConnectClock::Interaction { .. }),
@@ -157,8 +166,13 @@ impl PoolMachine {
             return Err(Error::InteractionTimeout);
         }
         *interaction_ms = until - self.now;
-        *clock =
-            ConnectClock::Network(remaining.map(|remaining| self.now.saturating_add(remaining)));
+        let resumed = remaining.map(|remaining| self.now.saturating_add(remaining));
+        let resumed = match (resumed, absolute_deadline) {
+            (Some(network), Some(absolute)) => Some(network.min(absolute)),
+            (None, Some(absolute)) => Some(absolute),
+            (network, None) => network,
+        };
+        *clock = ConnectClock::Network(resumed);
         Ok(())
     }
 }

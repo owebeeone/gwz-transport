@@ -240,6 +240,13 @@ impl PoolMachine {
             }
         }
         for (connection, entry) in &mut self.entries {
+            let request = match &entry.state {
+                State::Opening { request, .. } => *request,
+                _ => None,
+            };
+            let absolute_deadline = request
+                .and_then(|id| self.requests.get(&id))
+                .and_then(|pending| pending.absolute_deadline);
             if let State::Opening {
                 clock,
                 network_ms,
@@ -249,6 +256,11 @@ impl PoolMachine {
                 && clock.is_none()
             {
                 let deadline = (*network_ms > 0).then(|| self.now.saturating_add(*network_ms));
+                let deadline = match (deadline, absolute_deadline) {
+                    (Some(network), Some(absolute)) => Some(network.min(absolute)),
+                    (None, Some(absolute)) => Some(absolute),
+                    (network, None) => network,
+                };
                 *clock = Some(ConnectClock::Network(deadline));
                 let action = Action::Connect {
                     connection: *connection,

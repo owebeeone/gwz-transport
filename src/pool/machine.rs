@@ -9,6 +9,7 @@ static NEXT_POOL: AtomicU64 = AtomicU64::new(1);
 pub(super) struct Pending {
     pub request: Request,
     pub deadline: u64,
+    pub absolute_deadline: Option<u64>,
     pub state: RequestState,
     pub eviction: Option<ConnectionId>,
 }
@@ -108,6 +109,13 @@ impl PoolMachine {
         })
     }
     pub fn request(&mut self, request: Request) -> Result<RequestId, Error> {
+        self.request_until(request, None)
+    }
+    pub fn request_until(
+        &mut self,
+        request: Request,
+        absolute_deadline: Option<u64>,
+    ) -> Result<RequestId, Error> {
         if self.driver_lost {
             return Err(Error::DriverLost);
         }
@@ -117,6 +125,9 @@ impl PoolMachine {
         if !request.valid(&self.config) {
             return Err(Error::InvalidRequest);
         }
+        if absolute_deadline.is_some_and(|deadline| deadline <= self.now) {
+            return Err(Error::AllocationTimeout);
+        }
         if self.requests.len() >= self.config.max_requests {
             return Err(Error::Capacity);
         }
@@ -125,16 +136,20 @@ impl PoolMachine {
             pool: self.pool_id,
             serial: self.request_serial,
         };
-        let deadline = self.now.saturating_add(
+        let allocation_deadline = self.now.saturating_add(
             request
                 .allocation_timeout_ms
                 .unwrap_or(self.config.allocation_timeout_ms),
         );
+        let deadline = absolute_deadline.map_or(allocation_deadline, |absolute| {
+            allocation_deadline.min(absolute)
+        });
         self.requests.insert(
             id,
             Pending {
                 request,
                 deadline,
+                absolute_deadline,
                 state: RequestState::Waiting,
                 eviction: None,
             },

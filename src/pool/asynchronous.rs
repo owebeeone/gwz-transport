@@ -91,7 +91,16 @@ impl Pool {
     /// Begins allocation immediately; an unpolled future still owns a bounded
     /// request slot and cancels it when dropped.
     pub fn checkout(&self, request: Request) -> Result<Checkout, Error> {
-        let request = self.shared.change(|state| state.machine.request(request))?;
+        self.checkout_until(request, None)
+    }
+    pub fn checkout_until(
+        &self,
+        request: Request,
+        absolute_deadline: Option<u64>,
+    ) -> Result<Checkout, Error> {
+        let request = self
+            .shared
+            .change(|state| state.machine.request_until(request, absolute_deadline))?;
         Ok(Checkout {
             shared: self.shared.clone(),
             request: Some(request),

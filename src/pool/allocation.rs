@@ -152,6 +152,22 @@ impl PoolMachine {
             return Err(Error::WrongState);
         }
         let request = *request;
+        let expired = request
+            .and_then(|id| self.requests.get(&id))
+            .and_then(|pending| pending.absolute_deadline)
+            .is_some_and(|deadline| self.now >= deadline);
+        if expired {
+            let error = match clock.expect("connected opening clock") {
+                ConnectClock::Network(_) => Error::ConnectTimeout,
+                ConnectClock::Interaction { .. } => Error::InteractionTimeout,
+            };
+            if let Some(id) = request {
+                self.fail_request(id, error, CloseReason::Cancelled)?;
+            }
+            self.schedule();
+            self.touch();
+            return Ok(());
+        }
         let cancelled = cancel.is_some();
         match result {
             Err(failure) => {
