@@ -690,47 +690,62 @@ fn async_bootstrap_rejection_retains_typed_reason_after_both_ports_retire() {
         pin::pin,
         task::{Context, Poll, Waker},
     };
-    let (mut core, mut cli) = pair();
-    register(&mut core, &mut cli, "a");
-    core.begin("a").unwrap();
-    let mut request = core.next_message().unwrap();
-    request.1.bind.as_mut().unwrap().versions = vec![1];
-    cli.receive(&request).unwrap();
-    assert_eq!(cli.phase(), Phase::Rejecting);
-    assert!(cli.binding().is_none());
-    assert_eq!(cli.register("new", None), Err(Error::Rejected));
-    assert_eq!(cli.finish("a"), Err(Error::WouldBlock));
-    let (core, core_port) = Owner::new(core);
-    let (cli, cli_port) = Owner::new(cli);
-    let mut cx = Context::from_waker(Waker::noop());
-    let Poll::Ready(Ok(Some(frame))) = pin!(cli_port.next_message()).poll(&mut cx) else {
-        panic!("rejection handoff")
-    };
-    assert_eq!(
-        pin!(core_port.deliver(frame)).poll(&mut cx),
-        Poll::Ready(Ok(()))
-    );
-    let expected = Some(Failure {
-        code: ErrorCode::UnsupportedVersion,
-        effect: Effect::None,
-        facts: None,
-    });
-    assert_eq!(core.bootstrap_failure(), expected);
-    assert_eq!(cli.bootstrap_failure(), expected);
-    assert_eq!(
-        pin!(core.ready()).poll(&mut cx),
-        Poll::Ready(Err(Error::Rejected))
-    );
-    assert_eq!(
-        pin!(cli.ready()).poll(&mut cx),
-        Poll::Ready(Err(Error::Rejected))
-    );
-    assert_eq!(
-        pin!(cli_port.next_message()).poll(&mut cx),
-        Poll::Ready(Ok(None))
-    );
-    core_port.disconnect();
-    assert_eq!(core.bootstrap_failure(), expected); // no late closure erases first outcome
+    for code in [
+        ErrorCode::UnsupportedVersion,
+        ErrorCode::UnsupportedOperation,
+    ] {
+        let (mut core, mut cli) = pair();
+        register(&mut core, &mut cli, "a");
+        core.begin("a").unwrap();
+        let mut request = core.next_message().unwrap();
+        if code == ErrorCode::UnsupportedVersion {
+            request.1.bind.as_mut().unwrap().versions = vec![1];
+        } else {
+            request
+                .1
+                .bind
+                .as_mut()
+                .unwrap()
+                .receive_limits
+                .metadata_bytes = 128;
+        }
+        cli.receive(&request).unwrap();
+        assert_eq!(cli.phase(), Phase::Rejecting);
+        assert!(cli.binding().is_none());
+        assert_eq!(cli.register("new", None), Err(Error::Rejected));
+        assert_eq!(cli.finish("a"), Err(Error::WouldBlock));
+        let (core, core_port) = Owner::new(core);
+        let (cli, cli_port) = Owner::new(cli);
+        let mut cx = Context::from_waker(Waker::noop());
+        let Poll::Ready(Ok(Some(frame))) = pin!(cli_port.next_message()).poll(&mut cx) else {
+            panic!("rejection handoff")
+        };
+        assert_eq!(
+            pin!(core_port.deliver(frame)).poll(&mut cx),
+            Poll::Ready(Ok(()))
+        );
+        let expected = Some(Failure {
+            code,
+            effect: Effect::None,
+            facts: None,
+        });
+        assert_eq!(core.bootstrap_failure(), expected);
+        assert_eq!(cli.bootstrap_failure(), expected);
+        assert_eq!(
+            pin!(core.ready()).poll(&mut cx),
+            Poll::Ready(Err(Error::Rejected))
+        );
+        assert_eq!(
+            pin!(cli.ready()).poll(&mut cx),
+            Poll::Ready(Err(Error::Rejected))
+        );
+        assert_eq!(
+            pin!(cli_port.next_message()).poll(&mut cx),
+            Poll::Ready(Ok(None))
+        );
+        core_port.disconnect();
+        assert_eq!(core.bootstrap_failure(), expected); // no late closure erases first outcome
+    }
 }
 
 #[test]
@@ -767,4 +782,99 @@ fn stalled_bootstrap_rejection_handoff_has_a_bounded_deadline() {
         ErrorCode::UnsupportedVersion
     );
     assert!(cli.next_message().is_none());
+}
+
+#[test]
+fn bootstrap_rejection_rejects_operation_errors_without_retaining_them() {
+    for code in [ErrorCode::Authentication, ErrorCode::Io] {
+        let (mut core, mut cli) = pair();
+        register(&mut core, &mut cli, "a");
+        core.begin("a").unwrap();
+        core.next_message();
+        let reply = Envelope {
+            version: 1,
+            session_id: "session".into(),
+            kind: MessageKind::BindRejected,
+            bind_rejected: Some(Failure {
+                code,
+                effect: Effect::None,
+                facts: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(core.receive(&("a".into(), reply)), Err(Error::Protocol));
+        assert_eq!(core.phase(), Phase::Closed);
+        assert!(core.bootstrap_failure().is_none());
+        assert!(core.binding().is_none());
+        assert!(core.next_action().is_none());
+    }
+}
+
+#[test]
+fn bootstrap_rejection_codec_enforces_its_entire_failure_domain() {
+    use gwz_transport::{cbor, codec};
+    for code in 1..=13 {
+        let code = ErrorCode::from_wire(code).unwrap();
+        for effect in [Effect::None, Effect::Possible] {
+            for facts in [None, Some(Facts::default())] {
+                let reply = Envelope {
+                    version: 1,
+                    session_id: "session".into(),
+                    kind: MessageKind::BindRejected,
+                    bind_rejected: Some(Failure {
+                        code,
+                        effect,
+                        facts: facts.clone(),
+                    }),
+                    ..Default::default()
+                };
+                let allowed = matches!(
+                    code,
+                    ErrorCode::UnsupportedVersion | ErrorCode::UnsupportedOperation
+                ) && effect == Effect::None
+                    && facts.is_none();
+                assert_eq!(
+                    codec::admit(&reply).is_ok(),
+                    allowed,
+                    "{code:?}/{effect:?}/{facts:?}"
+                );
+                // Encode through the raw generated projection to exercise hostile bytes.
+                let bytes = cbor::encode(&reply.to_cbor());
+                assert_eq!(codec::decode(&bytes).is_ok(), allowed);
+                assert_eq!(codec::encode(&reply).is_ok(), allowed);
+            }
+        }
+    }
+}
+
+#[test]
+fn invalid_endpoint_configuration_fails_locally_before_bootstrap() {
+    for invalid in 0..4 {
+        let mut config = binding::EndpointConfig {
+            endpoint_id: "endpoint".into(),
+            role: EndpointRole::Driver,
+            schemes: vec![Scheme::Ssh],
+            policies: vec![AuthPolicy::SshAmbient],
+            limits: binding::default_limits(),
+            trust_owner: "account".into(),
+        };
+        match invalid {
+            0 => {
+                config.limits.queued_frames = 0;
+            }
+            1 => {
+                config.endpoint_id.clear();
+            }
+            2 => {
+                config.trust_owner.clear();
+            }
+            _ => {
+                config.policies.clear();
+            }
+        }
+        assert!(matches!(
+            Mux::endpoint("session", config, Config::default()),
+            Err(Error::InvalidRequest)
+        ));
+    }
 }

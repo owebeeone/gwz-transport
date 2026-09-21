@@ -89,9 +89,7 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
         limits(&bound.receive_limits)?;
     }
     if let Some(failure) = &value.bind_rejected {
-        if failure.facts.is_some() || failure.code == ErrorCode::RepositoryRefused {
-            return Err(Error::InvalidMessage);
-        }
+        bind_rejection(failure)?;
     }
     if value.version == 1 {
         if value
@@ -182,6 +180,19 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
         .cancel
         .as_ref()
         .is_some_and(|cancel| !matches!(cancel.reason, ErrorCode::Cancelled | ErrorCode::Timeout))
+    {
+        return Err(Error::InvalidMessage);
+    }
+    Ok(())
+}
+
+/// Bootstrap is effect-free and can only reject version/capability/limit negotiation.
+pub(crate) fn bind_rejection(failure: &Failure) -> Result<(), Error> {
+    if !matches!(
+        failure.code,
+        ErrorCode::UnsupportedVersion | ErrorCode::UnsupportedOperation
+    ) || failure.effect != Effect::None
+        || failure.facts.is_some()
     {
         return Err(Error::InvalidMessage);
     }

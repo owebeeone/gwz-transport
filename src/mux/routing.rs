@@ -159,9 +159,7 @@ impl Mux {
         }
         if message.kind == MessageKind::BindRejected {
             let failure = message.bind_rejected.as_ref().ok_or(Error::Protocol)?;
-            if failure.effect != Effect::None || failure.facts.is_some() {
-                return Err(Error::Protocol);
-            }
+            codec::validate_bind_rejection(failure).map_err(|_| Error::Protocol)?;
             self.rejection = Some(failure.clone());
             self.disconnect();
             return Ok(());
@@ -177,9 +175,7 @@ impl Mux {
         Ok(())
     }
     fn reject_binding(&mut self, request: &str, failure: Failure) -> Result<(), Error> {
-        if failure.effect != Effect::None || failure.facts.is_some() {
-            return Err(Error::Protocol);
-        }
+        codec::validate_bind_rejection(&failure).map_err(|_| Error::Protocol)?;
         let reply = Envelope {
             version: 1,
             session_id: self.session.clone(),

@@ -51,7 +51,7 @@ pub fn allocation_charge(
     crate::admission::allocation_charge(message, limits)
 }
 
-pub(crate) use validate::limits as validate_limits;
+pub(crate) use validate::{bind_rejection as validate_bind_rejection, limits as validate_limits};
 
 pub fn encode(message: &Envelope) -> Result<Vec<u8>, Error> {
     admit(message)?;

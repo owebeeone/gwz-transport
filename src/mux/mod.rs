@@ -188,7 +188,12 @@ impl Mux {
             || binding::usable(&config.limits).is_err()
             || codec::validate_limits(&config.limits).is_err()
             || endpoint.as_ref().is_some_and(|e| {
-                e.role != config.role || !binding::no_greater(&e.limits, &config.limits)
+                e.role != config.role
+                    || e.endpoint_id.is_empty()
+                    || e.trust_owner.is_empty()
+                    || !crate::policy::capabilities(&e.schemes, &e.policies)
+                    || codec::validate_limits(&e.limits).is_err()
+                    || !binding::no_greater(&e.limits, &config.limits)
             })
         {
             return Err(Error::InvalidRequest);
