@@ -35,6 +35,10 @@ impl PoolMachine {
                             }),
                         _ => None,
                     },
+                    RequestState::Ready(_) => pending
+                        .absolute_deadline
+                        .filter(|deadline| self.now >= *deadline)
+                        .map(|_| Error::AllocationTimeout),
                     _ => None,
                 };
                 error.map(|error| (*id, error))
@@ -86,6 +90,9 @@ impl PoolMachine {
                 {
                     Some(pending.deadline)
                 }
+                RequestState::Ready(_) if pending.absolute_deadline.is_some() => {
+                    pending.absolute_deadline
+                }
                 _ => None,
             });
         let resources = self
@@ -114,6 +121,15 @@ impl PoolMachine {
     /// Pause only the network-connect budget for a bounded helper interaction.
     /// Repeated interactions share the original total interaction allowance.
     pub fn begin_interaction(&mut self, connection: ConnectionId) -> Result<(), Error> {
+        let absolute_deadline = self
+            .entries
+            .get(&connection)
+            .and_then(|entry| match &entry.state {
+                State::Opening { request, .. } => *request,
+                _ => None,
+            })
+            .and_then(|id| self.requests.get(&id))
+            .and_then(|pending| pending.absolute_deadline);
         let entry = self.entries.get_mut(&connection).ok_or(Error::Stale)?;
         let State::Opening {
             clock: Some(clock @ ConnectClock::Network(_)),
@@ -133,10 +149,9 @@ impl PoolMachine {
         if *interaction_ms == 0 {
             return Err(Error::InteractionTimeout);
         }
-        *clock = ConnectClock::Interaction {
-            until: self.now.saturating_add(*interaction_ms),
-            remaining,
-        };
+        let until = self.now.saturating_add(*interaction_ms);
+        let until = absolute_deadline.map_or(until, |deadline| until.min(deadline));
+        *clock = ConnectClock::Interaction { until, remaining };
         Ok(())
     }
     pub fn end_interaction(&mut self, connection: ConnectionId) -> Result<(), Error> {

@@ -66,6 +66,41 @@ fn absolute_pool_deadline_survives_interaction_pause_and_resume() {
 }
 
 #[test]
+fn absolute_pool_deadline_expires_during_interaction_without_resume() {
+    let mut pool = PoolMachine::new(pool_config(100)).unwrap();
+    let id = pool.request_until(request(), Some(25)).unwrap();
+    let Some(Action::Connect { connection, .. }) = pool.next_action() else {
+        panic!("expected connect");
+    };
+    pool.begin_interaction(connection).unwrap();
+    pool.advance(24);
+    assert_eq!(pool.next_deadline(), Some(25));
+    assert_eq!(pool.take(id), Err(PoolError::WouldBlock));
+    pool.advance(25);
+    assert_eq!(pool.take(id), Err(PoolError::InteractionTimeout));
+    assert!(matches!(
+        pool.next_action(),
+        Some(Action::CancelConnect { connection: id2, .. }) if id2 == connection
+    ));
+}
+
+#[test]
+fn absolute_pool_deadline_expires_ready_lease_before_take() {
+    let mut pool = PoolMachine::new(pool_config(100)).unwrap();
+    let id = pool.request_until(request(), Some(25)).unwrap();
+    let Some(Action::Connect { connection, .. }) = pool.next_action() else {
+        panic!("expected connect");
+    };
+    pool.connected(connection, Ok(None)).unwrap();
+    pool.advance(25);
+    assert_eq!(pool.take(id), Err(PoolError::AllocationTimeout));
+    assert!(matches!(
+        pool.next_action(),
+        Some(Action::Close { connection: id2, .. }) if id2 == connection
+    ));
+}
+
+#[test]
 fn disabled_stream_network_has_no_deadline_or_expiry() {
     let mut config = StreamConfig::new("disabled-stream", 1, Side::Endpoint);
     config.io_timeout_ms = 0;
