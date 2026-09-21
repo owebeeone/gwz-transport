@@ -24,6 +24,8 @@ pub fn offer(session_id: &str, role: EndpointRole) -> Envelope {
         stream_id: 0,
         kind: MessageKind::Bind,
         bind: Some(Bind {
+            // Retain the v1 default offer for existing callers. A v2-capable
+            // host opts in by adding profile 2 before sending Bind.
             versions: vec![1],
             role,
             schemes: vec![Scheme::Ssh, Scheme::Https],
@@ -64,6 +66,12 @@ impl Binding {
     pub fn limits(&self) -> &Limits {
         &self.bound.receive_limits
     }
+    pub fn profile_version(&self) -> i64 {
+        self.bound.version
+    }
+    pub fn trust_owner(&self) -> &str {
+        &self.bound.trust_owner
+    }
 
     /// Must precede lease allocation or any endpoint authority/network effect.
     pub fn check_open(&self, message: &Envelope) -> Result<(), Failure> {
@@ -73,7 +81,13 @@ impl Binding {
             .open
             .as_ref()
             .ok_or_else(|| failure(ErrorCode::InvalidRequest))?;
-        if message.session_id != self.session_id || open.endpoint_id != self.bound.endpoint_id {
+        if message.version != self.bound.version {
+            return Err(failure(ErrorCode::UnsupportedVersion));
+        }
+        if message.kind != MessageKind::Open
+            || message.session_id != self.session_id
+            || open.endpoint_id != self.bound.endpoint_id
+        {
             return Err(failure(ErrorCode::Unavailable));
         }
         if !self.bound.schemes.contains(&open.destination.scheme)
@@ -85,12 +99,45 @@ impl Binding {
         usable(&open.receive_limits)?;
         Ok(())
     }
+
+    /// Validate a v2 identity preflight before endpoint file-check admission.
+    pub fn check_identity(&self, message: &Envelope) -> Result<(), Failure> {
+        codec::admit_limited(message, &self.bound.receive_limits)
+            .map_err(|_| failure(ErrorCode::InvalidRequest))?;
+        let check = message
+            .check_identity
+            .as_ref()
+            .ok_or_else(|| failure(ErrorCode::InvalidRequest))?;
+        if self.bound.version != 2 || message.version != self.bound.version {
+            return Err(failure(ErrorCode::UnsupportedVersion));
+        }
+        if message.kind != MessageKind::CheckIdentity
+            || message.session_id != self.session_id
+            || check.endpoint_id != self.bound.endpoint_id
+            || check.operation_id.is_empty()
+            || check.timeout_ms <= 0
+            || check.timeout_ms > i32::MAX as i64
+            || check.identity.mode != IdentityMode::ExplicitKey
+        {
+            return Err(failure(ErrorCode::InvalidRequest));
+        }
+        if check
+            .identity
+            .key_path
+            .as_ref()
+            .is_none_or(String::is_empty)
+        {
+            return Err(failure(ErrorCode::InvalidRequest));
+        }
+        Ok(())
+    }
 }
 
 fn failure(code: ErrorCode) -> Failure {
     Failure {
         code,
         effect: Effect::None,
+        facts: None,
     }
 }
 
@@ -104,12 +151,14 @@ impl EndpointConfig {
             .bind
             .as_ref()
             .ok_or_else(|| failure(ErrorCode::InvalidRequest))?;
-        if !bind.versions.contains(&1) {
-            return Err(failure(ErrorCode::UnsupportedVersion));
-        }
         if bind.role != self.role {
             return Err(failure(ErrorCode::UnsupportedOperation));
         }
+        let version = [1, 2]
+            .into_iter()
+            .filter(|candidate| bind.versions.contains(candidate))
+            .max()
+            .ok_or_else(|| failure(ErrorCode::UnsupportedVersion))?;
         codec::validate_limits(&self.limits).map_err(|_| failure(ErrorCode::InvalidRequest))?;
         let mut schemes: Vec<_> = self
             .schemes
@@ -131,7 +180,7 @@ impl EndpointConfig {
         let receive_limits = minimum(&bind.receive_limits, &self.limits);
         usable(&receive_limits)?;
         let bound = Bound {
-            version: 1,
+            version,
             endpoint_id: self.endpoint_id.clone(),
             role: self.role,
             schemes,
@@ -172,6 +221,7 @@ pub fn verify(offer: &Envelope, reply: &Envelope) -> Result<Binding, Failure> {
         .ok_or_else(|| failure(ErrorCode::Unavailable))?;
     if reply.session_id != offer.session_id
         || bound.role != requested.role
+        || ![1, 2].contains(&bound.version)
         || !requested.versions.contains(&bound.version)
         || !bound.schemes.iter().all(|v| requested.schemes.contains(v))
         || !bound

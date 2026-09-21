@@ -6,6 +6,7 @@
         "bind_rejected": 3,
         "bound": 2,
         "cancel": 14,
+        "check_identity": 16,
         "close": 12,
         "closed": 13,
         "data": 7,
@@ -13,6 +14,8 @@
         "failed": 15,
         "flush": 9,
         "flushed": 10,
+        "identity_check_failed": 18,
+        "identity_checked": 17,
         "open": 4,
         "open_failed": 6,
         "opened": 5,
@@ -69,6 +72,7 @@
         "invalid_request": 4,
         "io": 10,
         "protocol": 11,
+        "repository_refused": 13,
         "timeout": 6,
         "trust": 9,
         "unavailable": 3,
@@ -418,6 +422,18 @@
             "k": "enum",
             "name": "Effect"
           }
+        },
+        {
+          "merge": null,
+          "missing_ok": true,
+          "name": "facts",
+          "optional": true,
+          "tag": 3,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Facts"
+          }
         }
       ],
       "name": "Failure",
@@ -684,6 +700,65 @@
         }
       ],
       "name": "Open",
+      "next_id": null,
+      "reserved_names": [],
+      "reserved_tags": []
+    },
+    {
+      "fields": [
+        {
+          "merge": null,
+          "name": "endpoint_id",
+          "optional": false,
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "str"
+          }
+        },
+        {
+          "merge": null,
+          "name": "operation_id",
+          "optional": false,
+          "tag": 2,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "str"
+          }
+        },
+        {
+          "merge": null,
+          "name": "identity",
+          "optional": false,
+          "tag": 3,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Identity"
+          }
+        },
+        {
+          "merge": null,
+          "name": "timeout_ms",
+          "optional": false,
+          "tag": 4,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        }
+      ],
+      "name": "CheckIdentity",
+      "next_id": null,
+      "reserved_names": [],
+      "reserved_tags": []
+    },
+    {
+      "fields": [],
+      "name": "IdentityChecked",
       "next_id": null,
       "reserved_names": [],
       "reserved_tags": []
@@ -1229,6 +1304,42 @@
           "name": "failed",
           "optional": true,
           "tag": 24,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "Failure"
+          }
+        },
+        {
+          "merge": null,
+          "missing_ok": true,
+          "name": "check_identity",
+          "optional": true,
+          "tag": 25,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "CheckIdentity"
+          }
+        },
+        {
+          "merge": null,
+          "missing_ok": true,
+          "name": "identity_checked",
+          "optional": true,
+          "tag": 26,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "IdentityChecked"
+          }
+        },
+        {
+          "merge": null,
+          "missing_ok": true,
+          "name": "identity_check_failed",
+          "optional": true,
+          "tag": 27,
           "transient": false,
           "type": {
             "k": "msg",

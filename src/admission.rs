@@ -5,9 +5,14 @@ use crate::{
     protocol::*,
 };
 
-pub(crate) fn envelope(value: &Envelope, limits: &Limits) -> Result<(), Error> {
+pub(crate) fn allocation_charge(value: &Envelope, limits: &Limits) -> Result<usize, Error> {
     let mut budget = Budget::new(value.stream_id == 0, limits);
-    visit_envelope(value, &mut budget, 0)
+    visit_envelope(value, &mut budget, 0)?;
+    budget.total_charge()
+}
+
+pub(crate) fn envelope(value: &Envelope, limits: &Limits) -> Result<(), Error> {
+    allocation_charge(value, limits).map(|_| ())
 }
 
 fn visit_limits(value: &Limits, b: &mut Budget, depth: usize) -> Result<(), Error> {
@@ -87,11 +92,17 @@ fn visit_bound(value: &Bound, b: &mut Budget, depth: usize) -> Result<(), Error>
 }
 
 fn visit_failure(value: &Failure, b: &mut Budget, depth: usize) -> Result<(), Error> {
-    b.container(2, depth)?;
+    b.container(3, depth)?;
     b.key(1)?;
     b.integer(value.code.wire(), depth + 1)?;
     b.key(2)?;
     b.integer(value.effect.wire(), depth + 1)?;
+    b.key(3)?;
+    if let Some(item) = &value.facts {
+        visit_facts(item, b, depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
     Ok(())
 }
 
@@ -166,6 +177,29 @@ fn visit_open(value: &Open, b: &mut Budget, depth: usize) -> Result<(), Error> {
     visit_deadlines(&value.deadlines, b, depth + 1)?;
     b.key(8)?;
     visit_limits(&value.receive_limits, b, depth + 1)?;
+    Ok(())
+}
+
+fn visit_checkidentity(value: &CheckIdentity, b: &mut Budget, depth: usize) -> Result<(), Error> {
+    b.container(4, depth)?;
+    b.key(1)?;
+    b.bytes(value.endpoint_id.len(), MAX_METADATA, depth + 1)?;
+    b.key(2)?;
+    b.bytes(value.operation_id.len(), MAX_METADATA, depth + 1)?;
+    b.key(3)?;
+    visit_identity(&value.identity, b, depth + 1)?;
+    b.key(4)?;
+    b.integer(value.timeout_ms, depth + 1)?;
+    Ok(())
+}
+
+fn visit_identitychecked(
+    value: &IdentityChecked,
+    b: &mut Budget,
+    depth: usize,
+) -> Result<(), Error> {
+    b.container(0, depth)?;
+    let _ = value;
     Ok(())
 }
 
@@ -287,7 +321,7 @@ fn visit_cancel(value: &Cancel, b: &mut Budget, depth: usize) -> Result<(), Erro
 }
 
 fn visit_envelope(value: &Envelope, b: &mut Budget, depth: usize) -> Result<(), Error> {
-    b.container(19, depth)?;
+    b.container(22, depth)?;
     b.key(1)?;
     b.integer(value.version, depth + 1)?;
     b.key(2)?;
@@ -382,6 +416,24 @@ fn visit_envelope(value: &Envelope, b: &mut Budget, depth: usize) -> Result<(), 
     }
     b.key(24)?;
     if let Some(item) = &value.failed {
+        visit_failure(item, b, depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
+    b.key(25)?;
+    if let Some(item) = &value.check_identity {
+        visit_checkidentity(item, b, depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
+    b.key(26)?;
+    if let Some(item) = &value.identity_checked {
+        visit_identitychecked(item, b, depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
+    b.key(27)?;
+    if let Some(item) = &value.identity_check_failed {
         visit_failure(item, b, depth + 1)?;
     } else {
         b.scalar(depth + 1)?;

@@ -171,6 +171,7 @@ fn stream_accepts_native_maximum_and_rejects_above_it() {
         Err(Failure {
             code: ErrorCode::Io,
             effect: Effect::Possible,
+            facts: None,
         }),
     )
     .unwrap();
@@ -209,6 +210,7 @@ fn disabled_pool_connect_survives_ticks_and_cleanup_stays_bounded() {
         Err(Failure {
             code: ErrorCode::Io,
             effect: Effect::Possible,
+            facts: None,
         }),
     )
     .unwrap();
@@ -271,6 +273,7 @@ fn helper_wait_expires_when_network_connect_timeout_is_disabled() {
         Err(Failure {
             code: ErrorCode::Io,
             effect: Effect::Possible,
+            facts: None,
         }),
     )
     .unwrap();
@@ -331,6 +334,7 @@ fn shutdown_disposes_disabled_connect_with_bounded_cleanup() {
         Err(Failure {
             code: ErrorCode::Io,
             effect: Effect::Possible,
+            facts: None,
         }),
     )
     .unwrap();

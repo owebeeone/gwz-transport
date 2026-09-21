@@ -97,4 +97,9 @@ impl Budget {
         }
         Ok(())
     }
+    pub(crate) fn total_charge(&self) -> Result<usize, Error> {
+        self.encoded
+            .checked_add(self.allocation)
+            .ok_or(Error::Bounds)
+    }
 }

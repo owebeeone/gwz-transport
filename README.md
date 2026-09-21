@@ -285,8 +285,14 @@ and acknowledge every disposal until `shutdown_complete()` is true. Drop the
 driver only after disposal. There are no installed services or remote resources
 to undo in these tests.
 
-For generation install `taut-proto==0.9.1` and Rust 1.96.0's rustfmt, then run
-`python3 scripts/regen.py --check`. The script verifies the exact formatter
+For generation install the base dependencies of `taut-proto==0.9.1` and Rust
+1.96.0's rustfmt, then provide the clean Taut checkout pinned in
+`protocol/generator.json`:
+`python3 scripts/regen.py --check --taut-source ../taut/src`.
+The new optional-field compatibility requires that source extension; published
+0.9.1 alone is insufficient. The workflow checks out the same immutable pin.
+That pin must be published before remote CI can run; only local execution is
+claimed at this candidate checkpoint. The script verifies the exact formatter
 build recorded in `protocol/generator.json`. `.github/workflows/contracts.yml`
 runs this drift check, formatting, the MSRV suite and standalone packaging.
 The workflow is prepared for repository CI; remote execution has not been
@@ -334,3 +340,58 @@ GWZ_POOL_MC_SEED=0x202609195eed cargo test --locked --release --test pool_random
 
 `GWZ_POOL_MC_CASES` changes the campaign size; the extended default is 50,000.
 Failures print configuration, clock, step, recent events and a replay command.
+
+## Request mux and application ports (candidate)
+
+`mux::Mux` routes shared messages for registered host request IDs over one
+session. `Attachment = (String, Envelope)` uses the existing request_id as its
+String; this is an application tuple, not a new wire wrapper. Construct an
+initiator and an endpoint using the same fresh session ID and explicit
+`EndpointConfig`. Register each request on both sides before calling `begin`
+on the initiator. The first request owns bootstrap; its cancellation before
+verified Bound installation closes the session. Cancellation after installation
+leaves the binding available to other requests. This mux requires owner profile
+2; the lower-level binding codec continues to support profile 1.
+
+`Owner::new(mux)` returns an Owner and Port. Forward core `Port::next_message()`
+to client `Port::deliver()`, and client `next_message()` to core `deliver()`.
+Run both ordered forwarding loops independently. Cancelling a pending receive
+consumes nothing; cancelling a pending delivery admits nothing. After taking
+an attachment, deliver it or disconnect both ends. The supplied host propagates
+closure and bounds any queues outside the mux. Last Owner or last Port drop
+closes the local generation and wakes waiters. Ports own no carrier or threads.
+
+Once `Owner::ready()` completes, inspect `Owner::binding()` for negotiated
+settings; this snapshot is not independent live authority. `check_identity` and
+`open` queue endpoint work. `next_action` hands admitted messages to the host worker, which sends
+replies through `send`. Opened validates the bound endpoint and trust owner;
+request, operation and stream correlation are enforced before dispatch. The
+worker must perform credential/path checks and dispose late results itself.
+The mux never creates a network connection or claims physical cleanup.
+
+Use `cancel` to seal a request. `finish` returns WouldBlock while routes remain;
+continue message delivery and clock ticks, then call finish again to unregister.
+Request IDs cannot be reused in the session. Config.role defaults to Driver
+(the CLI endpoint role), and Config.limits defaults to the Binding limits table
+above. Core-local users select Local explicitly on both sides.
+The default max_requests is 256
+**total registrations per session**, including tombstones, bounded to 4,096;
+start a fresh session explicitly when exhausted. Default max_streams is 64,
+bounded to 1,024. Bootstrap and cancellation cleanup default to 5 seconds;
+identity checks accept up to 120 seconds. Queue limits are the negotiated Limits,
+independently applied in each direction, including decoded-allocation charges,
+request-id overhead and control reserves. There are at most 128 pending async
+calls; exhaustion closes the local generation and wakes existing callers.
+
+Call `Owner::advance(monotonic_ms)` independently of waiting futures; initialize
+its clock before bootstrap and continue periodic ticks while work is pending.
+Timeouts emit typed failures/cancellation, never success. `ready` is only a
+readiness waiter: dropping it does not cancel the registered request; the host
+request guard must call cancel. The future core `transport_host` facade owns
+that guard and the physical-worker cleanup policy; it is not implemented here.
+
+The executable lifecycle/direction fixture is `tests/mux_async.rs`. The
+`tests/mux.rs` randomized byte test takes `GWZ_MUX_SEED` (default
+`0x47575a504c414345`) and `GWZ_MUX_CASES` (default 100); preserve the source
+revision and printed seed to replay. It transports typed messages entirely in
+memory, with random chunk/read sizes and small credit windows.

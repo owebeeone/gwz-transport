@@ -40,6 +40,17 @@ pub fn admit_limited(message: &Envelope, limits: &crate::protocol::Limits) -> Re
     crate::admission::envelope(message, limits)
 }
 
+/// Return the conservative live allocation charge for an already typed message.
+/// This performs the same bounded, nonallocating walk as admission.
+pub fn allocation_charge(
+    message: &Envelope,
+    limits: &crate::protocol::Limits,
+) -> Result<usize, Error> {
+    validate_limits(limits)?;
+    validate::envelope(message)?;
+    crate::admission::allocation_charge(message, limits)
+}
+
 pub(crate) use validate::limits as validate_limits;
 
 pub fn encode(message: &Envelope) -> Result<Vec<u8>, Error> {

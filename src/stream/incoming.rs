@@ -18,6 +18,7 @@ impl StreamMachine {
     fn accept(&mut self, message: Envelope) -> Result<(), Error> {
         if message.session_id != self.config.session_id
             || message.stream_id != self.config.stream_id
+            || message.version != self.config.profile_version
         {
             return Err(Error::Protocol);
         }
@@ -117,6 +118,7 @@ impl StreamMachine {
                 }
                 let closed = message.closed.ok_or(Error::Protocol)?;
                 if let Some(failure) = closed.failure {
+                    self.failure_facts = Some(closed.facts);
                     self.fail(
                         Error::PeerFailed {
                             code: failure.code,
@@ -146,6 +148,7 @@ impl StreamMachine {
             }
             MessageKind::Failed => {
                 let failure = message.failed.ok_or(Error::Protocol)?;
+                self.failure_facts = failure.facts.clone();
                 self.fail(
                     Error::PeerFailed {
                         code: failure.code,

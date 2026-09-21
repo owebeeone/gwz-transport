@@ -20,9 +20,6 @@ pub enum MessageKind {
     Closed,
     Cancel,
     Failed,
-    CheckIdentity,
-    IdentityChecked,
-    IdentityCheckFailed,
 }
 impl MessageKind {
     pub fn wire(self) -> i64 {
@@ -42,9 +39,6 @@ impl MessageKind {
             Self::Closed => 13,
             Self::Cancel => 14,
             Self::Failed => 15,
-            Self::CheckIdentity => 16,
-            Self::IdentityChecked => 17,
-            Self::IdentityCheckFailed => 18,
         }
     }
     pub fn from_wire(v: i64) -> Result<Self, DecodeError> {
@@ -64,9 +58,6 @@ impl MessageKind {
             13 => Self::Closed,
             14 => Self::Cancel,
             15 => Self::Failed,
-            16 => Self::CheckIdentity,
-            17 => Self::IdentityChecked,
-            18 => Self::IdentityCheckFailed,
             _ => {
                 return Err(DecodeError::UnknownEnum {
                     enum_name: "MessageKind",
@@ -242,7 +233,6 @@ pub enum ErrorCode {
     Io,
     Protocol,
     CarrierLost,
-    RepositoryRefused,
 }
 impl ErrorCode {
     pub fn wire(self) -> i64 {
@@ -259,7 +249,6 @@ impl ErrorCode {
             Self::Io => 10,
             Self::Protocol => 11,
             Self::CarrierLost => 12,
-            Self::RepositoryRefused => 13,
         }
     }
     pub fn from_wire(v: i64) -> Result<Self, DecodeError> {
@@ -276,7 +265,6 @@ impl ErrorCode {
             10 => Self::Io,
             11 => Self::Protocol,
             12 => Self::CarrierLost,
-            13 => Self::RepositoryRefused,
             _ => {
                 return Err(DecodeError::UnknownEnum {
                     enum_name: "ErrorCode",
@@ -529,39 +517,18 @@ impl Bound {
 pub struct Failure {
     pub code: ErrorCode,
     pub effect: Effect,
-    pub facts: Option<Facts>,
 }
 impl Failure {
     pub fn to_cbor(&self) -> Cbor {
         Cbor::Map(vec![
             (1, Cbor::Int(self.code.wire())),
             (2, Cbor::Int(self.effect.wire())),
-            (
-                3,
-                match &self.facts {
-                    Some(v) => v.to_cbor(),
-                    None => Cbor::Null,
-                },
-            ),
         ])
     }
     pub fn from_cbor(c: &Cbor) -> Result<Self, DecodeError> {
         Ok(Self {
             code: ErrorCode::from_wire(c.try_get(1)?.try_int()?)?,
             effect: Effect::from_wire(c.try_get(2)?.try_int()?)?,
-            facts: {
-                let v = c.try_get_opt(3)?;
-                match v {
-                    None => None,
-                    Some(v) => {
-                        if v.is_null() {
-                            None
-                        } else {
-                            Some(Facts::from_cbor(v)?)
-                        }
-                    }
-                }
-            },
         })
     }
 }
@@ -721,46 +688,6 @@ impl Open {
             deadlines: Deadlines::from_cbor(c.try_get(7)?)?,
             receive_limits: Limits::from_cbor(c.try_get(8)?)?,
         })
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Default)]
-pub struct CheckIdentity {
-    pub endpoint_id: String,
-    pub operation_id: String,
-    pub identity: Identity,
-    pub timeout_ms: i64,
-}
-impl CheckIdentity {
-    pub fn to_cbor(&self) -> Cbor {
-        Cbor::Map(vec![
-            (1, Cbor::Text(self.endpoint_id.clone())),
-            (2, Cbor::Text(self.operation_id.clone())),
-            (3, self.identity.to_cbor()),
-            (4, Cbor::Int(self.timeout_ms)),
-        ])
-    }
-    pub fn from_cbor(c: &Cbor) -> Result<Self, DecodeError> {
-        Ok(Self {
-            endpoint_id: c.try_get(1)?.try_text()?,
-            operation_id: c.try_get(2)?.try_text()?,
-            identity: Identity::from_cbor(c.try_get(3)?)?,
-            timeout_ms: c.try_get(4)?.try_int()?,
-        })
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Default)]
-pub struct IdentityChecked {}
-impl IdentityChecked {
-    pub fn to_cbor(&self) -> Cbor {
-        Cbor::Map(vec![])
-    }
-    pub fn from_cbor(c: &Cbor) -> Result<Self, DecodeError> {
-        if !c.is_map() {
-            return Err(DecodeError::WrongType { expected: "map" });
-        }
-        Ok(Self {})
     }
 }
 
@@ -1040,9 +967,6 @@ pub struct Envelope {
     pub closed: Option<Closed>,
     pub cancel: Option<Cancel>,
     pub failed: Option<Failure>,
-    pub check_identity: Option<CheckIdentity>,
-    pub identity_checked: Option<IdentityChecked>,
-    pub identity_check_failed: Option<Failure>,
 }
 impl Envelope {
     pub fn to_cbor(&self) -> Cbor {
@@ -1152,27 +1076,6 @@ impl Envelope {
             (
                 24,
                 match &self.failed {
-                    Some(v) => v.to_cbor(),
-                    None => Cbor::Null,
-                },
-            ),
-            (
-                25,
-                match &self.check_identity {
-                    Some(v) => v.to_cbor(),
-                    None => Cbor::Null,
-                },
-            ),
-            (
-                26,
-                match &self.identity_checked {
-                    Some(v) => v.to_cbor(),
-                    None => Cbor::Null,
-                },
-            ),
-            (
-                27,
-                match &self.identity_check_failed {
                     Some(v) => v.to_cbor(),
                     None => Cbor::Null,
                 },
@@ -1303,45 +1206,6 @@ impl Envelope {
                     None
                 } else {
                     Some(Failure::from_cbor(v)?)
-                }
-            },
-            check_identity: {
-                let v = c.try_get_opt(25)?;
-                match v {
-                    None => None,
-                    Some(v) => {
-                        if v.is_null() {
-                            None
-                        } else {
-                            Some(CheckIdentity::from_cbor(v)?)
-                        }
-                    }
-                }
-            },
-            identity_checked: {
-                let v = c.try_get_opt(26)?;
-                match v {
-                    None => None,
-                    Some(v) => {
-                        if v.is_null() {
-                            None
-                        } else {
-                            Some(IdentityChecked::from_cbor(v)?)
-                        }
-                    }
-                }
-            },
-            identity_check_failed: {
-                let v = c.try_get_opt(27)?;
-                match v {
-                    None => None,
-                    Some(v) => {
-                        if v.is_null() {
-                            None
-                        } else {
-                            Some(Failure::from_cbor(v)?)
-                        }
-                    }
                 }
             },
         })

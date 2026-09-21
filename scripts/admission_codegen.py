@@ -6,9 +6,13 @@ def emit(schema):
     lines = ['// GENERATED from transport.taut.py; do not edit.',
              'use crate::{codec::{Error, MAX_DATA, MAX_METADATA}, protocol::*};',
              'use crate::budget::Budget;', '',
-             'pub(crate) fn envelope(value: &Envelope, limits: &Limits) -> Result<(), Error> {',
+             'pub(crate) fn allocation_charge(value: &Envelope, limits: &Limits) -> Result<usize, Error> {',
              '    let mut budget = Budget::new(value.stream_id == 0, limits);',
-             '    visit_envelope(value, &mut budget, 0)', '}', '']
+             '    visit_envelope(value, &mut budget, 0)?;',
+             '    budget.total_charge()', '}',
+             '',
+             'pub(crate) fn envelope(value: &Envelope, limits: &Limits) -> Result<(), Error> {',
+             '    allocation_charge(value, limits).map(|_| ())', '}', '']
 
     def visit(t, expr, owner, name, depth):
         access = expr.removeprefix('&')
@@ -35,6 +39,8 @@ def emit(schema):
     for message in schema.messages.values():
         lines += [f'fn visit_{message.name.lower()}(value: &{message.name}, b: &mut Budget, depth: usize) -> Result<(), Error> {{',
                   f'    b.container({len(message.fields)}, depth)?;']
+        if not message.fields:
+            lines += ['    let _ = value;']
         for field in message.fields:
             lines += [f'    b.key({field.tag})?;']
             if field.optional:

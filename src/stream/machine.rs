@@ -53,6 +53,7 @@ pub struct StreamMachine {
     pub(super) close_pending: Option<Closed>,
     pub(super) completed: Option<CloseResult>,
     pub(super) error: Option<Error>,
+    pub(super) failure_facts: Option<Facts>,
     pub(super) terminal_message: Option<Envelope>,
     pub(super) peak_send: usize,
     pub(super) peak_recv: usize,
@@ -95,6 +96,7 @@ impl StreamMachine {
             close_pending: None,
             completed: None,
             error: None,
+            failure_facts: None,
             terminal_message: None,
             peak_send: 0,
             peak_recv: 0,
@@ -229,6 +231,59 @@ impl StreamMachine {
     /// The endpoint calls this only after its sink/network cleanup is complete.
     /// The stream never infers reusable connection health or Git success itself.
     pub fn complete_close(&mut self, disposition: Disposition, facts: Facts) -> Result<(), Error> {
+        self.complete_close_with_failure(disposition, facts, None)
+    }
+
+    /// Queue a typed terminal failure. Facts are carried by Closed.facts, the
+    /// sole authoritative evidence slot; nested Failure.facts is never used.
+    pub fn complete_close_failure(
+        &mut self,
+        disposition: Disposition,
+        facts: Facts,
+        code: ErrorCode,
+        effect: Effect,
+    ) -> Result<(), Error> {
+        self.complete_close_with_failure(
+            disposition,
+            facts,
+            Some(Failure {
+                code,
+                effect,
+                facts: None,
+            }),
+        )
+    }
+
+    /// Emit a typed terminal failure without waiting for the Close handshake.
+    /// Endpoint failures such as repository refusal must reach the peer before
+    /// it observes EOF; the first terminal outcome always wins.
+    pub fn fail_terminal(&mut self, failure: Failure) -> Result<(), Error> {
+        self.live()?;
+        if self.config.side != Side::Endpoint {
+            return Err(Error::WrongSide);
+        }
+        let mut message = self.envelope(MessageKind::Failed);
+        message.failed = Some(failure.clone());
+        crate::codec::admit_limited(&message, &self.config.peer_limits)
+            .map_err(|_| Error::Protocol)?;
+        self.failure_facts = failure.facts.clone();
+        self.fail(
+            Error::PeerFailed {
+                code: failure.code,
+                effect: failure.effect,
+            },
+            false,
+        );
+        self.terminal_message = Some(message);
+        Ok(())
+    }
+
+    fn complete_close_with_failure(
+        &mut self,
+        disposition: Disposition,
+        facts: Facts,
+        failure: Option<Failure>,
+    ) -> Result<(), Error> {
         self.live()?;
         if self.config.side != Side::Endpoint {
             return Err(Error::WrongSide);
@@ -248,7 +303,7 @@ impl StreamMachine {
                 disposition,
                 facts,
                 unread_response_discarded: self.discarded,
-                failure: None,
+                failure,
             });
             // Validate before retaining or cloning caller-owned metadata. A
             // rejected local construction leaves cleanup retryable.
@@ -265,6 +320,10 @@ impl StreamMachine {
             return Err(error);
         }
         self.completed.clone().ok_or(Error::WouldBlock)
+    }
+
+    pub fn retained_failure_facts(&self) -> Option<&Facts> {
+        self.failure_facts.as_ref()
     }
 
     pub fn cancel(&mut self) {
@@ -394,7 +453,7 @@ impl StreamMachine {
     }
     pub(super) fn envelope(&self, kind: MessageKind) -> Envelope {
         Envelope {
-            version: 1,
+            version: self.config.profile_version,
             session_id: self.config.session_id.clone(),
             stream_id: self.config.stream_id,
             kind,
@@ -435,6 +494,7 @@ impl StreamMachine {
                         ErrorCode::Protocol
                     },
                     effect: Effect::Possible,
+                    facts: None,
                 });
                 self.terminal_message = Some(message);
             }

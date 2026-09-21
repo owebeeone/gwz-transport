@@ -17,3 +17,5 @@ pub mod codec;
 mod policy;
 pub mod pool;
 pub mod stream;
+
+pub mod mux;

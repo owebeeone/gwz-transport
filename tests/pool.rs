@@ -253,6 +253,7 @@ fn connect_timeout_and_reported_failure_do_not_retry_the_request() {
         Err(Failure {
             code: ErrorCode::Io,
             effect: Effect::None,
+            facts: None,
         }),
     )
     .unwrap();
@@ -266,6 +267,7 @@ fn connect_timeout_and_reported_failure_do_not_retry_the_request() {
         Err(Failure {
             code: ErrorCode::Io,
             effect: Effect::Possible,
+            facts: None,
         }),
     )
     .unwrap();

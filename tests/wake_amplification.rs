@@ -150,6 +150,7 @@ fn cleanup_abort_and_abort_connect_become_runnable_once_at_deadline() {
         Err(gwz_transport::protocol::Failure {
             code: gwz_transport::protocol::ErrorCode::Io,
             effect: gwz_transport::protocol::Effect::Possible,
+            facts: None,
         }),
     )
     .unwrap();

@@ -1,10 +1,16 @@
-"""Transport conversation v1 draft. Owner: gwz-transport. Tags are not yet frozen."""
+"""GWZ transport owner conversation schema.
+
+Bootstrap envelopes use profile version 1; a successful Bound may negotiate
+profile version 2 for all subsequent messages.
+"""
 from taut.ir.dsl import BOOL, BYTES, INT, STR, Enum, F, List, Msg, Ref, schema
 
 SCHEMA = schema(
     MessageKind=Enum(bind=1, bound=2, bind_rejected=3, open=4, opened=5,
                      open_failed=6, data=7, window=8, flush=9, flushed=10,
-                     end_write=11, close=12, closed=13, cancel=14, failed=15),
+                     end_write=11, close=12, closed=13, cancel=14, failed=15,
+                     check_identity=16, identity_checked=17,
+                     identity_check_failed=18),
     EndpointRole=Enum(local=1, driver=2),
     Scheme=Enum(ssh=1, https=2),
     AuthPolicy=Enum(ssh_ambient=1, ssh_explicit=2, anonymous=3, gh=4),
@@ -13,7 +19,8 @@ SCHEMA = schema(
     IdentityMode=Enum(ambient=1, explicit_key=2, credentials_disabled=3),
     ErrorCode=Enum(unsupported_version=1, unsupported_operation=2, unavailable=3,
                    invalid_request=4, capacity=5, timeout=6, cancelled=7,
-                   authentication=8, trust=9, io=10, protocol=11, carrier_lost=12),
+                   authentication=8, trust=9, io=10, protocol=11, carrier_lost=12,
+                   repository_refused=13),
     Effect=Enum(none=1, possible=2),
     Disposition=Enum(reusable=1, discarded=2),
     AuthMethod=Enum(none=1, ssh_agent=2, ssh_key=3, gh=4),
@@ -28,7 +35,8 @@ SCHEMA = schema(
     Bound=Msg(version=F(1, INT), endpoint_id=F(2, STR), role=F(3, Ref.EndpointRole),
               schemes=F(4, List(Ref.Scheme)), policies=F(5, List(Ref.AuthPolicy)),
               receive_limits=F(6, Ref.Limits), trust_owner=F(7, STR)),
-    Failure=Msg(code=F(1, Ref.ErrorCode), effect=F(2, Ref.Effect)),
+    Failure=Msg(code=F(1, Ref.ErrorCode), effect=F(2, Ref.Effect),
+                facts=F(3, Ref.Facts, optional=True, missing_ok=True)),
     Destination=Msg(scheme=F(1, Ref.Scheme), host=F(2, STR), port=F(3, INT),
                     path=F(4, STR), ssh_username=F(5, STR, optional=True)),
     Identity=Msg(mode=F(1, Ref.IdentityMode), key_path=F(2, STR, optional=True),
@@ -39,6 +47,9 @@ SCHEMA = schema(
              destination=F(3, Ref.Destination), service=F(4, Ref.GitService),
              identity=F(5, Ref.Identity), policy=F(6, Ref.AuthPolicy),
              deadlines=F(7, Ref.Deadlines), receive_limits=F(8, Ref.Limits)),
+    CheckIdentity=Msg(endpoint_id=F(1, STR), operation_id=F(2, STR),
+                      identity=F(3, Ref.Identity), timeout_ms=F(4, INT)),
+    IdentityChecked=Msg(),
     Facts=Msg(method=F(1, Ref.AuthMethod), credential_offered=F(2, BOOL),
               authenticated=F(3, BOOL, optional=True),
               key_fingerprint=F(4, STR, optional=True),
@@ -64,5 +75,8 @@ SCHEMA = schema(
                  flush=F(18, Ref.Barrier, optional=True), flushed=F(19, Ref.Barrier, optional=True),
                  end_write=F(20, Ref.EndWrite, optional=True), close=F(21, Ref.Close, optional=True),
                  closed=F(22, Ref.Closed, optional=True), cancel=F(23, Ref.Cancel, optional=True),
-                 failed=F(24, Ref.Failure, optional=True)),
+                 failed=F(24, Ref.Failure, optional=True),
+                 check_identity=F(25, Ref.CheckIdentity, optional=True, missing_ok=True),
+                 identity_checked=F(26, Ref.IdentityChecked, optional=True, missing_ok=True),
+                 identity_check_failed=F(27, Ref.Failure, optional=True, missing_ok=True)),
 )

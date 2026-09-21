@@ -1,6 +1,6 @@
 //! Executor-independent futures; the host delivers messages and clock ticks.
 use super::*;
-use crate::protocol::{Disposition, Envelope, Facts};
+use crate::protocol::{Disposition, Effect, Envelope, ErrorCode, Facts};
 use std::{
     collections::BTreeMap,
     future::poll_fn,
@@ -220,6 +220,10 @@ impl Stream {
     pub fn cancel(&self) {
         self.shared.change(StreamMachine::cancel);
     }
+    pub fn retained_failure_facts(&self) -> Option<Facts> {
+        self.shared
+            .change(|machine| machine.retained_failure_facts().cloned())
+    }
 }
 impl Clone for Stream {
     fn clone(&self) -> Self {
@@ -279,6 +283,23 @@ impl MessageEndpoint {
     pub fn complete_close(&self, disposition: Disposition, facts: Facts) -> Result<(), Error> {
         self.shared
             .change(|machine| machine.complete_close(disposition, facts))
+    }
+    pub fn complete_close_failure(
+        &self,
+        disposition: Disposition,
+        facts: Facts,
+        code: ErrorCode,
+        effect: Effect,
+    ) -> Result<(), Error> {
+        self.shared
+            .change(|machine| machine.complete_close_failure(disposition, facts, code, effect))
+    }
+    pub fn fail_terminal(&self, failure: crate::protocol::Failure) -> Result<(), Error> {
+        self.shared.change(|machine| machine.fail_terminal(failure))
+    }
+    pub fn retained_failure_facts(&self) -> Option<Facts> {
+        self.shared
+            .change(|machine| machine.retained_failure_facts().cloned())
     }
     pub fn disconnect(&self) {
         self.shared.change(StreamMachine::disconnect);

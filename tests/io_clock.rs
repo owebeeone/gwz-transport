@@ -98,6 +98,7 @@ fn exact_deadline_times_out_and_preserves_received_prefix() {
             failed: Some(Failure {
                 code: ErrorCode::Timeout,
                 effect: Effect::Possible,
+                facts: None,
             }),
             ..Default::default()
         }

@@ -34,7 +34,7 @@ pub(crate) fn limits(value: &Limits) -> Result<(), Error> {
 }
 
 pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
-    if value.version != 1 {
+    if !(1..=2).contains(&value.version) {
         return Err(Error::UnsupportedVersion);
     }
     if value.session_id.is_empty() || value.session_id.len() > 128 {
@@ -56,13 +56,21 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
         value.closed.is_some(),
         value.cancel.is_some(),
         value.failed.is_some(),
+        value.check_identity.is_some(),
+        value.identity_checked.is_some(),
+        value.identity_check_failed.is_some(),
     ];
     let kind = value.kind.wire() as usize;
     if bodies.iter().filter(|present| **present).count() != 1 || !bodies[kind - 1] {
         return Err(Error::InvalidMessage);
     }
-    if (kind <= 3 && value.stream_id != 0) || (kind > 3 && value.stream_id <= 0) {
+    if (kind <= 3 && (value.stream_id != 0 || value.version != 1))
+        || (kind > 3 && value.stream_id <= 0)
+    {
         return Err(Error::InvalidMessage);
+    }
+    if kind >= 16 && value.version != 2 {
+        return Err(Error::UnsupportedVersion);
     }
     if let Some(bind) = &value.bind {
         if bind.versions.is_empty() || !crate::policy::capabilities(&bind.schemes, &bind.policies) {
@@ -71,7 +79,7 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
         limits(&bind.receive_limits)?;
     }
     if let Some(bound) = &value.bound {
-        if bound.version != 1
+        if !(1..=2).contains(&bound.version)
             || bound.endpoint_id.is_empty()
             || bound.trust_owner.is_empty()
             || !crate::policy::capabilities(&bound.schemes, &bound.policies)
@@ -80,21 +88,44 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
         }
         limits(&bound.receive_limits)?;
     }
+    if let Some(failure) = &value.bind_rejected {
+        if failure.facts.is_some() || failure.code == ErrorCode::RepositoryRefused {
+            return Err(Error::InvalidMessage);
+        }
+    }
+    if value.version == 1 {
+        if value
+            .open_failed
+            .as_ref()
+            .is_some_and(failure_has_v2_fields)
+            || value.failed.as_ref().is_some_and(failure_has_v2_fields)
+        {
+            return Err(Error::InvalidMessage);
+        }
+    }
+    if let Some(failure) = &value.identity_check_failed {
+        if failure.effect != Effect::None || failure.facts.is_some() {
+            return Err(Error::InvalidMessage);
+        }
+    }
+    if let Some(closed) = &value.closed {
+        if closed.failure.as_ref().is_some_and(|failure| {
+            failure.facts.is_some()
+                || (value.version == 1 && failure.code == ErrorCode::RepositoryRefused)
+        }) {
+            return Err(Error::InvalidMessage);
+        }
+    }
     if let Some(open) = &value.open {
         limits(&open.receive_limits)?;
         destination(&open.destination)?;
         if open.endpoint_id.is_empty() || open.operation_id.is_empty() {
             return Err(Error::InvalidMessage);
         }
-        let identity = &open.identity;
-        if identity.mode == IdentityMode::ExplicitKey {
-            if identity.key_path.as_ref().is_none_or(|s| s.is_empty()) {
-                return Err(Error::InvalidMessage);
-            }
-        } else if identity.key_path.is_some() || identity.path_base.is_some() {
+        if !valid_identity(&open.identity) {
             return Err(Error::InvalidMessage);
         }
-        if !crate::policy::allows(open.destination.scheme, open.policy, identity.mode) {
+        if !crate::policy::allows(open.destination.scheme, open.policy, open.identity.mode) {
             return Err(Error::InvalidMessage);
         }
         let d = &open.deadlines;
@@ -104,6 +135,17 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
             || [d.connect_ms, d.io_ms]
                 .iter()
                 .any(|v| !(0..=i32::MAX as i64).contains(v))
+        {
+            return Err(Error::InvalidMessage);
+        }
+    }
+    if let Some(check) = &value.check_identity {
+        if check.endpoint_id.is_empty()
+            || check.operation_id.is_empty()
+            || check.timeout_ms <= 0
+            || check.timeout_ms > i32::MAX as i64
+            || check.identity.mode != IdentityMode::ExplicitKey
+            || !valid_identity(&check.identity)
         {
             return Err(Error::InvalidMessage);
         }
@@ -144,6 +186,24 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
         return Err(Error::InvalidMessage);
     }
     Ok(())
+}
+
+fn failure_has_v2_fields(failure: &Failure) -> bool {
+    failure.facts.is_some() || failure.code == ErrorCode::RepositoryRefused
+}
+
+fn valid_identity(value: &Identity) -> bool {
+    if value.mode != IdentityMode::ExplicitKey {
+        return value.key_path.is_none() && value.path_base.is_none();
+    }
+    value
+        .key_path
+        .as_ref()
+        .is_some_and(|path| !path.is_empty() && !path.contains('\0'))
+        && value
+            .path_base
+            .as_ref()
+            .is_none_or(|base| !base.is_empty() && !base.contains('\0'))
 }
 
 fn destination(value: &Destination) -> Result<(), Error> {

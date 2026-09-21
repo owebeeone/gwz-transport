@@ -211,6 +211,7 @@ impl Case {
                 Err(Failure {
                     code: ErrorCode::Io,
                     effect: Effect::Possible,
+                    facts: None,
                 })
             } else {
                 Ok(if self.random.below(4) == 0 {

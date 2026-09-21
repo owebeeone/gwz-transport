@@ -245,7 +245,11 @@ fn typed_failure_code_and_effect_survive_prefixes_and_failed_close() {
                 session_id: "memory-session".into(),
                 stream_id: 1,
                 kind: MessageKind::Failed,
-                failed: Some(Failure { code, effect }),
+                failed: Some(Failure {
+                    code,
+                    effect,
+                    facts: None,
+                }),
                 ..Default::default()
             })
             .unwrap();
@@ -274,7 +278,11 @@ fn typed_failure_code_and_effect_survive_prefixes_and_failed_close() {
                     disposition: Disposition::Discarded,
                     facts: Facts::default(),
                     unread_response_discarded: false,
-                    failure: Some(Failure { code, effect }),
+                    failure: Some(Failure {
+                        code,
+                        effect,
+                        facts: None,
+                    }),
                 }),
                 ..Default::default()
             })

@@ -32,7 +32,7 @@ fn binding_intersects_capabilities_and_narrows_limits() {
 #[test]
 fn unsupported_version_has_no_installed_binding() {
     let mut offer = binding::offer("session-1", EndpointRole::Driver);
-    offer.bind.as_mut().unwrap().versions = vec![2];
+    offer.bind.as_mut().unwrap().versions = vec![3];
     let error = endpoint().accept(&offer).unwrap_err();
     assert_eq!(error.code, ErrorCode::UnsupportedVersion);
     assert_eq!(error.effect, Effect::None);

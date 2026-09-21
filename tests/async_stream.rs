@@ -221,6 +221,7 @@ fn typed_peer_failure_wakes_async_reader_with_exact_cause() {
         failed: Some(Failure {
             code: ErrorCode::Io,
             effect: Effect::Possible,
+            facts: None,
         }),
         ..Default::default()
     })
@@ -235,4 +236,53 @@ fn typed_peer_failure_wakes_async_reader_with_exact_cause() {
         pin!(stream.write(b"x")).poll(&mut cx),
         Poll::Ready(Err(expected))
     );
+}
+
+#[test]
+fn endpoint_failure_is_emitted_before_eof_and_wakes_reader() {
+    let mut initiator_config = Config::new("async-failure", 1, Side::Initiator);
+    initiator_config.profile_version = 2;
+    let mut endpoint_config = initiator_config.clone();
+    endpoint_config.side = Side::Endpoint;
+    let (initiator, initiator_port) = Stream::new(initiator_config).unwrap();
+    let (_endpoint, endpoint_port) = Stream::new(endpoint_config).unwrap();
+    let signal = Arc::new(Signal::default());
+    let waker = Waker::from(signal.clone());
+    let mut cx = Context::from_waker(&waker);
+    let mut bytes = [0];
+    let mut read = pin!(initiator.read(&mut bytes));
+    assert!(read.as_mut().poll(&mut cx).is_pending());
+    endpoint_port
+        .fail_terminal(Failure {
+            code: ErrorCode::RepositoryRefused,
+            effect: Effect::None,
+            facts: Some(Facts::default()),
+        })
+        .unwrap();
+    assert_eq!(
+        endpoint_port.fail_terminal(Failure {
+            code: ErrorCode::Timeout,
+            effect: Effect::Possible,
+            facts: None,
+        }),
+        Err(Error::PeerFailed {
+            code: ErrorCode::RepositoryRefused,
+            effect: Effect::None,
+        })
+    );
+    let message = match pin!(endpoint_port.next_message()).poll(&mut cx) {
+        Poll::Ready(Ok(Some(message))) => message,
+        other => panic!("expected terminal failure, got {other:?}"),
+    };
+    initiator_port.deliver(message).unwrap();
+    assert!(signal.0.load(Ordering::Relaxed) > 0);
+    assert_eq!(
+        read.as_mut().poll(&mut cx),
+        Poll::Ready(Err(Error::PeerFailed {
+            code: ErrorCode::RepositoryRefused,
+            effect: Effect::None,
+        }))
+    );
+    assert_eq!(initiator.retained_failure_facts(), Some(Facts::default()));
+    assert!(endpoint_port.stats().terminal);
 }

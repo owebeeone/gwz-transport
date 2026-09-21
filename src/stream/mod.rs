@@ -40,6 +40,8 @@ pub struct Config {
     pub session_id: String,
     pub stream_id: i64,
     pub side: Side,
+    /// Negotiated owner profile for non-bootstrap stream messages.
+    pub profile_version: i64,
     /// This receiver's negotiated limits; the buffer/window may narrow them.
     pub receive_limits: crate::protocol::Limits,
     /// The peer receiver's negotiated limits, applied before emitting messages.
@@ -63,6 +65,7 @@ impl Config {
             session_id: session_id.into(),
             stream_id,
             side,
+            profile_version: 1,
             receive_limits: crate::binding::default_limits(),
             peer_limits: crate::binding::default_limits(),
             send_buffer: 65536,
@@ -84,6 +87,7 @@ impl Config {
         if self.session_id.is_empty()
             || self.session_id.len() > 128
             || self.stream_id <= 0
+            || !(1..=2).contains(&self.profile_version)
             || self.send_buffer == 0
             || self.send_buffer > 4 * 1024 * 1024
             || self.receive_window == 0
