@@ -169,6 +169,19 @@ impl Future for Checkout {
         }
     }
 }
+impl Checkout {
+    /// Correlate setup observations with this request's in-progress physical
+    /// connection. This is not a lease: waiting, ready, failed and consumed
+    /// checkouts return None and no resource access or reuse is authorized.
+    pub fn opening_connection(&self) -> Option<ConnectionId> {
+        let id = self.request?;
+        self.shared
+            .change(|state| match state.machine.requests.get(&id)?.state {
+                machine::RequestState::Opening(connection) => Some(connection),
+                _ => None,
+            })
+    }
+}
 impl Drop for Checkout {
     fn drop(&mut self) {
         if let Some(id) = self.request.take() {

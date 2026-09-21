@@ -23,6 +23,35 @@ fn request() -> Request {
 }
 
 #[test]
+fn opening_correlation_never_exposes_waiting_ready_or_consumed_leases() {
+    let (pool, mut driver) = Pool::new(Config {
+        per_user_host: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let mut cx = Context::from_waker(std::task::Waker::noop());
+    let mut first = pool.checkout(request()).unwrap();
+    let waiting = pool.checkout(request()).unwrap();
+    let Poll::Ready(Some(Action::Connect { connection, .. })) =
+        pin!(driver.next_action()).poll(&mut cx)
+    else {
+        panic!("connect");
+    };
+    assert_eq!(first.opening_connection(), Some(connection));
+    assert_eq!(waiting.opening_connection(), None);
+    driver
+        .connected(connection, Ok(Some(Identity::Ambient)))
+        .unwrap();
+    assert_eq!(first.opening_connection(), None);
+    let Poll::Ready(Ok(lease)) = pin!(&mut first).poll(&mut cx) else {
+        panic!("lease");
+    };
+    assert_eq!(first.opening_connection(), None);
+    lease.release(Disposition::Reusable).unwrap();
+    assert_eq!(waiting.opening_connection(), None);
+}
+
+#[test]
 fn clones_share_capacity_and_lease_drop_discards_while_checkout_drop_cancels() {
     let (pool, mut driver) = Pool::new(Config {
         per_user_host: 1,
