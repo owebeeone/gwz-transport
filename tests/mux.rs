@@ -106,6 +106,8 @@ fn retired_request_ids_and_stream_ids_cannot_reopen_work() {
     cli.send("a", &reply).unwrap();
     assert!(cli.receive(&sent).is_ok()); // retired id is discarded
     assert!(cli.next_action().is_none());
+    assert_eq!(cli.finish("a"), Err(Error::WouldBlock));
+    assert_eq!(cli.next_message().unwrap().1, reply);
     cli.finish("a").unwrap();
     assert_eq!(cli.register("a", None), Err(Error::InvalidRequest));
 }
@@ -169,6 +171,9 @@ fn repeated_finish_does_not_extend_cleanup_deadline() {
     core.advance(4999);
     assert_eq!(core.finish("a"), Err(Error::WouldBlock));
     core.advance(5000);
+    assert_eq!(core.finish("a"), Err(Error::WouldBlock));
+    core.next_action()
+        .expect("local timeout must reach its owner");
     assert!(core.finish("a").is_ok());
 }
 #[test]
@@ -411,4 +416,355 @@ fn cancellation_control_progresses_while_other_requests_keep_bulk_queue_busy() {
     assert_eq!(cancellation.1.kind, MessageKind::Cancel);
     assert_eq!(cancellation.1.stream_id, check_id);
     assert_eq!(core.next_message().unwrap().1.kind, MessageKind::Data);
+}
+
+fn queued_terminal(kind: MessageKind) -> (Mux, Mux, gwz_transport::mux::Attachment) {
+    let (mut core, mut cli) = pair();
+    bind(&mut core, &mut cli);
+    let id = match kind {
+        MessageKind::IdentityChecked | MessageKind::IdentityCheckFailed => {
+            let id = check(&mut core, "a");
+            cli.receive(&core.next_message().unwrap()).unwrap();
+            cli.next_action();
+            id
+        }
+        MessageKind::OpenFailed => begin_stream(&mut core, &mut cli),
+        _ => open_stream(&mut core, &mut cli),
+    };
+    let facts = Facts {
+        method: AuthMethod::SshKey,
+        credential_offered: true,
+        authenticated: Some(true),
+        ssh_exit_status: Some(128),
+        ..Default::default()
+    };
+    let failure = Failure {
+        code: ErrorCode::RepositoryRefused,
+        effect: Effect::None,
+        facts: Some(facts.clone()),
+    };
+    let mut message = cli.message(id, kind).unwrap();
+    match kind {
+        MessageKind::IdentityChecked => message.identity_checked = Some(IdentityChecked {}),
+        MessageKind::IdentityCheckFailed => {
+            message.identity_check_failed = Some(Failure {
+                code: ErrorCode::Authentication,
+                effect: Effect::None,
+                facts: None,
+            })
+        }
+        MessageKind::OpenFailed => message.open_failed = Some(failure),
+        MessageKind::Failed => message.failed = Some(failure),
+        MessageKind::Closed => {
+            message.closed = Some(Closed {
+                disposition: Disposition::Discarded,
+                unread_response_discarded: false,
+                facts,
+                failure: Some(Failure {
+                    facts: None,
+                    ..failure
+                }),
+            })
+        }
+        _ => panic!("terminal family"),
+    }
+    cli.send("a", &message).unwrap();
+    (core, cli, ("a".into(), message))
+}
+const TERMINALS: [MessageKind; 5] = [
+    MessageKind::OpenFailed,
+    MessageKind::IdentityChecked,
+    MessageKind::IdentityCheckFailed,
+    MessageKind::Failed,
+    MessageKind::Closed,
+];
+#[test]
+fn finish_retains_every_terminal_until_direct_handoff_with_facts() {
+    for kind in TERMINALS {
+        let (mut core, mut cli, expected) = queued_terminal(kind);
+        assert_eq!(cli.finish("a"), Err(Error::WouldBlock), "{kind:?}");
+        cli.cancel("a").unwrap();
+        assert_eq!(cli.finish("a"), Err(Error::WouldBlock));
+        let terminal = cli.next_message().expect("owned terminal survives sealing");
+        assert_eq!(terminal, expected);
+        cli.finish("a").unwrap();
+        core.receive(&terminal).unwrap();
+        assert_eq!(core.active_streams(), 0);
+        assert_eq!(core.next_action(), Some(expected));
+        core.finish("a").unwrap();
+    }
+}
+#[test]
+fn finish_retains_every_terminal_until_async_handoff_with_facts() {
+    use gwz_transport::mux::Owner;
+    use std::{
+        future::Future,
+        pin::pin,
+        task::{Context, Poll, Waker},
+    };
+    for kind in TERMINALS {
+        let (core, cli, expected) = queued_terminal(kind);
+        let (core, core_port) = Owner::new(core);
+        let (cli, cli_port) = Owner::new(cli);
+        let mut cx = Context::from_waker(Waker::noop());
+        assert_eq!(cli.finish("a"), Err(Error::WouldBlock), "{kind:?}");
+        let Poll::Ready(Ok(Some(terminal))) = pin!(cli_port.next_message()).poll(&mut cx) else {
+            panic!("terminal ready")
+        };
+        assert_eq!(terminal, expected);
+        cli.finish("a").unwrap();
+        assert_eq!(
+            pin!(core_port.deliver(terminal)).poll(&mut cx),
+            Poll::Ready(Ok(()))
+        );
+        assert_eq!(
+            pin!(core.next_action()).poll(&mut cx),
+            Poll::Ready(Ok(Some(expected)))
+        );
+        core.finish("a").unwrap();
+    }
+}
+#[test]
+fn stalled_terminal_handoff_expires_without_renewing_cleanup_deadline() {
+    for kind in TERMINALS {
+        let (mut core, mut cli, _) = queued_terminal(kind);
+        assert_eq!(cli.finish("a"), Err(Error::WouldBlock));
+        cli.advance(4999);
+        assert_eq!(cli.finish("a"), Err(Error::WouldBlock));
+        cli.advance(5000);
+        assert_eq!(cli.phase(), Phase::Closed);
+        // Host propagation releases the peer; never assert peer cleanup.
+        core.disconnect();
+        assert_eq!(core.finish("a"), Err(Error::Closed));
+    }
+}
+#[test]
+fn terminal_handoff_keeps_control_capacity_with_another_requests_bulk_queue() {
+    let (mut core, mut cli) = pair();
+    bind(&mut core, &mut cli);
+    let bulk = open_stream(&mut core, &mut cli);
+    register(&mut core, &mut cli, "b");
+    let id = check(&mut core, "b");
+    cli.receive(&core.next_message().unwrap()).unwrap();
+    cli.next_action();
+    let mut offset = 0;
+    loop {
+        let mut frame = cli.message(bulk, MessageKind::Data).unwrap();
+        frame.data = Some(Data {
+            offset,
+            payload: vec![5; 65536],
+        });
+        match cli.send("a", &frame) {
+            Ok(()) => offset += 65536,
+            Err(Error::WouldBlock) => break,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    let mut terminal = cli.message(id, MessageKind::IdentityChecked).unwrap();
+    terminal.identity_checked = Some(IdentityChecked {});
+    cli.send("b", &terminal).unwrap();
+    assert_eq!(cli.finish("b"), Err(Error::WouldBlock));
+    cli.cancel("b").unwrap();
+    let mut delivered = false;
+    for _ in 0..64 {
+        let Some(item) = cli.next_message() else {
+            break;
+        };
+        core.receive(&item).unwrap();
+        core.next_action();
+        if item.1.stream_id == id {
+            assert_eq!(item.1, terminal);
+            delivered = true;
+            break;
+        }
+    }
+    assert!(delivered);
+    cli.finish("b").unwrap();
+    assert_eq!(core.active_streams(), 1); // only unrelated bulk stream remains
+}
+#[test]
+fn dropping_port_with_a_pending_terminal_closes_generation_and_peer_on_propagation() {
+    use gwz_transport::mux::Owner;
+    use std::{
+        future::Future,
+        pin::pin,
+        task::{Context, Poll, Waker},
+    };
+    let (core, cli, _) = queued_terminal(MessageKind::OpenFailed);
+    let (core, core_port) = Owner::new(core);
+    let (cli, cli_port) = Owner::new(cli);
+    assert_eq!(cli.finish("a"), Err(Error::WouldBlock));
+    drop(cli_port);
+    assert_eq!(cli.phase(), Phase::Closed);
+    core_port.disconnect();
+    let mut cx = Context::from_waker(Waker::noop());
+    assert_eq!(
+        pin!(core.next_action()).poll(&mut cx),
+        Poll::Ready(Ok(None))
+    );
+    assert_eq!(core.finish("a"), Err(Error::Closed));
+}
+
+#[test]
+fn incompatible_binding_limits_send_the_exact_typed_rejection() {
+    let (mut core, _) = pair();
+    let mut limits = binding::default_limits();
+    limits.metadata_bytes = 128;
+    let mut cli = Mux::endpoint(
+        "session",
+        binding::EndpointConfig {
+            endpoint_id: "endpoint".into(),
+            role: EndpointRole::Driver,
+            schemes: vec![Scheme::Ssh],
+            policies: vec![AuthPolicy::SshAmbient],
+            limits,
+            trust_owner: "account".into(),
+        },
+        Config::default(),
+    )
+    .unwrap();
+    register(&mut core, &mut cli, "a");
+    core.begin("a").unwrap();
+    assert_eq!(cli.receive(&core.next_message().unwrap()), Ok(()));
+    assert_eq!(cli.active_streams(), 0);
+    assert!(cli.binding().is_none());
+    let terminal = cli
+        .next_message()
+        .expect("typed rejection before retirement");
+    assert_eq!(terminal.1.kind, MessageKind::BindRejected);
+    assert_eq!(
+        terminal.1.bind_rejected,
+        Some(Failure {
+            code: ErrorCode::UnsupportedOperation,
+            effect: Effect::None,
+            facts: None,
+        })
+    );
+    core.receive(&terminal).unwrap();
+    assert_eq!(core.bootstrap_failure(), terminal.1.bind_rejected.as_ref());
+    assert_eq!(core.phase(), Phase::Closed);
+    assert!(core.binding().is_none());
+    assert!(core.next_action().is_none());
+}
+
+#[test]
+fn finish_preserves_timeout_terminal_and_peer_terminal_cleanup_action() {
+    let (mut core, mut cli) = pair();
+    bind(&mut core, &mut cli);
+    check(&mut core, "a");
+    cli.receive(&core.next_message().unwrap()).unwrap();
+    cli.next_action();
+    cli.advance(100);
+    assert_eq!(cli.finish("a"), Err(Error::WouldBlock));
+    let terminal = cli.next_message().unwrap();
+    assert_eq!(
+        terminal.1.identity_check_failed.as_ref().unwrap().code,
+        ErrorCode::Timeout
+    );
+    core.receive(&terminal).unwrap();
+    core.next_action();
+    cli.finish("a").unwrap();
+    core.finish("a").unwrap();
+
+    let (mut core, mut cli) = pair();
+    bind(&mut core, &mut cli);
+    let id = open_stream(&mut core, &mut cli);
+    let mut failed = core.message(id, MessageKind::Failed).unwrap();
+    failed.failed = Some(Failure {
+        code: ErrorCode::Io,
+        effect: Effect::Possible,
+        facts: None,
+    });
+    core.send("a", &failed).unwrap();
+    cli.receive(&core.next_message().unwrap()).unwrap();
+    assert_eq!(cli.finish("a"), Err(Error::WouldBlock));
+    assert_eq!(cli.next_action(), Some(("a".into(), failed)));
+    cli.finish("a").unwrap();
+}
+
+#[test]
+fn async_bootstrap_rejection_retains_typed_reason_after_both_ports_retire() {
+    use gwz_transport::mux::Owner;
+    use std::{
+        future::Future,
+        pin::pin,
+        task::{Context, Poll, Waker},
+    };
+    let (mut core, mut cli) = pair();
+    register(&mut core, &mut cli, "a");
+    core.begin("a").unwrap();
+    let mut request = core.next_message().unwrap();
+    request.1.bind.as_mut().unwrap().versions = vec![1];
+    cli.receive(&request).unwrap();
+    assert_eq!(cli.phase(), Phase::Rejecting);
+    assert!(cli.binding().is_none());
+    assert_eq!(cli.register("new", None), Err(Error::Rejected));
+    assert_eq!(cli.finish("a"), Err(Error::WouldBlock));
+    let (core, core_port) = Owner::new(core);
+    let (cli, cli_port) = Owner::new(cli);
+    let mut cx = Context::from_waker(Waker::noop());
+    let Poll::Ready(Ok(Some(frame))) = pin!(cli_port.next_message()).poll(&mut cx) else {
+        panic!("rejection handoff")
+    };
+    assert_eq!(
+        pin!(core_port.deliver(frame)).poll(&mut cx),
+        Poll::Ready(Ok(()))
+    );
+    let expected = Some(Failure {
+        code: ErrorCode::UnsupportedVersion,
+        effect: Effect::None,
+        facts: None,
+    });
+    assert_eq!(core.bootstrap_failure(), expected);
+    assert_eq!(cli.bootstrap_failure(), expected);
+    assert_eq!(
+        pin!(core.ready()).poll(&mut cx),
+        Poll::Ready(Err(Error::Rejected))
+    );
+    assert_eq!(
+        pin!(cli.ready()).poll(&mut cx),
+        Poll::Ready(Err(Error::Rejected))
+    );
+    assert_eq!(
+        pin!(cli_port.next_message()).poll(&mut cx),
+        Poll::Ready(Ok(None))
+    );
+    core_port.disconnect();
+    assert_eq!(core.bootstrap_failure(), expected); // no late closure erases first outcome
+}
+
+#[test]
+fn malformed_bootstrap_closes_without_claiming_a_negotiation_rejection() {
+    let (mut core, mut cli) = pair();
+    register(&mut core, &mut cli, "a");
+    core.begin("a").unwrap();
+    let mut invalid = core.next_message().unwrap();
+    invalid
+        .1
+        .bind
+        .as_mut()
+        .unwrap()
+        .receive_limits
+        .queued_frames = 0;
+    assert_eq!(cli.receive(&invalid), Err(Error::Protocol));
+    assert_eq!(cli.phase(), Phase::Closed);
+    assert!(cli.bootstrap_failure().is_none());
+    assert!(cli.next_message().is_none());
+    assert!(cli.next_action().is_none());
+}
+
+#[test]
+fn stalled_bootstrap_rejection_handoff_has_a_bounded_deadline() {
+    let (_, mut cli) = pair();
+    cli.register("a", None).unwrap();
+    let offer = binding::offer("session", EndpointRole::Driver);
+    cli.receive(&("a".into(), offer)).unwrap();
+    assert_eq!(cli.phase(), Phase::Rejecting);
+    cli.advance(5000);
+    assert_eq!(cli.phase(), Phase::Closed);
+    assert_eq!(
+        cli.bootstrap_failure().unwrap().code,
+        ErrorCode::UnsupportedVersion
+    );
+    assert!(cli.next_message().is_none());
 }

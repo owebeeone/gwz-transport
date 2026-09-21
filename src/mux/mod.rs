@@ -19,6 +19,7 @@ pub enum Error {
     Capacity,
     WouldBlock,
     Protocol,
+    Rejected,
     Closed,
     WrongState,
 }
@@ -26,6 +27,7 @@ pub enum Error {
 pub enum Phase {
     Unbound,
     Binding,
+    Rejecting,
     Ready,
     Closed,
 }
@@ -55,6 +57,7 @@ impl Default for Config {
 struct Request {
     operation: Option<String>,
     sealed: bool,
+    cleanup_deadline: Option<u64>,
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
@@ -113,9 +116,15 @@ impl Queue {
             entry.attachment
         })
     }
+    fn has_terminal(&self, request: &str) -> bool {
+        self.items
+            .iter()
+            .any(|q| q.attachment.0 == request && terminal(q.attachment.1.kind))
+    }
     fn discard(&mut self, request: &str) {
         self.items.retain(|entry| {
             entry.attachment.0 != request
+                || terminal(entry.attachment.1.kind)
                 || matches!(
                     entry.attachment.1.kind,
                     MessageKind::Open
@@ -145,6 +154,7 @@ pub struct Mux {
     binding: Option<Binding>,
     offer: Option<Attachment>,
     acknowledgement: Option<Attachment>,
+    rejection: Option<Failure>,
     bootstrap_deadline: Option<u64>,
     requests: BTreeMap<String, Request>,
     used_requests: BTreeSet<String>,
@@ -191,6 +201,7 @@ impl Mux {
             binding: None,
             offer: None,
             acknowledgement: None,
+            rejection: None,
             bootstrap_deadline: None,
             requests: BTreeMap::new(),
             used_requests: BTreeSet::new(),
@@ -208,6 +219,10 @@ impl Mux {
     pub fn binding(&self) -> Option<&Binding> {
         self.binding.as_ref()
     }
+    /// Retained typed bootstrap outcome, including after local port retirement.
+    pub fn bootstrap_failure(&self) -> Option<&Failure> {
+        self.rejection.as_ref()
+    }
     pub fn active_streams(&self) -> usize {
         self.routes.len()
     }
@@ -219,6 +234,9 @@ impl Mux {
     }
     pub fn register(&mut self, request: &str, operation: Option<String>) -> Result<(), Error> {
         self.live()?;
+        if self.phase == Phase::Rejecting {
+            return Err(Error::Rejected);
+        }
         if !identifier(request)
             || self.used_requests.contains(request)
             || operation.as_ref().is_some_and(|o| !identifier(o))
@@ -237,6 +255,7 @@ impl Mux {
             Request {
                 operation,
                 sealed: false,
+                cleanup_deadline: None,
             },
         );
         Ok(())
@@ -263,6 +282,7 @@ impl Mux {
                 Ok(())
             }
             Phase::Binding | Phase::Ready => Ok(()),
+            Phase::Rejecting => Err(Error::Rejected),
             Phase::Closed => Err(Error::Closed),
         }
     }
@@ -367,6 +387,11 @@ impl Mux {
         self.actions.pop()
     }
     pub fn next_message(&mut self) -> Option<Attachment> {
+        if self.phase == Phase::Rejecting {
+            let reply = self.outbound.pop();
+            self.disconnect();
+            return reply;
+        }
         // Cancellation uses its reserved route slot and must not wait for an
         // unrelated producer to empty the bulk queue. Preserve creation order
         // for this stream, and never overtake bootstrap.
@@ -440,6 +465,7 @@ impl Mux {
             return Ok(());
         }
         row.sealed = true;
+        row.cleanup_deadline = Some(self.now.saturating_add(self.config.cleanup_timeout_ms));
         self.outbound.discard(request);
         if self.endpoint.is_some() {
             let ids: Vec<_> = self
@@ -448,7 +474,9 @@ impl Mux {
                 .filter(|(_, r)| r.request == request)
                 .map(|(id, _)| *id)
                 .collect();
-            self.actions.items.retain(|q| q.attachment.0 != request);
+            self.actions
+                .items
+                .retain(|q| q.attachment.0 != request || terminal(q.attachment.1.kind));
             self.actions.bytes = self.actions.items.iter().map(|q| q.charge).sum();
             self.actions.data_bytes = self
                 .actions
@@ -477,7 +505,10 @@ impl Mux {
     }
     pub fn finish(&mut self, request: &str) -> Result<(), Error> {
         self.cancel(request)?;
-        if self.routes.values().any(|r| r.request == request) {
+        if self.routes.values().any(|r| r.request == request)
+            || self.outbound.has_terminal(request)
+            || self.actions.has_terminal(request)
+        {
             return Err(Error::WouldBlock);
         }
         self.requests.remove(request);
@@ -485,10 +516,16 @@ impl Mux {
     }
     pub fn advance(&mut self, now: u64) {
         self.now = self.now.max(now);
-        if self
-            .bootstrap_deadline
-            .is_some_and(|t| self.phase == Phase::Binding && t <= self.now)
-        {
+        if self.requests.iter().any(|(id, request)| {
+            request.cleanup_deadline.is_some_and(|t| t <= self.now)
+                && (self.outbound.has_terminal(id) || self.actions.has_terminal(id))
+        }) {
+            self.disconnect();
+            return;
+        }
+        if self.bootstrap_deadline.is_some_and(|t| {
+            matches!(self.phase, Phase::Binding | Phase::Rejecting) && t <= self.now
+        }) {
             self.disconnect();
             return;
         }
@@ -601,4 +638,16 @@ impl Mux {
 }
 fn identifier(value: &str) -> bool {
     !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control)
+}
+
+fn terminal(kind: MessageKind) -> bool {
+    matches!(
+        kind,
+        MessageKind::BindRejected
+            | MessageKind::OpenFailed
+            | MessageKind::IdentityChecked
+            | MessageKind::IdentityCheckFailed
+            | MessageKind::Failed
+            | MessageKind::Closed
+    )
 }

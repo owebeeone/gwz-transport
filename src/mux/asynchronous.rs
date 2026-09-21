@@ -90,9 +90,14 @@ impl Owner {
     pub fn binding(&self) -> Option<Binding> {
         self.0.change(|m| m.binding().cloned())
     }
+    pub fn bootstrap_failure(&self) -> Option<Failure> {
+        self.0.change(|m| m.bootstrap_failure().cloned())
+    }
     pub async fn ready(&self) -> Result<(), Error> {
         wait(&self.0, |m| match m.phase {
             Phase::Ready => Ok(Some(())),
+            Phase::Rejecting => Err(Error::Rejected),
+            Phase::Closed if m.bootstrap_failure().is_some() => Err(Error::Rejected),
             Phase::Closed => Err(Error::Closed),
             _ => Ok(None),
         })

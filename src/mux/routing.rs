@@ -115,14 +115,26 @@ impl Mux {
                 .as_ref()
                 .is_none_or(|b| !b.versions.contains(&2))
             {
-                return Err(Error::Protocol);
+                return self.reject_binding(
+                    request,
+                    Failure {
+                        code: ErrorCode::UnsupportedVersion,
+                        effect: Effect::None,
+                        facts: None,
+                    },
+                );
             }
-            let (reply, bound) = self
+            let (reply, bound) = match self
                 .endpoint
                 .as_ref()
                 .expect("endpoint role")
                 .accept(message)
-                .map_err(|_| Error::Protocol)?;
+            {
+                Ok(accepted) => accepted,
+                Err(failure) => {
+                    return self.reject_binding(request, failure);
+                }
+            };
             if reply.bound.as_ref().is_none_or(|b| b.version != 2) {
                 return Err(Error::Protocol);
             }
@@ -146,6 +158,11 @@ impl Mux {
             return Err(Error::Protocol);
         }
         if message.kind == MessageKind::BindRejected {
+            let failure = message.bind_rejected.as_ref().ok_or(Error::Protocol)?;
+            if failure.effect != Effect::None || failure.facts.is_some() {
+                return Err(Error::Protocol);
+            }
+            self.rejection = Some(failure.clone());
             self.disconnect();
             return Ok(());
         }
@@ -157,6 +174,24 @@ impl Mux {
         self.acknowledgement = Some(item.clone());
         self.bootstrap_deadline = None;
         self.phase = Phase::Ready;
+        Ok(())
+    }
+    fn reject_binding(&mut self, request: &str, failure: Failure) -> Result<(), Error> {
+        if failure.effect != Effect::None || failure.facts.is_some() {
+            return Err(Error::Protocol);
+        }
+        let reply = Envelope {
+            version: 1,
+            session_id: self.session.clone(),
+            stream_id: 0,
+            kind: MessageKind::BindRejected,
+            bind_rejected: Some(failure.clone()),
+            ..Default::default()
+        };
+        self.enqueue(&(request.into(), reply), true)?;
+        self.rejection = Some(failure);
+        self.phase = Phase::Rejecting;
+        self.bootstrap_deadline = Some(self.now.saturating_add(self.config.bootstrap_timeout_ms));
         Ok(())
     }
     pub(super) fn validate_opened(&self, message: &Envelope) -> Result<(), Error> {

@@ -369,8 +369,12 @@ request, operation and stream correlation are enforced before dispatch. The
 worker must perform credential/path checks and dispose late results itself.
 The mux never creates a network connection or claims physical cleanup.
 
-Use `cancel` to seal a request. `finish` returns WouldBlock while routes remain;
-continue message delivery and clock ticks, then call finish again to unregister.
+Use `cancel` to seal a request. `finish` returns WouldBlock while routes or
+terminal handoffs remain; continue message delivery, drain local `next_action`
+results and clock ticks, then call finish again to unregister. A queued terminal
+survives sealing until transferred to the port or local action consumer. If that
+handoff stalls past the original cleanup deadline, the generation closes instead
+of claiming successful finish. Data frames are not retained merely for cleanup.
 Request IDs cannot be reused in the session. Config.role defaults to Driver
 (the CLI endpoint role), and Config.limits defaults to the Binding limits table
 above. Core-local users select Local explicitly on both sides.
@@ -395,3 +399,72 @@ The executable lifecycle/direction fixture is `tests/mux_async.rs`. The
 `0x47575a504c414345`) and `GWZ_MUX_CASES` (default 100); preserve the source
 revision and printed seed to replay. It transports typed messages entirely in
 memory, with random chunk/read sizes and small credit windows.
+
+Valid incompatible bootstrap receives a typed `BindRejected`. The endpoint
+enters `Phase::Rejecting`, admits no new work and keeps the reply until its port
+transfers it (then closes), or until the bootstrap/cleanup deadline closes it.
+Keep servicing the port during rejection. `Owner::ready()` returns
+`Error::Rejected`; `Owner::bootstrap_failure()` retains the exact effect-free
+Failure even after closure. Malformed bootstrap remains a protocol error;
+carrier loss without a rejection returns Closed, not an invented peer reason.
+
+### Construct, bind, use once, disconnect
+
+This lower-level in-memory example uses only implemented APIs. An async host
+runs the body. It deliberately refuses the identity check without touching files
+or credentials; a real endpoint replaces that response with its supervised work.
+The ordered single-exchange steps illustrate setup; a sustained host runs the
+two forwarding loops and clock ticks independently as described above.
+
+```rust,no_run
+# async fn example() -> Result<(), gwz_transport::mux::Error> {
+use gwz_transport::{binding, mux::{Config, Error, Mux, Owner}, protocol::*};
+
+// Allocate fresh IDs for every new session/endpoint in a real host.
+let (core, core_port) = Owner::new(Mux::initiator("session-1", Config::default())?);
+let endpoint = binding::EndpointConfig {
+    endpoint_id: "endpoint-1".into(), role: EndpointRole::Driver,
+    schemes: vec![Scheme::Ssh], policies: vec![AuthPolicy::SshExplicit],
+    limits: binding::default_limits(), trust_owner: "client-account".into(),
+};
+let (client, client_port) = Owner::new(Mux::endpoint(
+    "session-1", endpoint, Config::default(),
+)?);
+core.advance(0);
+client.advance(0);
+core.register("request-1", Some("operation-1".into()))?;
+client.register("request-1", None)?;
+core.begin("request-1")?;
+// Core -> client, then client -> core for Bind/Bound.
+client_port.deliver(core_port.next_message().await?.ok_or(Error::Closed)?).await?;
+core_port.deliver(client_port.next_message().await?.ok_or(Error::Closed)?).await?;
+core.ready().await?;
+
+core.check_identity("request-1", Identity {
+    mode: IdentityMode::ExplicitKey, key_path: Some("selected-key".into()),
+    path_base: None,
+}, 1000)?;
+client_port.deliver(core_port.next_message().await?.ok_or(Error::Closed)?).await?;
+let (request_id, check) = client.next_action().await?.ok_or(Error::Closed)?;
+client.send(&request_id, &Envelope {
+    version: 2, session_id: check.session_id, stream_id: check.stream_id,
+    kind: MessageKind::IdentityCheckFailed,
+    identity_check_failed: Some(Failure {
+        code: ErrorCode::UnsupportedOperation, effect: Effect::None, facts: None,
+    }),
+    ..Default::default()
+})?;
+assert_eq!(client.finish(&request_id), Err(Error::WouldBlock));
+core_port.deliver(client_port.next_message().await?.ok_or(Error::Closed)?).await?;
+let (_, outcome) = core.next_action().await?.ok_or(Error::Closed)?;
+assert_eq!(outcome.kind, MessageKind::IdentityCheckFailed);
+client.finish(&request_id)?;
+core.finish("request-1")?;
+core_port.disconnect();
+client_port.disconnect();
+# Ok(())
+# }
+```
+
+`cargo test --doc` type-checks this example. The executable in-memory lifecycle
+and closure regressions are in `tests/mux.rs` and `tests/mux_async.rs`.

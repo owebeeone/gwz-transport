@@ -1,3 +1,4 @@
+#![doc = include_str!("../README.md")]
 //! Shared taut protocol and bounded streams over host-delivered discrete messages.
 //! No physical I/O, network adapter or executor is implemented here.
 extern crate alloc;
