@@ -153,7 +153,9 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
         if opened.connection_id.is_empty()
             || opened.endpoint_id.is_empty()
             || opened.trust_owner.is_empty()
-            || (opened.reused && opened.facts.credential_offered)
+            || (opened.reused
+                && opened.facts.credential_offered
+                && opened.facts.method != AuthMethod::Gh)
         {
             return Err(Error::InvalidMessage);
         }

@@ -75,6 +75,8 @@ impl Mux {
                 Route {
                     request: request.clone(),
                     kind,
+                    scheme: message.open.as_ref().map(|open| open.destination.scheme),
+                    policy: message.open.as_ref().map(|open| open.policy),
                     deadline: timeout.map(|t| self.now.saturating_add(t)),
                     cancel: None,
                 },
@@ -198,6 +200,15 @@ impl Mux {
                 || !binding::no_greater(&opened.receive_limits, binding.limits())
             {
                 return Err(Error::Protocol);
+            }
+            if opened.reused && opened.facts.credential_offered {
+                let route = self.routes.get(&message.stream_id).ok_or(Error::Protocol)?;
+                if route.scheme != Some(Scheme::Https)
+                    || route.policy != Some(AuthPolicy::Gh)
+                    || opened.facts.method != AuthMethod::Gh
+                {
+                    return Err(Error::Protocol);
+                }
             }
         }
         Ok(())

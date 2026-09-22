@@ -68,6 +68,8 @@ enum Kind {
 struct Route {
     request: String,
     kind: Kind,
+    scheme: Option<Scheme>,
+    policy: Option<AuthPolicy>,
     deadline: Option<u64>,
     cancel: Option<ErrorCode>,
 }
@@ -275,8 +277,6 @@ impl Mux {
                 let mut offer = binding::offer(&self.session, self.config.role);
                 let body = offer.bind.as_mut().expect("offer body");
                 body.versions = vec![2];
-                body.schemes = vec![Scheme::Ssh];
-                body.policies = vec![AuthPolicy::SshAmbient, AuthPolicy::SshExplicit];
                 body.receive_limits = self.config.limits.clone();
                 let item = (request.into(), offer);
                 self.enqueue(&item, true)?;
@@ -355,6 +355,8 @@ impl Mux {
         let mut message = self.message(id, MessageKind::Open)?;
         fill(&mut message);
         self.validate_open(&message)?;
+        let scheme = message.open.as_ref().map(|open| open.destination.scheme);
+        let policy = message.open.as_ref().map(|open| open.policy);
         self.enqueue(&(request.into(), message), true)?;
         self.highest_id = id;
         self.routes.insert(
@@ -362,6 +364,8 @@ impl Mux {
             Route {
                 request: request.into(),
                 kind,
+                scheme,
+                policy,
                 deadline: timeout.map(|t| self.now.saturating_add(t)),
                 cancel: None,
             },
