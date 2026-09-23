@@ -34,7 +34,7 @@ pub(crate) fn limits(value: &Limits) -> Result<(), Error> {
 }
 
 pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
-    if !(1..=2).contains(&value.version) {
+    if !(1..=3).contains(&value.version) {
         return Err(Error::UnsupportedVersion);
     }
     if value.session_id.is_empty() || value.session_id.len() > 128 {
@@ -69,7 +69,17 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
     {
         return Err(Error::InvalidMessage);
     }
-    if kind >= 16 && value.version != 2 {
+    if value.version == 3 && value.stream_id > 0 {
+        if value
+            .message_seq
+            .is_none_or(|sequence| sequence <= 0 || sequence == i64::MAX)
+        {
+            return Err(Error::InvalidMessage);
+        }
+    } else if value.message_seq.is_some() {
+        return Err(Error::InvalidMessage);
+    }
+    if kind >= 16 && value.version < 2 {
         return Err(Error::UnsupportedVersion);
     }
     if let Some(bind) = &value.bind {
@@ -79,7 +89,7 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
         limits(&bind.receive_limits)?;
     }
     if let Some(bound) = &value.bound {
-        if !(1..=2).contains(&bound.version)
+        if !(1..=3).contains(&bound.version)
             || bound.endpoint_id.is_empty()
             || bound.trust_owner.is_empty()
             || !crate::policy::capabilities(&bound.schemes, &bound.policies)

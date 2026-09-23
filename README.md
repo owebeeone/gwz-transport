@@ -73,6 +73,23 @@ anonymous uses credentials-disabled identity, and HTTPS gh uses ambient endpoint
 identity. All other combinations are rejected before effects. A binding cannot
 advertise a scheme or policy without a compatible partner in its capability set.
 
+## Sequenced profile candidate
+
+Profile 3 adds `Envelope.message_seq` to every stream frame, including lifecycle
+controls. `sequenced::Outbound` assigns a per-stream, per-direction sequence only
+when it accepts a frame into its bounded queue. `sequenced::Receiver` buffers
+bounded out-of-order frames and applies each contiguous prefix through a host
+callback; its report distinguishes buffered ownership from applied or
+superseded work. The host must validate request and endpoint authority before
+registering a stream, make each callback transition atomic, drive the fixed gap
+deadline, and retain delivery tickets until their resolutions are known.
+
+This module is an in-memory ordering kernel. Current mux, async stream and
+GWZ host paths do not yet compose it into a profile-3 session; they continue to
+use profiles 1/2 and ordered delivery. No existing host offers profile 3 by
+default. Negotiating profile 3 explicitly is only for candidate tests until
+the host owns tickets, request context, generation pinning and cleanup fences.
+
 ## Backend I/O deadlines
 
 Only the endpoint host can distinguish a network stall from intentional waiting.

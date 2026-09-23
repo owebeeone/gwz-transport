@@ -100,7 +100,7 @@ impl Binding {
         Ok(())
     }
 
-    /// Validate a v2 identity preflight before endpoint file-check admission.
+    /// Validate a v2/v3 identity preflight before endpoint file-check admission.
     pub fn check_identity(&self, message: &Envelope) -> Result<(), Failure> {
         codec::admit_limited(message, &self.bound.receive_limits)
             .map_err(|_| failure(ErrorCode::InvalidRequest))?;
@@ -108,7 +108,7 @@ impl Binding {
             .check_identity
             .as_ref()
             .ok_or_else(|| failure(ErrorCode::InvalidRequest))?;
-        if self.bound.version != 2 || message.version != self.bound.version {
+        if !matches!(self.bound.version, 2 | 3) || message.version != self.bound.version {
             return Err(failure(ErrorCode::UnsupportedVersion));
         }
         if message.kind != MessageKind::CheckIdentity
@@ -155,7 +155,7 @@ impl EndpointConfig {
         if bind.role != self.role {
             return Err(failure(ErrorCode::UnsupportedOperation));
         }
-        let version = [1, 2]
+        let version = [1, 2, 3]
             .into_iter()
             .filter(|candidate| bind.versions.contains(candidate))
             .max()
@@ -180,6 +180,10 @@ impl EndpointConfig {
         }
         let receive_limits = minimum(&bind.receive_limits, &self.limits);
         usable(&receive_limits)?;
+        if version == 3 {
+            crate::sequenced::valid_limits(&receive_limits)
+                .map_err(|_| failure(ErrorCode::UnsupportedOperation))?;
+        }
         let bound = Bound {
             version,
             endpoint_id: self.endpoint_id.clone(),
@@ -222,7 +226,7 @@ pub fn verify(offer: &Envelope, reply: &Envelope) -> Result<Binding, Failure> {
         .ok_or_else(|| failure(ErrorCode::Unavailable))?;
     if reply.session_id != offer.session_id
         || bound.role != requested.role
-        || ![1, 2].contains(&bound.version)
+        || ![1, 2, 3].contains(&bound.version)
         || !requested.versions.contains(&bound.version)
         || !bound.schemes.iter().all(|v| requested.schemes.contains(v))
         || !bound
@@ -234,6 +238,10 @@ pub fn verify(offer: &Envelope, reply: &Envelope) -> Result<Binding, Failure> {
         return Err(failure(ErrorCode::InvalidRequest));
     }
     usable(&bound.receive_limits)?;
+    if bound.version == 3 {
+        crate::sequenced::valid_limits(&bound.receive_limits)
+            .map_err(|_| failure(ErrorCode::UnsupportedOperation))?;
+    }
     Ok(Binding {
         session_id: reply.session_id.clone(),
         bound: bound.clone(),

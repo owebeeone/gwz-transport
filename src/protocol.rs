@@ -1088,6 +1088,7 @@ pub struct Envelope {
     pub session_id: String,
     pub stream_id: i64,
     pub kind: MessageKind,
+    pub message_seq: Option<i64>,
     pub bind: Option<Bind>,
     pub bound: Option<Bound>,
     pub bind_rejected: Option<Failure>,
@@ -1114,6 +1115,13 @@ impl Envelope {
             (2, Cbor::Text(self.session_id.clone())),
             (3, Cbor::Int(self.stream_id)),
             (4, Cbor::Int(self.kind.wire())),
+            (
+                5,
+                match &self.message_seq {
+                    Some(v) => Cbor::Int(*v),
+                    None => Cbor::Null,
+                },
+            ),
             (
                 10,
                 match &self.bind {
@@ -1248,6 +1256,19 @@ impl Envelope {
             session_id: c.try_get(2)?.try_text()?,
             stream_id: c.try_get(3)?.try_int()?,
             kind: MessageKind::from_wire(c.try_get(4)?.try_int()?)?,
+            message_seq: {
+                let v = c.try_get_opt(5)?;
+                match v {
+                    None => None,
+                    Some(v) => {
+                        if v.is_null() {
+                            None
+                        } else {
+                            Some(v.try_int()?)
+                        }
+                    }
+                }
+            },
             bind: {
                 let v = c.try_get(10)?;
                 if v.is_null() {

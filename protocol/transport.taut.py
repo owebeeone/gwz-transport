@@ -1,7 +1,7 @@
 """GWZ transport owner conversation schema.
 
 Bootstrap envelopes use profile version 1; a successful Bound may negotiate
-profile version 2 for all subsequent messages.
+profile version 2 or 3 for subsequent messages.
 """
 from taut.ir.dsl import BOOL, BYTES, INT, STR, Enum, F, List, Msg, Ref, schema
 
@@ -71,6 +71,7 @@ SCHEMA = schema(
     # Exactly one body must match kind. Optional taut fields encode absent as null.
     Envelope=Msg(version=F(1, INT), session_id=F(2, STR), stream_id=F(3, INT),
                  kind=F(4, Ref.MessageKind),
+                 message_seq=F(5, INT, optional=True, missing_ok=True),
                  bind=F(10, Ref.Bind, optional=True), bound=F(11, Ref.Bound, optional=True),
                  bind_rejected=F(12, Ref.Failure, optional=True),
                  open=F(13, Ref.Open, optional=True), opened=F(14, Ref.Opened, optional=True),

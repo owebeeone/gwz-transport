@@ -1171,6 +1171,18 @@
         },
         {
           "merge": null,
+          "missing_ok": true,
+          "name": "message_seq",
+          "optional": true,
+          "tag": 5,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
           "name": "bind",
           "optional": true,
           "tag": 10,

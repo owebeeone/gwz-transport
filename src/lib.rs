@@ -17,6 +17,7 @@ mod budget;
 pub mod codec;
 mod policy;
 pub mod pool;
+pub mod sequenced;
 pub mod stream;
 
 pub mod mux;

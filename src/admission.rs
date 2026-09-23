@@ -327,7 +327,7 @@ fn visit_cancel(value: &Cancel, b: &mut Budget, depth: usize) -> Result<(), Erro
 }
 
 fn visit_envelope(value: &Envelope, b: &mut Budget, depth: usize) -> Result<(), Error> {
-    b.container(22, depth)?;
+    b.container(23, depth)?;
     b.key(1)?;
     b.integer(value.version, depth + 1)?;
     b.key(2)?;
@@ -336,6 +336,12 @@ fn visit_envelope(value: &Envelope, b: &mut Budget, depth: usize) -> Result<(), 
     b.integer(value.stream_id, depth + 1)?;
     b.key(4)?;
     b.integer(value.kind.wire(), depth + 1)?;
+    b.key(5)?;
+    if let Some(item) = &value.message_seq {
+        b.integer(*item, depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
     b.key(10)?;
     if let Some(item) = &value.bind {
         visit_bind(item, b, depth + 1)?;
