@@ -83,6 +83,18 @@
     },
     {
       "members": {
+        "address_not_available": 7,
+        "aggregate": 2,
+        "allocation": 4,
+        "connection_refused": 5,
+        "interaction": 3,
+        "not_found": 6,
+        "stall": 1
+      },
+      "name": "SetupFailureCause"
+    },
+    {
+      "members": {
         "none": 1,
         "possible": 2
       },
@@ -433,6 +445,18 @@
           "type": {
             "k": "msg",
             "name": "Facts"
+          }
+        },
+        {
+          "merge": null,
+          "missing_ok": true,
+          "name": "setup_cause",
+          "optional": true,
+          "tag": 4,
+          "transient": false,
+          "type": {
+            "k": "enum",
+            "name": "SetupFailureCause"
           }
         }
       ],

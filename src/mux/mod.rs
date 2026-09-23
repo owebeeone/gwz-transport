@@ -434,6 +434,7 @@ impl Mux {
             self.routes.get_mut(&id)?.cancel = None;
         } else {
             let failure = Failure {
+                setup_cause: None,
                 code: reason,
                 effect: if kind == Kind::Check {
                     Effect::None
@@ -559,6 +560,7 @@ impl Mux {
                 }
             };
             let failure = Failure {
+                setup_cause: None,
                 code,
                 effect: if route.kind == Kind::Check {
                     Effect::None

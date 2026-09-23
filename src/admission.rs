@@ -92,7 +92,7 @@ fn visit_bound(value: &Bound, b: &mut Budget, depth: usize) -> Result<(), Error>
 }
 
 fn visit_failure(value: &Failure, b: &mut Budget, depth: usize) -> Result<(), Error> {
-    b.container(3, depth)?;
+    b.container(4, depth)?;
     b.key(1)?;
     b.integer(value.code.wire(), depth + 1)?;
     b.key(2)?;
@@ -100,6 +100,12 @@ fn visit_failure(value: &Failure, b: &mut Budget, depth: usize) -> Result<(), Er
     b.key(3)?;
     if let Some(item) = &value.facts {
         visit_facts(item, b, depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
+    b.key(4)?;
+    if let Some(item) = &value.setup_cause {
+        b.integer(item.wire(), depth + 1)?;
     } else {
         b.scalar(depth + 1)?;
     }

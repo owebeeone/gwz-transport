@@ -451,6 +451,7 @@ client.send(&request_id, &Envelope {
     kind: MessageKind::IdentityCheckFailed,
     identity_check_failed: Some(Failure {
         code: ErrorCode::UnsupportedOperation, effect: Effect::None, facts: None,
+        setup_cause: None,
     }),
     ..Default::default()
 })?;

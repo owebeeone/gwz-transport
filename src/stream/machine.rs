@@ -247,6 +247,7 @@ impl StreamMachine {
             disposition,
             facts,
             Some(Failure {
+                setup_cause: None,
                 code,
                 effect,
                 facts: None,
@@ -388,9 +389,7 @@ impl StreamMachine {
         if self.error.is_some() || self.completed.is_some() {
             return;
         }
-        if self.close_deadline.is_some_and(|at| self.now >= at) {
-            self.fail(Error::Timeout, true);
-        } else if self.io.due(self.now) {
+        if self.close_deadline.is_some_and(|at| self.now >= at) || self.io.due(self.now) {
             self.fail(Error::Timeout, true);
         } else if !was_due && self.batch_deadline.is_some_and(|at| self.now >= at) {
             self.touch();
@@ -488,6 +487,7 @@ impl StreamMachine {
             } else {
                 let mut message = self.envelope(MessageKind::Failed);
                 message.failed = Some(Failure {
+                    setup_cause: None,
                     code: if error == Error::Timeout {
                         ErrorCode::Timeout
                     } else {

@@ -96,6 +96,7 @@ fn exact_deadline_times_out_and_preserves_received_prefix() {
             stream_id: 1,
             kind: MessageKind::Failed,
             failed: Some(Failure {
+                setup_cause: None,
                 code: ErrorCode::Timeout,
                 effect: Effect::Possible,
                 facts: None,

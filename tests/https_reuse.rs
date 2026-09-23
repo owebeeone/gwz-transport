@@ -149,6 +149,7 @@ fn https_discovery_failures_are_open_failed_before_opened() {
         bind(&mut core, &mut endpoint);
         let id = open_stream(&mut core, &mut endpoint, Scheme::Https, AuthPolicy::Gh);
         let failure = Failure {
+            setup_cause: None,
             code,
             effect: Effect::None,
             facts: Some(Facts {

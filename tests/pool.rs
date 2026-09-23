@@ -34,6 +34,126 @@ fn close(pool: &mut PoolMachine) -> ConnectionId {
 }
 
 #[test]
+fn paired_install_refuses_busy_other_scheme_without_changing_either_limit() {
+    let (ssh, _ssh_driver) = Pool::new(config()).unwrap();
+    let (https, _https_driver) = Pool::new(config()).unwrap();
+    let busy = https
+        .checkout(Request::new(
+            Key::https("host", 443),
+            Identity::Https,
+            Owner::new("session", "owner"),
+        ))
+        .unwrap();
+    let initial = ssh.capacity();
+    let raised = Capacity {
+        per_user_host: 32,
+        per_host: 32,
+        total: 100,
+        max_requests: 1024,
+    };
+    assert_eq!(ssh.install_capacity_pair(&https, raised), Err(Error::ActiveOperation));
+    assert_eq!(ssh.capacity(), initial);
+    assert_eq!(https.capacity(), initial);
+    drop(busy);
+    assert_eq!(ssh.install_capacity_pair(&https, raised), Ok(()));
+    assert_eq!(ssh.capacity(), raised);
+    assert_eq!(https.capacity(), raised);
+}
+
+#[test]
+fn capacity_defaults_and_validation_allow_requested_large_values() {
+    let defaults = Config::default();
+    assert_eq!(defaults.per_user_host, 32);
+    assert_eq!(defaults.per_host, 32);
+    assert_eq!(defaults.total, 256);
+    assert_eq!(defaults.max_requests, 1024);
+
+    let mut large = defaults.clone();
+    large.per_user_host = 5000;
+    large.per_host = 5000;
+    large.total = 5000;
+    large.max_requests = 5000;
+    assert!(PoolMachine::new(large.clone()).is_ok());
+    large.per_host = 0;
+    assert!(matches!(PoolMachine::new(large), Err(Error::InvalidConfig)));
+}
+
+#[test]
+fn thirty_third_user_host_lease_waits_and_large_request_budget_is_not_clamped() {
+    let mut pool = PoolMachine::new(Config::default()).unwrap();
+    let mut leases = Vec::new();
+    for _ in 0..32 {
+        let id = pool.request(request("git", "host")).unwrap();
+        connect(&mut pool, Identity::Ambient);
+        leases.push(pool.take(id).unwrap());
+    }
+    let waiting = pool.request(request("git", "host")).unwrap();
+    assert_eq!(pool.take(waiting), Err(Error::WouldBlock));
+    pool.release(leases.remove(0), Disposition::Reusable)
+        .unwrap();
+    assert!(pool.take(waiting).is_ok());
+
+    let mut config = Config::default();
+    config.total = 1500;
+    config.max_requests = 1500;
+    let mut large = PoolMachine::new(config).unwrap();
+    for index in 0..1500 {
+        large
+            .request(request("git", &format!("host-{index}")))
+            .unwrap();
+    }
+    assert_eq!(large.outstanding_requests(), 1500);
+    assert_eq!(large.request(request("git", "extra")), Err(Error::Capacity));
+}
+
+#[test]
+fn idle_operation_installs_caps_and_active_operation_refuses_replacement() {
+    let mut pool = PoolMachine::new(config()).unwrap();
+    let first = pool.request(request("git", "host")).unwrap();
+    let connection = connect(&mut pool, Identity::Ambient);
+    let lease = pool.take(first).unwrap();
+    let limits = Capacity {
+        per_user_host: 4,
+        per_host: 4,
+        total: 400,
+        max_requests: 1024,
+    };
+    assert_eq!(pool.install_capacity(limits), Err(Error::ActiveOperation));
+    pool.release(lease, Disposition::Reusable).unwrap();
+    pool.install_capacity(limits).unwrap();
+    assert_eq!(pool.capacity(), limits);
+    let next = pool.request(request("git", "host")).unwrap();
+    assert_eq!(pool.take(next).unwrap().connection(), connection);
+}
+
+#[test]
+fn lowering_caps_closes_only_idle_connections_above_the_new_limits() {
+    let mut original = config();
+    original.per_user_host = 4;
+    original.per_host = 4;
+    let mut pool = PoolMachine::new(original).unwrap();
+    let mut connections = Vec::new();
+    for user in ["a", "b", "c"] {
+        let id = pool.request(request(user, "host")).unwrap();
+        let connection = connect(&mut pool, Identity::Ambient);
+        let lease = pool.take(id).unwrap();
+        pool.release(lease, Disposition::Reusable).unwrap();
+        connections.push(connection);
+    }
+    pool.install_capacity(Capacity {
+        per_user_host: 1,
+        per_host: 1,
+        total: 1,
+        max_requests: 1024,
+    })
+    .unwrap();
+    assert_eq!(pool.counts().idle, 1);
+    assert_eq!(pool.counts().closing, 2);
+    assert_eq!(close(&mut pool), connections[1]);
+    assert_eq!(close(&mut pool), connections[2]);
+}
+
+#[test]
 fn healthy_release_reuses_one_connection_with_a_fresh_exclusive_lease() {
     let mut pool = PoolMachine::new(config()).unwrap();
     let first = pool.request(request("git", "host")).unwrap();
@@ -251,6 +371,7 @@ fn connect_timeout_and_reported_failure_do_not_retry_the_request() {
     pool.connected(
         connection,
         Err(Failure {
+            setup_cause: None,
             code: ErrorCode::Io,
             effect: Effect::None,
             facts: None,
@@ -265,6 +386,7 @@ fn connect_timeout_and_reported_failure_do_not_retry_the_request() {
     pool.connected(
         connection,
         Err(Failure {
+            setup_cause: None,
             code: ErrorCode::Io,
             effect: Effect::Possible,
             facts: None,
@@ -275,10 +397,39 @@ fn connect_timeout_and_reported_failure_do_not_retry_the_request() {
         pool.take(b),
         Err(Error::ConnectFailed {
             code: ErrorCode::Io,
-            effect: Effect::Possible
+            effect: Effect::Possible,
+            setup_cause: None,
         })
     );
     assert!(pool.next_action().is_none());
+}
+
+#[test]
+fn connection_failure_retains_typed_setup_cause() {
+    use gwz_transport::protocol::{Effect, ErrorCode, Failure, SetupFailureCause};
+    let mut pool = PoolMachine::new(config()).unwrap();
+    let request = pool.request(request("git", "host")).unwrap();
+    let Some(Action::Connect { connection, .. }) = pool.next_action() else {
+        panic!("connect");
+    };
+    pool.connected(
+        connection,
+        Err(Failure {
+            code: ErrorCode::Unavailable,
+            effect: Effect::None,
+            facts: None,
+            setup_cause: Some(SetupFailureCause::ConnectionRefused),
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        pool.take(request),
+        Err(Error::ConnectFailed {
+            code: ErrorCode::Unavailable,
+            effect: Effect::None,
+            setup_cause: Some(SetupFailureCause::ConnectionRefused),
+        })
+    );
 }
 
 #[test]

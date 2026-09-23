@@ -120,6 +120,7 @@ impl Mux {
                 return self.reject_binding(
                     request,
                     Failure {
+                        setup_cause: None,
                         code: ErrorCode::UnsupportedVersion,
                         effect: Effect::None,
                         facts: None,

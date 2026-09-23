@@ -91,28 +91,27 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
     if let Some(failure) = &value.bind_rejected {
         bind_rejection(failure)?;
     }
-    if value.version == 1 {
-        if value
+    if value.version == 1
+        && (value
             .open_failed
             .as_ref()
             .is_some_and(failure_has_v2_fields)
-            || value.failed.as_ref().is_some_and(failure_has_v2_fields)
-        {
-            return Err(Error::InvalidMessage);
-        }
+            || value.failed.as_ref().is_some_and(failure_has_v2_fields))
+    {
+        return Err(Error::InvalidMessage);
     }
-    if let Some(failure) = &value.identity_check_failed {
-        if failure.effect != Effect::None || failure.facts.is_some() {
-            return Err(Error::InvalidMessage);
-        }
+    if let Some(failure) = &value.identity_check_failed
+        && (failure.effect != Effect::None || failure.facts.is_some())
+    {
+        return Err(Error::InvalidMessage);
     }
-    if let Some(closed) = &value.closed {
-        if closed.failure.as_ref().is_some_and(|failure| {
+    if let Some(closed) = &value.closed
+        && closed.failure.as_ref().is_some_and(|failure| {
             failure.facts.is_some()
                 || (value.version == 1 && failure.code == ErrorCode::RepositoryRefused)
-        }) {
-            return Err(Error::InvalidMessage);
-        }
+        })
+    {
+        return Err(Error::InvalidMessage);
     }
     if let Some(open) = &value.open {
         limits(&open.receive_limits)?;
@@ -137,16 +136,15 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
             return Err(Error::InvalidMessage);
         }
     }
-    if let Some(check) = &value.check_identity {
-        if check.endpoint_id.is_empty()
+    if let Some(check) = &value.check_identity
+        && (check.endpoint_id.is_empty()
             || check.operation_id.is_empty()
             || check.timeout_ms <= 0
             || check.timeout_ms > i32::MAX as i64
             || check.identity.mode != IdentityMode::ExplicitKey
-            || !valid_identity(&check.identity)
-        {
-            return Err(Error::InvalidMessage);
-        }
+            || !valid_identity(&check.identity))
+    {
+        return Err(Error::InvalidMessage);
     }
     if let Some(opened) = &value.opened {
         limits(&opened.receive_limits)?;

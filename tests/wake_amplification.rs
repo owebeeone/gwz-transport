@@ -148,6 +148,7 @@ fn cleanup_abort_and_abort_connect_become_runnable_once_at_deadline() {
     pool.connected(
         connection,
         Err(gwz_transport::protocol::Failure {
+            setup_cause: None,
             code: gwz_transport::protocol::ErrorCode::Io,
             effect: gwz_transport::protocol::Effect::Possible,
             facts: None,

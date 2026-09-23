@@ -1,6 +1,6 @@
 //! Endpoint-owned capacity and exclusive leases. Hosts execute commands outside
 //! the pool and acknowledge actual connector/cleanup completion. No physical I/O.
-use crate::protocol::{Effect, ErrorCode, Scheme};
+use crate::protocol::{Effect, ErrorCode, Scheme, SetupFailureCause};
 use std::fmt;
 
 mod allocation;
@@ -10,6 +10,19 @@ mod lifecycle;
 mod machine;
 pub use asynchronous::{Checkout, Lease, Pool, PoolDriver};
 pub use machine::PoolMachine;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Capacity {
+    pub per_user_host: usize,
+    pub per_host: usize,
+    pub total: usize,
+    pub max_requests: usize,
+}
+impl Capacity {
+    fn valid(self) -> bool {
+        self.per_user_host > 0 && self.per_host > 0 && self.total > 0 && self.max_requests > 0
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -27,13 +40,13 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            per_user_host: 8,
-            per_host: 8,
+            per_user_host: 32,
+            per_host: 32,
             total: 256,
             max_requests: 1024,
             idle_timeout_ms: 60_000,
             allocation_timeout_ms: 30_000,
-            connect_timeout_ms: 10_000,
+            connect_timeout_ms: 30_000,
             interaction_timeout_ms: 120_000,
             cleanup_timeout_ms: 5_000,
         }
@@ -41,10 +54,7 @@ impl Default for Config {
 }
 impl Config {
     fn validate(&self) -> Result<(), Error> {
-        if [self.per_user_host, self.per_host, self.total]
-            .iter()
-            .any(|value| !(1..=4096).contains(value))
-            || !(1..=16384).contains(&self.max_requests)
+        if !Capacity::from(self).valid()
             || [
                 self.idle_timeout_ms,
                 self.allocation_timeout_ms,
@@ -58,6 +68,16 @@ impl Config {
             return Err(Error::InvalidConfig);
         }
         Ok(())
+    }
+}
+impl From<&Config> for Capacity {
+    fn from(config: &Config) -> Self {
+        Self {
+            per_user_host: config.per_user_host,
+            per_host: config.per_host,
+            total: config.total,
+            max_requests: config.max_requests,
+        }
     }
 }
 
@@ -226,6 +246,7 @@ impl LeaseId {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Error {
     InvalidConfig,
+    ActiveOperation,
     InvalidRequest,
     Capacity,
     WouldBlock,
@@ -238,7 +259,11 @@ pub enum Error {
     ConnectTimeout,
     InteractionTimeout,
     IdentityMismatch,
-    ConnectFailed { code: ErrorCode, effect: Effect },
+    ConnectFailed {
+        code: ErrorCode,
+        effect: Effect,
+        setup_cause: Option<SetupFailureCause>,
+    },
 }
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -135,6 +135,7 @@ impl Binding {
 
 fn failure(code: ErrorCode) -> Failure {
     Failure {
+        setup_cause: None,
         code,
         effect: Effect::None,
         facts: None,

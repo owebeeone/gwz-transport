@@ -288,6 +288,48 @@ impl ErrorCode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum SetupFailureCause {
+    #[default]
+    Stall,
+    Aggregate,
+    Interaction,
+    Allocation,
+    ConnectionRefused,
+    NotFound,
+    AddressNotAvailable,
+}
+impl SetupFailureCause {
+    pub fn wire(self) -> i64 {
+        match self {
+            Self::Stall => 1,
+            Self::Aggregate => 2,
+            Self::Interaction => 3,
+            Self::Allocation => 4,
+            Self::ConnectionRefused => 5,
+            Self::NotFound => 6,
+            Self::AddressNotAvailable => 7,
+        }
+    }
+    pub fn from_wire(v: i64) -> Result<Self, DecodeError> {
+        Ok(match v {
+            1 => Self::Stall,
+            2 => Self::Aggregate,
+            3 => Self::Interaction,
+            4 => Self::Allocation,
+            5 => Self::ConnectionRefused,
+            6 => Self::NotFound,
+            7 => Self::AddressNotAvailable,
+            _ => {
+                return Err(DecodeError::UnknownEnum {
+                    enum_name: "SetupFailureCause",
+                    value: v,
+                });
+            }
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum Effect {
     #[default]
     None,
@@ -530,6 +572,7 @@ pub struct Failure {
     pub code: ErrorCode,
     pub effect: Effect,
     pub facts: Option<Facts>,
+    pub setup_cause: Option<SetupFailureCause>,
 }
 impl Failure {
     pub fn to_cbor(&self) -> Cbor {
@@ -540,6 +583,13 @@ impl Failure {
                 3,
                 match &self.facts {
                     Some(v) => v.to_cbor(),
+                    None => Cbor::Null,
+                },
+            ),
+            (
+                4,
+                match &self.setup_cause {
+                    Some(v) => Cbor::Int(v.wire()),
                     None => Cbor::Null,
                 },
             ),
@@ -558,6 +608,19 @@ impl Failure {
                             None
                         } else {
                             Some(Facts::from_cbor(v)?)
+                        }
+                    }
+                }
+            },
+            setup_cause: {
+                let v = c.try_get_opt(4)?;
+                match v {
+                    None => None,
+                    Some(v) => {
+                        if v.is_null() {
+                            None
+                        } else {
+                            Some(SetupFailureCause::from_wire(v.try_int()?)?)
                         }
                     }
                 }

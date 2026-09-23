@@ -209,6 +209,7 @@ impl Case {
         } else {
             let result = if force || self.random.below(5) == 0 {
                 Err(Failure {
+                    setup_cause: None,
                     code: ErrorCode::Io,
                     effect: Effect::Possible,
                     facts: None,

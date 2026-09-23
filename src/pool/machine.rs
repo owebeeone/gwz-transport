@@ -108,6 +108,64 @@ impl PoolMachine {
             revision: 0,
         })
     }
+    pub fn capacity(&self) -> Capacity {
+        Capacity::from(&self.config)
+    }
+    pub fn can_install_capacity(&self, capacity: Capacity) -> Result<(), Error> {
+        if !capacity.valid() {
+            return Err(Error::InvalidConfig);
+        }
+        if self.driver_lost {
+            return Err(Error::DriverLost);
+        }
+        if self.stopped {
+            return Err(Error::Shutdown);
+        }
+        if !self.requests.is_empty()
+            || self
+                .entries
+                .values()
+                .any(|entry| !matches!(entry.state, State::Idle { .. }))
+        {
+            return Err(Error::ActiveOperation);
+        }
+        Ok(())
+    }
+    /// Install one operation's capacity only after all prior physical work has
+    /// become idle. Surplus idle resources are retired before new allocation.
+    pub fn install_capacity(&mut self, capacity: Capacity) -> Result<(), Error> {
+        self.can_install_capacity(capacity)?;
+        self.config.per_user_host = capacity.per_user_host;
+        self.config.per_host = capacity.per_host;
+        self.config.total = capacity.total;
+        self.config.max_requests = capacity.max_requests;
+
+        let mut kept_total = 0usize;
+        let mut kept_hosts = BTreeMap::<String, usize>::new();
+        let mut kept_users = BTreeMap::<(String, Option<String>), usize>::new();
+        let mut surplus = Vec::new();
+        for (id, entry) in &self.entries {
+            let host = entry.key.host.clone();
+            let user_host = (host.clone(), entry.key.username.clone());
+            let hosts = kept_hosts.get(&host).copied().unwrap_or(0);
+            let users = kept_users.get(&user_host).copied().unwrap_or(0);
+            if kept_total < capacity.total
+                && hosts < capacity.per_host
+                && users < capacity.per_user_host
+            {
+                kept_total += 1;
+                kept_hosts.insert(host, hosts + 1);
+                kept_users.insert(user_host, users + 1);
+            } else {
+                surplus.push(*id);
+            }
+        }
+        for id in surplus {
+            self.start_closing(id, CloseReason::Evicted);
+        }
+        self.touch();
+        Ok(())
+    }
     pub fn request(&mut self, request: Request) -> Result<RequestId, Error> {
         self.request_until(request, None)
     }

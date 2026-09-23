@@ -88,6 +88,46 @@ impl Pool {
             PoolDriver { shared },
         ))
     }
+    pub fn capacity(&self) -> Capacity {
+        self.shared.change(|state| state.machine.capacity())
+    }
+    pub fn install_capacity(&self, capacity: Capacity) -> Result<(), Error> {
+        self.shared
+            .change(|state| state.machine.install_capacity(capacity))
+    }
+    /// Install a common operation policy across two scheme pools atomically.
+    /// Both pools are checked while locked before either policy changes.
+    pub fn install_capacity_pair(&self, other: &Self, capacity: Capacity) -> Result<(), Error> {
+        if Arc::ptr_eq(&self.shared, &other.shared) {
+            return self.install_capacity(capacity);
+        }
+        let (first, second) = if Arc::as_ptr(&self.shared) < Arc::as_ptr(&other.shared) {
+            (&self.shared, &other.shared)
+        } else {
+            (&other.shared, &self.shared)
+        };
+        let (first_wakes, second_wakes) = {
+            let mut first_state = first.runtime.lock().expect("pool lock poisoned");
+            let mut second_state = second.runtime.lock().expect("pool lock poisoned");
+            first_state.machine.can_install_capacity(capacity)?;
+            second_state.machine.can_install_capacity(capacity)?;
+            first_state.machine.install_capacity(capacity)?;
+            second_state.machine.install_capacity(capacity)?;
+            let wakes = |state: &Runtime| {
+                state
+                    .waiters
+                    .values()
+                    .chain(state.driver.iter())
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            (wakes(&first_state), wakes(&second_state))
+        };
+        for waker in first_wakes.into_iter().chain(second_wakes) {
+            waker.wake();
+        }
+        Ok(())
+    }
     /// Begins allocation immediately; an unpolled future still owns a bounded
     /// request slot and cancels it when dropped.
     pub fn checkout(&self, request: Request) -> Result<Checkout, Error> {

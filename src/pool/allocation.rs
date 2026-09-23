@@ -177,6 +177,7 @@ impl PoolMachine {
                         RequestState::Failed(Error::ConnectFailed {
                             code: failure.code,
                             effect: failure.effect,
+                            setup_cause: failure.setup_cause,
                         });
                 }
             }

@@ -155,11 +155,13 @@ fn v1_rejects_v2_failure_fields_and_repository_refused_code() {
     for (kind, stream_id) in failures {
         for failure in [
             Failure {
+                setup_cause: None,
                 code: ErrorCode::Io,
                 effect: Effect::Possible,
                 facts: Some(Facts::default()),
             },
             Failure {
+                setup_cause: None,
                 code: ErrorCode::RepositoryRefused,
                 effect: Effect::None,
                 facts: None,
@@ -182,11 +184,13 @@ fn v1_rejects_v2_failure_fields_and_repository_refused_code() {
     }
     for failure in [
         Failure {
+            setup_cause: None,
             code: ErrorCode::Io,
             effect: Effect::Possible,
             facts: Some(Facts::default()),
         },
         Failure {
+            setup_cause: None,
             code: ErrorCode::RepositoryRefused,
             effect: Effect::None,
             facts: None,
@@ -219,6 +223,7 @@ fn v1_rejects_v2_failure_fields_and_repository_refused_code() {
                 stream_id: 1,
                 kind: MessageKind::OpenFailed,
                 open_failed: Some(Failure {
+                    setup_cause: None,
                     code: ErrorCode::RepositoryRefused,
                     effect: Effect::None,
                     facts: Some(Facts::default()),
@@ -234,6 +239,7 @@ fn v1_rejects_v2_failure_fields_and_repository_refused_code() {
                 stream_id: 1,
                 kind: MessageKind::Failed,
                 failed: Some(Failure {
+                    setup_cause: None,
                     code: ErrorCode::RepositoryRefused,
                     effect: Effect::None,
                     facts: Some(Facts::default()),
@@ -255,6 +261,7 @@ fn v1_rejects_v2_failure_fields_and_repository_refused_code() {
             unread_response_discarded: false,
             facts: Facts::default(),
             failure: Some(Failure {
+                setup_cause: None,
                 code: ErrorCode::RepositoryRefused,
                 effect: Effect::None,
                 facts: None,
@@ -275,6 +282,7 @@ fn retained_v1_reader_accepts_new_v1_bytes_and_new_reader_accepts_old_fixture() 
         stream_id: 1,
         kind: MessageKind::Failed,
         failed: Some(Failure {
+            setup_cause: None,
             code: ErrorCode::Io,
             effect: Effect::Possible,
             facts: None,
@@ -356,6 +364,7 @@ fn closed_nested_failure_facts_are_rejected() {
             unread_response_discarded: false,
             facts: Facts::default(),
             failure: Some(Failure {
+                setup_cause: None,
                 code: ErrorCode::RepositoryRefused,
                 effect: Effect::None,
                 facts: Some(Facts::default()),
@@ -374,6 +383,7 @@ fn identity_check_failure_has_no_effect_or_facts() {
         stream_id: 1,
         kind: MessageKind::IdentityCheckFailed,
         identity_check_failed: Some(Failure {
+            setup_cause: None,
             code: ErrorCode::Authentication,
             effect: Effect::Possible,
             facts: Some(Facts::default()),
@@ -396,6 +406,7 @@ fn typed_close_failure_retains_authoritative_facts() {
             stream_id: 1,
             kind: MessageKind::Failed,
             failed: Some(Failure {
+                setup_cause: None,
                 code: ErrorCode::RepositoryRefused,
                 effect: Effect::None,
                 facts: Some(facts.clone()),
