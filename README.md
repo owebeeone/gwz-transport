@@ -186,8 +186,8 @@ leaves that exclusive lease untouched: route the I/O failure to its active
 exchange, whose host must discard the lease and acknowledge cleanup. This
 callback never cancels a lease using an old idle observation.
 
-Limits default to eight connections per user/host across ports
-(`per_user_host`) and eight per host across users, ports and schemes
+Limits default to 32 connections per user/host across ports
+(`per_user_host`) and 32 per host across users, ports and schemes
 (`per_host`), plus 256 per endpoint and 1,024 outstanding requests. HTTPS has a
 no-username capacity bucket for each configured host. Reuse still requires the
 full scheme/username/host/port key.
@@ -198,7 +198,7 @@ incompatible head does not prevent eligible reuse. Incompatible idle resources
 can be retired to make room for a new identity.
 
 Idle expiry defaults to 60 seconds from healthy release. Other defaults are
-30 seconds for allocation, 10 seconds of connect-network time, 120 seconds of
+30 seconds for allocation, 30 seconds of connect-network time, 120 seconds of
 helper interaction and 5 seconds for cleanup. Requests may shorten the first
 three non-idle budgets. The connect timeout accepts 0–2,147,483,647 ms; zero
 disables network timing. An omitted override inherits; `Some(0)` is allowed only

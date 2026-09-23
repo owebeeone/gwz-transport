@@ -36,7 +36,7 @@ fn remaining_connect_helper_allowance_transfers_to_active_stream() {
     else {
         panic!("expected connect action");
     };
-    assert_eq!(network_deadline, Some(10_000));
+    assert_eq!(network_deadline, Some(30_000));
     let helper_start_ms = 0;
     pool.begin_interaction(connection).unwrap();
     let helper_end_ms = 20_000;
@@ -44,7 +44,7 @@ fn remaining_connect_helper_allowance_transfers_to_active_stream() {
     pool.end_interaction(connection).unwrap();
     let remaining_helper_ms = helper_budget_ms.saturating_sub(helper_end_ms - helper_start_ms);
     assert_eq!(remaining_helper_ms, 100_000);
-    assert_eq!(pool.next_deadline(), Some(30_000));
+    assert_eq!(pool.next_deadline(), Some(50_000));
     pool.connected(connection, Ok(Some(Identity::Ambient)))
         .unwrap();
     let lease = pool.take(request_id).unwrap();

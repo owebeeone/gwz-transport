@@ -325,14 +325,14 @@ fn queue_network_interaction_and_cleanup_use_independent_budgets() {
     else {
         panic!("connect");
     };
-    assert_eq!(network_deadline, Some(39_000));
+    assert_eq!(network_deadline, Some(59_000));
     pool.advance(30_000);
     pool.begin_interaction(connection).unwrap();
     assert_eq!(pool.next_deadline(), Some(150_000));
     pool.advance(130_000);
     assert_eq!(pool.take(a), Err(Error::WouldBlock));
     pool.end_interaction(connection).unwrap();
-    assert_eq!(pool.next_deadline(), Some(139_000));
+    assert_eq!(pool.next_deadline(), Some(159_000));
     pool.advance(131_000);
     pool.begin_interaction(connection).unwrap();
     assert_eq!(pool.next_deadline(), Some(151_000)); // Remaining 20s, not a new 120s.
@@ -366,7 +366,7 @@ fn connect_timeout_and_reported_failure_do_not_retry_the_request() {
     let Some(Action::Connect { connection, .. }) = pool.next_action() else {
         panic!("connect");
     };
-    pool.advance(10_000);
+    pool.advance(30_000);
     assert_eq!(pool.take(a), Err(Error::ConnectTimeout));
     pool.connected(
         connection,
@@ -559,7 +559,7 @@ fn request_settings_cannot_resize_endpoint_limits_or_raise_timeouts() {
     ));
     let mut pool = PoolMachine::new(config()).unwrap();
     let mut a = request("git", "host");
-    a.connect_timeout_ms = Some(10_001);
+    a.connect_timeout_ms = Some(30_001);
     assert_eq!(pool.request(a), Err(Error::InvalidRequest));
     let mut a = request("git", "host");
     a.identity = Identity::Https;
