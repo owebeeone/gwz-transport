@@ -1,0 +1,8 @@
+{
+  "rule": "No process-global mutable state in gwz-transport, which runs inside every per-operation runtime of a core session (GwzCoreSessionDesign O9). This list is the complete inventory of production exceptions. gwz-core's check_process_globals.py, run by scripts/test_process_globals.py, fails on anything unlisted and on entries that no longer match, so the list only shrinks.",
+  "roots": ["src/lib.rs"],
+  "entries": [
+    {"path": "src/pool/machine.rs", "kind": "static", "name": "NEXT_POOL", "disposition": "permanent",
+     "reason": "Pool ID sequence (checked increment); no session state."}
+  ]
+}
