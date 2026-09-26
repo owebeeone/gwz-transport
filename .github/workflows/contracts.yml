@@ -21,13 +21,6 @@ jobs:
           ref: bcf98b64d465fc54841121b6d1a2d46940f81a3c
           path: .taut-generator
           persist-credentials: false
-      # gwz-core owns the process-global state checker that
-      # scripts/test_process_globals.py runs against this repository.
-      - uses: actions/checkout@v6
-        with:
-          repository: owebeeone/gwz-core
-          path: .gwz-core
-          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -39,7 +32,7 @@ jobs:
           rustup toolchain install 1.95.0 --profile minimal
       - name: Verify generated artifacts without rewriting them
         run: |
-          GWZ_CORE_CHECKOUT=.gwz-core PYTHONPATH=scripts python -m unittest discover -s scripts -p 'test_*.py'
+          PYTHONPATH=scripts python -m unittest discover -s scripts -p 'test_*.py'
           python scripts/regen.py --check --taut-source .taut-generator/src
           cargo fmt --all -- --check
       - name: Test contracts and deterministic replay at the MSRV
