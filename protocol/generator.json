@@ -3,18 +3,18 @@
   "rustfmt": "rustfmt 1.9.0-stable (ac68faa20c 2026-05-25)",
   "codec": "fail-closed",
   "forward_compat": false,
-  "taut-source-revision": "bcf98b64d465fc54841121b6d1a2d46940f81a3c",
+  "taut-source-revision": "9d463102b033599c763a3a9e4c7afc6567b740b7",
   "taut-extension-sha256": {
     "src/taut/gen/runtime/cbor.rs": "f6b96fb0fc038df2344bfd4c3f63c5fc7ddb8d24979ae9eb5d7b898184663d55",
     "src/taut/gen/runtime/cbor_fail_closed.rs": "c276f0845efa48030a31cce8137516c5010c377781065cc353db186223275744",
-    "src/taut/gen/rust.py": "c768882082d740177b30518dbee6c3f5f7b69724c6e998043e4b64bc6e0ef432",
-    "src/taut/gen/scaffold.py": "92390d0508dc3724b2e49396f010b8f3bb4b15544bc4236db90ebecf3dd1012a",
-    "src/taut/ir/compat.py": "11159b368171c863635c9fb2815a4436a8a084ed158c9db4c035e390dcbceba8",
-    "src/taut/ir/dsl.py": "02bfebed1f8b8fc4a0b9450379a1b04acf23b44b3ae57b7c9c1255af8e0a6fa9",
-    "src/taut/ir/export.py": "cbe715d44d164a9c125944fd38319a745f438f008f7c59d0210d334df4dd5afa",
-    "src/taut/ir/load.py": "1d8a17ed0f3c7e12b85f5379a1ca4b33b1efb72f0c7f51c85b5ae3c30b18fd11",
-    "src/taut/ir/model.py": "242f380c821a36a2206877f09afdbaca839bff9baa15eaa0dc6fdac71393f50c",
-    "src/taut/ir/validate.py": "df06f246138b17fbde8d4850dff8dfa275eaaf0022850eee6ac1c51420c71d2c",
-    "src/taut/wire/codec.py": "5c22fc12d19edaa415c5d436d5e96db6c828d04a2a3c99a46472cc992e881272"
+    "src/taut/gen/rust.py": "84880726fc219ccc40c6e528728f80ac2000febf17345691fff6773eefb9cf4a",
+    "src/taut/gen/scaffold.py": "ae1c8b14970f01d75cad2be1b2ea1d583c50b24860367c792502e88da856daed",
+    "src/taut/ir/compat.py": "0ef44c9f2133cc25f87191b36ee240a3cf591d224cd298ed9219701340a59128",
+    "src/taut/ir/dsl.py": "a5a714a310438183f33851589f3e50b236064f95a1f5ef8d48d8848d59ddfad3",
+    "src/taut/ir/export.py": "3648ff0d5ae4a42cbae722b8a2bd0b046226012be22ae4c9b2b01194c248f42b",
+    "src/taut/ir/load.py": "07499a0ac9213d5630f0bc22b0460359f558ae12f0a3c4760034d5b0c7c14dc0",
+    "src/taut/ir/model.py": "20671f8478d1f74470e70fa57ff6d67c669e2e72e87b3bdea7f9e6bf0be4834b",
+    "src/taut/ir/validate.py": "3926633d55dff6eb60498541ae4452f49b1972b4ac23b295270d78e2adbb8c17",
+    "src/taut/wire/codec.py": "f5ba442518102a6ffbb98b6adcf8be74dcbd487414d878b7fee14411ed79f252"
   }
 }

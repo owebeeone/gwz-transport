@@ -437,9 +437,8 @@
         },
         {
           "merge": null,
-          "missing_ok": true,
           "name": "facts",
-          "optional": true,
+          "optional": "missing_ok",
           "tag": 3,
           "transient": false,
           "type": {
@@ -449,9 +448,8 @@
         },
         {
           "merge": null,
-          "missing_ok": true,
           "name": "setup_cause",
-          "optional": true,
+          "optional": "missing_ok",
           "tag": 4,
           "transient": false,
           "type": {
@@ -1171,9 +1169,8 @@
         },
         {
           "merge": null,
-          "missing_ok": true,
           "name": "message_seq",
-          "optional": true,
+          "optional": "missing_ok",
           "tag": 5,
           "transient": false,
           "type": {
@@ -1348,9 +1345,8 @@
         },
         {
           "merge": null,
-          "missing_ok": true,
           "name": "check_identity",
-          "optional": true,
+          "optional": "missing_ok",
           "tag": 25,
           "transient": false,
           "type": {
@@ -1360,9 +1356,8 @@
         },
         {
           "merge": null,
-          "missing_ok": true,
           "name": "identity_checked",
-          "optional": true,
+          "optional": "missing_ok",
           "tag": 26,
           "transient": false,
           "type": {
@@ -1372,9 +1367,8 @@
         },
         {
           "merge": null,
-          "missing_ok": true,
           "name": "identity_check_failed",
-          "optional": true,
+          "optional": "missing_ok",
           "tag": 27,
           "transient": false,
           "type": {

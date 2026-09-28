@@ -3,7 +3,7 @@
 Bootstrap envelopes use profile version 1; a successful Bound may negotiate
 profile version 2 or 3 for subsequent messages.
 """
-from taut.ir.dsl import BOOL, BYTES, INT, STR, Enum, F, List, Msg, Ref, schema
+from taut.ir.dsl import BOOL, BYTES, INT, MISSING_OK, STR, Enum, F, List, Msg, Ref, schema
 
 SCHEMA = schema(
     MessageKind=Enum(bind=1, bound=2, bind_rejected=3, open=4, opened=5,
@@ -39,8 +39,8 @@ SCHEMA = schema(
               schemes=F(4, List(Ref.Scheme)), policies=F(5, List(Ref.AuthPolicy)),
               receive_limits=F(6, Ref.Limits), trust_owner=F(7, STR)),
     Failure=Msg(code=F(1, Ref.ErrorCode), effect=F(2, Ref.Effect),
-                facts=F(3, Ref.Facts, optional=True, missing_ok=True),
-                setup_cause=F(4, Ref.SetupFailureCause, optional=True, missing_ok=True)),
+                facts=F(3, Ref.Facts, optional=MISSING_OK),
+                setup_cause=F(4, Ref.SetupFailureCause, optional=MISSING_OK)),
     Destination=Msg(scheme=F(1, Ref.Scheme), host=F(2, STR), port=F(3, INT),
                     path=F(4, STR), ssh_username=F(5, STR, optional=True)),
     Identity=Msg(mode=F(1, Ref.IdentityMode), key_path=F(2, STR, optional=True),
@@ -71,7 +71,7 @@ SCHEMA = schema(
     # Exactly one body must match kind. Optional taut fields encode absent as null.
     Envelope=Msg(version=F(1, INT), session_id=F(2, STR), stream_id=F(3, INT),
                  kind=F(4, Ref.MessageKind),
-                 message_seq=F(5, INT, optional=True, missing_ok=True),
+                 message_seq=F(5, INT, optional=MISSING_OK),
                  bind=F(10, Ref.Bind, optional=True), bound=F(11, Ref.Bound, optional=True),
                  bind_rejected=F(12, Ref.Failure, optional=True),
                  open=F(13, Ref.Open, optional=True), opened=F(14, Ref.Opened, optional=True),
@@ -81,7 +81,7 @@ SCHEMA = schema(
                  end_write=F(20, Ref.EndWrite, optional=True), close=F(21, Ref.Close, optional=True),
                  closed=F(22, Ref.Closed, optional=True), cancel=F(23, Ref.Cancel, optional=True),
                  failed=F(24, Ref.Failure, optional=True),
-                 check_identity=F(25, Ref.CheckIdentity, optional=True, missing_ok=True),
-                 identity_checked=F(26, Ref.IdentityChecked, optional=True, missing_ok=True),
-                 identity_check_failed=F(27, Ref.Failure, optional=True, missing_ok=True)),
+                 check_identity=F(25, Ref.CheckIdentity, optional=MISSING_OK),
+                 identity_checked=F(26, Ref.IdentityChecked, optional=MISSING_OK),
+                 identity_check_failed=F(27, Ref.Failure, optional=MISSING_OK)),
 )
