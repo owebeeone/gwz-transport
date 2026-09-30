@@ -1,5 +1,8 @@
 use super::*;
 use crate::protocol::*;
+// The generated protocol also exports a `MAX_DEPTH` (taut's decode bound);
+// the limit checked here is the codec's own.
+use super::MAX_DEPTH;
 
 pub(crate) fn limits(value: &Limits) -> Result<(), Error> {
     let fields = [

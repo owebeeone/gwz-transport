@@ -5,7 +5,7 @@ extern crate alloc;
 
 #[allow(clippy::collapsible_if)] // Pinned upstream codec; do not hand-edit.
 pub mod cbor;
-#[allow(clippy::needless_question_mark)] // Pinned taut 0.9.1 output.
+#[allow(clippy::needless_question_mark)] // Pinned taut 0.10.0 output.
 pub mod protocol;
 
 /// The canonical authored schema, shipped with the package for other consumers.

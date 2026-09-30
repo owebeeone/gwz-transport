@@ -2,6 +2,11 @@
 #![allow(dead_code)]
 use crate::cbor::{Cbor, DecodeError};
 
+// The file's bounds, for a decode rooted at a type that is not a message:
+// `cbor::try_decode_with(bytes, MAX_DEPTH, MAX_ENCODED_LEN)`.
+pub const MAX_DEPTH: usize = 32;
+pub const MAX_ENCODED_LEN: Option<usize> = None;
+
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum MessageKind {
     #[default]
@@ -431,6 +436,8 @@ pub struct Limits {
     pub control_reserve_frames: i64,
 }
 impl Limits {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
     pub fn to_cbor(&self) -> Cbor {
         Cbor::Map(vec![
             (1, Cbor::Int(self.encoded_frame)),
@@ -461,6 +468,13 @@ impl Limits {
             control_reserve_frames: c.try_get(11)?.try_int()?,
         })
     }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -472,6 +486,8 @@ pub struct Bind {
     pub receive_limits: Limits,
 }
 impl Bind {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
     pub fn to_cbor(&self) -> Cbor {
         Cbor::Map(vec![
             (
@@ -514,6 +530,13 @@ impl Bind {
             receive_limits: Limits::from_cbor(c.try_get(5)?)?,
         })
     }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -527,6 +550,8 @@ pub struct Bound {
     pub trust_owner: String,
 }
 impl Bound {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
     pub fn to_cbor(&self) -> Cbor {
         Cbor::Map(vec![
             (1, Cbor::Int(self.version)),
@@ -565,6 +590,13 @@ impl Bound {
             trust_owner: c.try_get(7)?.try_text()?,
         })
     }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -575,6 +607,8 @@ pub struct Failure {
     pub setup_cause: Option<SetupFailureCause>,
 }
 impl Failure {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
     pub fn to_cbor(&self) -> Cbor {
         Cbor::Map(vec![
             (1, Cbor::Int(self.code.wire())),
@@ -627,6 +661,13 @@ impl Failure {
             },
         })
     }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -638,6 +679,8 @@ pub struct Destination {
     pub ssh_username: Option<String>,
 }
 impl Destination {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
     pub fn to_cbor(&self) -> Cbor {
         Cbor::Map(vec![
             (1, Cbor::Int(self.scheme.wire())),
@@ -669,6 +712,13 @@ impl Destination {
             },
         })
     }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -678,6 +728,8 @@ pub struct Identity {
     pub path_base: Option<String>,
 }
 impl Identity {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
     pub fn to_cbor(&self) -> Cbor {
         Cbor::Map(vec![
             (1, Cbor::Int(self.mode.wire())),
@@ -718,6 +770,13 @@ impl Identity {
             },
         })
     }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -729,6 +788,8 @@ pub struct Deadlines {
     pub cleanup_ms: i64,
 }
 impl Deadlines {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
     pub fn to_cbor(&self) -> Cbor {
         Cbor::Map(vec![
             (1, Cbor::Int(self.allocation_ms)),
@@ -747,6 +808,13 @@ impl Deadlines {
             cleanup_ms: c.try_get(5)?.try_int()?,
         })
     }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -761,6 +829,8 @@ pub struct Open {
     pub receive_limits: Limits,
 }
 impl Open {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
     pub fn to_cbor(&self) -> Cbor {
         Cbor::Map(vec![
             (1, Cbor::Text(self.endpoint_id.clone())),
@@ -785,6 +855,13 @@ impl Open {
             receive_limits: Limits::from_cbor(c.try_get(8)?)?,
         })
     }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -795,6 +872,8 @@ pub struct CheckIdentity {
     pub timeout_ms: i64,
 }
 impl CheckIdentity {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
     pub fn to_cbor(&self) -> Cbor {
         Cbor::Map(vec![
             (1, Cbor::Text(self.endpoint_id.clone())),
@@ -811,11 +890,20 @@ impl CheckIdentity {
             timeout_ms: c.try_get(4)?.try_int()?,
         })
     }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct IdentityChecked {}
 impl IdentityChecked {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
     pub fn to_cbor(&self) -> Cbor {
         Cbor::Map(vec![])
     }
@@ -824,6 +912,13 @@ impl IdentityChecked {
             return Err(DecodeError::WrongType { expected: "map" });
         }
         Ok(Self {})
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
     }
 }
 
@@ -837,6 +932,8 @@ pub struct Facts {
     pub ssh_exit_status: Option<i64>,
 }
 impl Facts {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
     pub fn to_cbor(&self) -> Cbor {
         Cbor::Map(vec![
             (1, Cbor::Int(self.method.wire())),
@@ -909,6 +1006,13 @@ impl Facts {
             },
         })
     }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -921,6 +1025,8 @@ pub struct Opened {
     pub receive_limits: Limits,
 }
 impl Opened {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
     pub fn to_cbor(&self) -> Cbor {
         Cbor::Map(vec![
             (1, Cbor::Text(self.connection_id.clone())),
@@ -941,6 +1047,13 @@ impl Opened {
             receive_limits: Limits::from_cbor(c.try_get(6)?)?,
         })
     }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -949,6 +1062,8 @@ pub struct Data {
     pub payload: Vec<u8>,
 }
 impl Data {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
     pub fn to_cbor(&self) -> Cbor {
         Cbor::Map(vec![
             (1, Cbor::Int(self.offset)),
@@ -961,6 +1076,13 @@ impl Data {
             payload: c.try_get(2)?.try_bytes()?,
         })
     }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -968,6 +1090,8 @@ pub struct Window {
     pub max_offset: i64,
 }
 impl Window {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
     pub fn to_cbor(&self) -> Cbor {
         Cbor::Map(vec![(1, Cbor::Int(self.max_offset))])
     }
@@ -975,6 +1099,13 @@ impl Window {
         Ok(Self {
             max_offset: c.try_get(1)?.try_int()?,
         })
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
     }
 }
 
@@ -984,6 +1115,8 @@ pub struct Barrier {
     pub offset: i64,
 }
 impl Barrier {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
     pub fn to_cbor(&self) -> Cbor {
         Cbor::Map(vec![
             (1, Cbor::Int(self.barrier_id)),
@@ -996,6 +1129,13 @@ impl Barrier {
             offset: c.try_get(2)?.try_int()?,
         })
     }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -1003,6 +1143,8 @@ pub struct EndWrite {
     pub final_offset: i64,
 }
 impl EndWrite {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
     pub fn to_cbor(&self) -> Cbor {
         Cbor::Map(vec![(1, Cbor::Int(self.final_offset))])
     }
@@ -1010,6 +1152,13 @@ impl EndWrite {
         Ok(Self {
             final_offset: c.try_get(1)?.try_int()?,
         })
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
     }
 }
 
@@ -1018,6 +1167,8 @@ pub struct Close {
     pub final_offset: i64,
 }
 impl Close {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
     pub fn to_cbor(&self) -> Cbor {
         Cbor::Map(vec![(1, Cbor::Int(self.final_offset))])
     }
@@ -1025,6 +1176,13 @@ impl Close {
         Ok(Self {
             final_offset: c.try_get(1)?.try_int()?,
         })
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
     }
 }
 
@@ -1036,6 +1194,8 @@ pub struct Closed {
     pub failure: Option<Failure>,
 }
 impl Closed {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
     pub fn to_cbor(&self) -> Cbor {
         Cbor::Map(vec![
             (1, Cbor::Int(self.disposition.wire())),
@@ -1065,6 +1225,13 @@ impl Closed {
             },
         })
     }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -1072,6 +1239,8 @@ pub struct Cancel {
     pub reason: ErrorCode,
 }
 impl Cancel {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
     pub fn to_cbor(&self) -> Cbor {
         Cbor::Map(vec![(1, Cbor::Int(self.reason.wire()))])
     }
@@ -1079,6 +1248,13 @@ impl Cancel {
         Ok(Self {
             reason: ErrorCode::from_wire(c.try_get(1)?.try_int()?)?,
         })
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
     }
 }
 
@@ -1109,6 +1285,8 @@ pub struct Envelope {
     pub identity_check_failed: Option<Failure>,
 }
 impl Envelope {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
     pub fn to_cbor(&self) -> Cbor {
         Cbor::Map(vec![
             (1, Cbor::Int(self.version)),
@@ -1429,5 +1607,12 @@ impl Envelope {
                 }
             },
         })
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
     }
 }

@@ -1,6 +1,30 @@
 {
+  "effective": {
+    "max_depth": 32,
+    "max_encoded_len": null
+  },
   "enums": [
     {
+      "member_options": {
+        "bind": {},
+        "bind_rejected": {},
+        "bound": {},
+        "cancel": {},
+        "check_identity": {},
+        "close": {},
+        "closed": {},
+        "data": {},
+        "end_write": {},
+        "failed": {},
+        "flush": {},
+        "flushed": {},
+        "identity_check_failed": {},
+        "identity_checked": {},
+        "open": {},
+        "open_failed": {},
+        "opened": {},
+        "window": {}
+      },
       "members": {
         "bind": 1,
         "bind_rejected": 3,
@@ -21,49 +45,95 @@
         "opened": 5,
         "window": 8
       },
-      "name": "MessageKind"
+      "name": "MessageKind",
+      "options": {}
     },
     {
+      "member_options": {
+        "driver": {},
+        "local": {}
+      },
       "members": {
         "driver": 2,
         "local": 1
       },
-      "name": "EndpointRole"
+      "name": "EndpointRole",
+      "options": {}
     },
     {
+      "member_options": {
+        "https": {},
+        "ssh": {}
+      },
       "members": {
         "https": 2,
         "ssh": 1
       },
-      "name": "Scheme"
+      "name": "Scheme",
+      "options": {}
     },
     {
+      "member_options": {
+        "anonymous": {},
+        "gh": {},
+        "ssh_ambient": {},
+        "ssh_explicit": {}
+      },
       "members": {
         "anonymous": 3,
         "gh": 4,
         "ssh_ambient": 1,
         "ssh_explicit": 2
       },
-      "name": "AuthPolicy"
+      "name": "AuthPolicy",
+      "options": {}
     },
     {
+      "member_options": {
+        "receive_pack_advertisement": {},
+        "receive_pack_exchange": {},
+        "upload_pack_advertisement": {},
+        "upload_pack_exchange": {}
+      },
       "members": {
         "receive_pack_advertisement": 3,
         "receive_pack_exchange": 4,
         "upload_pack_advertisement": 1,
         "upload_pack_exchange": 2
       },
-      "name": "GitService"
+      "name": "GitService",
+      "options": {}
     },
     {
+      "member_options": {
+        "ambient": {},
+        "credentials_disabled": {},
+        "explicit_key": {}
+      },
       "members": {
         "ambient": 1,
         "credentials_disabled": 3,
         "explicit_key": 2
       },
-      "name": "IdentityMode"
+      "name": "IdentityMode",
+      "options": {}
     },
     {
+      "member_options": {
+        "authentication": {},
+        "cancelled": {},
+        "capacity": {},
+        "carrier_lost": {},
+        "invalid_request": {},
+        "io": {},
+        "protocol": {},
+        "repository_refused": {},
+        "timeout": {},
+        "trust": {},
+        "unavailable": {},
+        "unsupported_operation": {},
+        "unsupported_version": {}
+      },
       "members": {
         "authentication": 8,
         "cancelled": 7,
@@ -79,9 +149,19 @@
         "unsupported_operation": 2,
         "unsupported_version": 1
       },
-      "name": "ErrorCode"
+      "name": "ErrorCode",
+      "options": {}
     },
     {
+      "member_options": {
+        "address_not_available": {},
+        "aggregate": {},
+        "allocation": {},
+        "connection_refused": {},
+        "interaction": {},
+        "not_found": {},
+        "stall": {}
+      },
       "members": {
         "address_not_available": 7,
         "aggregate": 2,
@@ -91,40 +171,63 @@
         "not_found": 6,
         "stall": 1
       },
-      "name": "SetupFailureCause"
+      "name": "SetupFailureCause",
+      "options": {}
     },
     {
+      "member_options": {
+        "none": {},
+        "possible": {}
+      },
       "members": {
         "none": 1,
         "possible": 2
       },
-      "name": "Effect"
+      "name": "Effect",
+      "options": {}
     },
     {
+      "member_options": {
+        "discarded": {},
+        "reusable": {}
+      },
       "members": {
         "discarded": 2,
         "reusable": 1
       },
-      "name": "Disposition"
+      "name": "Disposition",
+      "options": {}
     },
     {
+      "member_options": {
+        "gh": {},
+        "none": {},
+        "ssh_agent": {},
+        "ssh_key": {}
+      },
       "members": {
         "gh": 4,
         "none": 1,
         "ssh_agent": 2,
         "ssh_key": 3
       },
-      "name": "AuthMethod"
+      "name": "AuthMethod",
+      "options": {}
     }
   ],
   "extensions": [],
   "messages": [
     {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
       "fields": [
         {
           "merge": null,
           "name": "encoded_frame",
           "optional": false,
+          "options": {},
           "tag": 1,
           "transient": false,
           "type": {
@@ -136,6 +239,7 @@
           "merge": null,
           "name": "data_payload",
           "optional": false,
+          "options": {},
           "tag": 2,
           "transient": false,
           "type": {
@@ -147,6 +251,7 @@
           "merge": null,
           "name": "metadata_bytes",
           "optional": false,
+          "options": {},
           "tag": 3,
           "transient": false,
           "type": {
@@ -158,6 +263,7 @@
           "merge": null,
           "name": "nesting",
           "optional": false,
+          "options": {},
           "tag": 4,
           "transient": false,
           "type": {
@@ -169,6 +275,7 @@
           "merge": null,
           "name": "collection_entries",
           "optional": false,
+          "options": {},
           "tag": 5,
           "transient": false,
           "type": {
@@ -180,6 +287,7 @@
           "merge": null,
           "name": "decode_allocation",
           "optional": false,
+          "options": {},
           "tag": 6,
           "transient": false,
           "type": {
@@ -191,6 +299,7 @@
           "merge": null,
           "name": "queued_bytes",
           "optional": false,
+          "options": {},
           "tag": 7,
           "transient": false,
           "type": {
@@ -202,6 +311,7 @@
           "merge": null,
           "name": "queued_frames",
           "optional": false,
+          "options": {},
           "tag": 8,
           "transient": false,
           "type": {
@@ -213,6 +323,7 @@
           "merge": null,
           "name": "receive_window",
           "optional": false,
+          "options": {},
           "tag": 9,
           "transient": false,
           "type": {
@@ -224,6 +335,7 @@
           "merge": null,
           "name": "control_reserve_bytes",
           "optional": false,
+          "options": {},
           "tag": 10,
           "transient": false,
           "type": {
@@ -235,6 +347,7 @@
           "merge": null,
           "name": "control_reserve_frames",
           "optional": false,
+          "options": {},
           "tag": 11,
           "transient": false,
           "type": {
@@ -245,15 +358,21 @@
       ],
       "name": "Limits",
       "next_id": null,
+      "options": {},
       "reserved_names": [],
       "reserved_tags": []
     },
     {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
       "fields": [
         {
           "merge": null,
           "name": "versions",
           "optional": false,
+          "options": {},
           "tag": 1,
           "transient": false,
           "type": {
@@ -268,6 +387,7 @@
           "merge": null,
           "name": "role",
           "optional": false,
+          "options": {},
           "tag": 2,
           "transient": false,
           "type": {
@@ -279,6 +399,7 @@
           "merge": null,
           "name": "schemes",
           "optional": false,
+          "options": {},
           "tag": 3,
           "transient": false,
           "type": {
@@ -293,6 +414,7 @@
           "merge": null,
           "name": "policies",
           "optional": false,
+          "options": {},
           "tag": 4,
           "transient": false,
           "type": {
@@ -307,6 +429,7 @@
           "merge": null,
           "name": "receive_limits",
           "optional": false,
+          "options": {},
           "tag": 5,
           "transient": false,
           "type": {
@@ -317,15 +440,21 @@
       ],
       "name": "Bind",
       "next_id": null,
+      "options": {},
       "reserved_names": [],
       "reserved_tags": []
     },
     {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
       "fields": [
         {
           "merge": null,
           "name": "version",
           "optional": false,
+          "options": {},
           "tag": 1,
           "transient": false,
           "type": {
@@ -337,6 +466,7 @@
           "merge": null,
           "name": "endpoint_id",
           "optional": false,
+          "options": {},
           "tag": 2,
           "transient": false,
           "type": {
@@ -348,6 +478,7 @@
           "merge": null,
           "name": "role",
           "optional": false,
+          "options": {},
           "tag": 3,
           "transient": false,
           "type": {
@@ -359,6 +490,7 @@
           "merge": null,
           "name": "schemes",
           "optional": false,
+          "options": {},
           "tag": 4,
           "transient": false,
           "type": {
@@ -373,6 +505,7 @@
           "merge": null,
           "name": "policies",
           "optional": false,
+          "options": {},
           "tag": 5,
           "transient": false,
           "type": {
@@ -387,6 +520,7 @@
           "merge": null,
           "name": "receive_limits",
           "optional": false,
+          "options": {},
           "tag": 6,
           "transient": false,
           "type": {
@@ -398,6 +532,7 @@
           "merge": null,
           "name": "trust_owner",
           "optional": false,
+          "options": {},
           "tag": 7,
           "transient": false,
           "type": {
@@ -408,15 +543,21 @@
       ],
       "name": "Bound",
       "next_id": null,
+      "options": {},
       "reserved_names": [],
       "reserved_tags": []
     },
     {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
       "fields": [
         {
           "merge": null,
           "name": "code",
           "optional": false,
+          "options": {},
           "tag": 1,
           "transient": false,
           "type": {
@@ -428,6 +569,7 @@
           "merge": null,
           "name": "effect",
           "optional": false,
+          "options": {},
           "tag": 2,
           "transient": false,
           "type": {
@@ -439,6 +581,7 @@
           "merge": null,
           "name": "facts",
           "optional": "missing_ok",
+          "options": {},
           "tag": 3,
           "transient": false,
           "type": {
@@ -450,6 +593,7 @@
           "merge": null,
           "name": "setup_cause",
           "optional": "missing_ok",
+          "options": {},
           "tag": 4,
           "transient": false,
           "type": {
@@ -460,15 +604,21 @@
       ],
       "name": "Failure",
       "next_id": null,
+      "options": {},
       "reserved_names": [],
       "reserved_tags": []
     },
     {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
       "fields": [
         {
           "merge": null,
           "name": "scheme",
           "optional": false,
+          "options": {},
           "tag": 1,
           "transient": false,
           "type": {
@@ -480,6 +630,7 @@
           "merge": null,
           "name": "host",
           "optional": false,
+          "options": {},
           "tag": 2,
           "transient": false,
           "type": {
@@ -491,6 +642,7 @@
           "merge": null,
           "name": "port",
           "optional": false,
+          "options": {},
           "tag": 3,
           "transient": false,
           "type": {
@@ -502,6 +654,7 @@
           "merge": null,
           "name": "path",
           "optional": false,
+          "options": {},
           "tag": 4,
           "transient": false,
           "type": {
@@ -513,6 +666,7 @@
           "merge": null,
           "name": "ssh_username",
           "optional": true,
+          "options": {},
           "tag": 5,
           "transient": false,
           "type": {
@@ -523,15 +677,21 @@
       ],
       "name": "Destination",
       "next_id": null,
+      "options": {},
       "reserved_names": [],
       "reserved_tags": []
     },
     {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
       "fields": [
         {
           "merge": null,
           "name": "mode",
           "optional": false,
+          "options": {},
           "tag": 1,
           "transient": false,
           "type": {
@@ -543,6 +703,7 @@
           "merge": null,
           "name": "key_path",
           "optional": true,
+          "options": {},
           "tag": 2,
           "transient": false,
           "type": {
@@ -554,6 +715,7 @@
           "merge": null,
           "name": "path_base",
           "optional": true,
+          "options": {},
           "tag": 3,
           "transient": false,
           "type": {
@@ -564,15 +726,21 @@
       ],
       "name": "Identity",
       "next_id": null,
+      "options": {},
       "reserved_names": [],
       "reserved_tags": []
     },
     {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
       "fields": [
         {
           "merge": null,
           "name": "allocation_ms",
           "optional": false,
+          "options": {},
           "tag": 1,
           "transient": false,
           "type": {
@@ -584,6 +752,7 @@
           "merge": null,
           "name": "connect_ms",
           "optional": false,
+          "options": {},
           "tag": 2,
           "transient": false,
           "type": {
@@ -595,6 +764,7 @@
           "merge": null,
           "name": "io_ms",
           "optional": false,
+          "options": {},
           "tag": 3,
           "transient": false,
           "type": {
@@ -606,6 +776,7 @@
           "merge": null,
           "name": "interaction_ms",
           "optional": false,
+          "options": {},
           "tag": 4,
           "transient": false,
           "type": {
@@ -617,6 +788,7 @@
           "merge": null,
           "name": "cleanup_ms",
           "optional": false,
+          "options": {},
           "tag": 5,
           "transient": false,
           "type": {
@@ -627,15 +799,21 @@
       ],
       "name": "Deadlines",
       "next_id": null,
+      "options": {},
       "reserved_names": [],
       "reserved_tags": []
     },
     {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
       "fields": [
         {
           "merge": null,
           "name": "endpoint_id",
           "optional": false,
+          "options": {},
           "tag": 1,
           "transient": false,
           "type": {
@@ -647,6 +825,7 @@
           "merge": null,
           "name": "operation_id",
           "optional": false,
+          "options": {},
           "tag": 2,
           "transient": false,
           "type": {
@@ -658,6 +837,7 @@
           "merge": null,
           "name": "destination",
           "optional": false,
+          "options": {},
           "tag": 3,
           "transient": false,
           "type": {
@@ -669,6 +849,7 @@
           "merge": null,
           "name": "service",
           "optional": false,
+          "options": {},
           "tag": 4,
           "transient": false,
           "type": {
@@ -680,6 +861,7 @@
           "merge": null,
           "name": "identity",
           "optional": false,
+          "options": {},
           "tag": 5,
           "transient": false,
           "type": {
@@ -691,6 +873,7 @@
           "merge": null,
           "name": "policy",
           "optional": false,
+          "options": {},
           "tag": 6,
           "transient": false,
           "type": {
@@ -702,6 +885,7 @@
           "merge": null,
           "name": "deadlines",
           "optional": false,
+          "options": {},
           "tag": 7,
           "transient": false,
           "type": {
@@ -713,6 +897,7 @@
           "merge": null,
           "name": "receive_limits",
           "optional": false,
+          "options": {},
           "tag": 8,
           "transient": false,
           "type": {
@@ -723,15 +908,21 @@
       ],
       "name": "Open",
       "next_id": null,
+      "options": {},
       "reserved_names": [],
       "reserved_tags": []
     },
     {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
       "fields": [
         {
           "merge": null,
           "name": "endpoint_id",
           "optional": false,
+          "options": {},
           "tag": 1,
           "transient": false,
           "type": {
@@ -743,6 +934,7 @@
           "merge": null,
           "name": "operation_id",
           "optional": false,
+          "options": {},
           "tag": 2,
           "transient": false,
           "type": {
@@ -754,6 +946,7 @@
           "merge": null,
           "name": "identity",
           "optional": false,
+          "options": {},
           "tag": 3,
           "transient": false,
           "type": {
@@ -765,6 +958,7 @@
           "merge": null,
           "name": "timeout_ms",
           "optional": false,
+          "options": {},
           "tag": 4,
           "transient": false,
           "type": {
@@ -775,22 +969,33 @@
       ],
       "name": "CheckIdentity",
       "next_id": null,
+      "options": {},
       "reserved_names": [],
       "reserved_tags": []
     },
     {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
       "fields": [],
       "name": "IdentityChecked",
       "next_id": null,
+      "options": {},
       "reserved_names": [],
       "reserved_tags": []
     },
     {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
       "fields": [
         {
           "merge": null,
           "name": "method",
           "optional": false,
+          "options": {},
           "tag": 1,
           "transient": false,
           "type": {
@@ -802,6 +1007,7 @@
           "merge": null,
           "name": "credential_offered",
           "optional": false,
+          "options": {},
           "tag": 2,
           "transient": false,
           "type": {
@@ -813,6 +1019,7 @@
           "merge": null,
           "name": "authenticated",
           "optional": true,
+          "options": {},
           "tag": 3,
           "transient": false,
           "type": {
@@ -824,6 +1031,7 @@
           "merge": null,
           "name": "key_fingerprint",
           "optional": true,
+          "options": {},
           "tag": 4,
           "transient": false,
           "type": {
@@ -835,6 +1043,7 @@
           "merge": null,
           "name": "http_status",
           "optional": true,
+          "options": {},
           "tag": 5,
           "transient": false,
           "type": {
@@ -846,6 +1055,7 @@
           "merge": null,
           "name": "ssh_exit_status",
           "optional": true,
+          "options": {},
           "tag": 6,
           "transient": false,
           "type": {
@@ -856,15 +1066,21 @@
       ],
       "name": "Facts",
       "next_id": null,
+      "options": {},
       "reserved_names": [],
       "reserved_tags": []
     },
     {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
       "fields": [
         {
           "merge": null,
           "name": "connection_id",
           "optional": false,
+          "options": {},
           "tag": 1,
           "transient": false,
           "type": {
@@ -876,6 +1092,7 @@
           "merge": null,
           "name": "reused",
           "optional": false,
+          "options": {},
           "tag": 2,
           "transient": false,
           "type": {
@@ -887,6 +1104,7 @@
           "merge": null,
           "name": "endpoint_id",
           "optional": false,
+          "options": {},
           "tag": 3,
           "transient": false,
           "type": {
@@ -898,6 +1116,7 @@
           "merge": null,
           "name": "trust_owner",
           "optional": false,
+          "options": {},
           "tag": 4,
           "transient": false,
           "type": {
@@ -909,6 +1128,7 @@
           "merge": null,
           "name": "facts",
           "optional": false,
+          "options": {},
           "tag": 5,
           "transient": false,
           "type": {
@@ -920,6 +1140,7 @@
           "merge": null,
           "name": "receive_limits",
           "optional": false,
+          "options": {},
           "tag": 6,
           "transient": false,
           "type": {
@@ -930,15 +1151,21 @@
       ],
       "name": "Opened",
       "next_id": null,
+      "options": {},
       "reserved_names": [],
       "reserved_tags": []
     },
     {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
       "fields": [
         {
           "merge": null,
           "name": "offset",
           "optional": false,
+          "options": {},
           "tag": 1,
           "transient": false,
           "type": {
@@ -950,6 +1177,7 @@
           "merge": null,
           "name": "payload",
           "optional": false,
+          "options": {},
           "tag": 2,
           "transient": false,
           "type": {
@@ -960,15 +1188,21 @@
       ],
       "name": "Data",
       "next_id": null,
+      "options": {},
       "reserved_names": [],
       "reserved_tags": []
     },
     {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
       "fields": [
         {
           "merge": null,
           "name": "max_offset",
           "optional": false,
+          "options": {},
           "tag": 1,
           "transient": false,
           "type": {
@@ -979,15 +1213,21 @@
       ],
       "name": "Window",
       "next_id": null,
+      "options": {},
       "reserved_names": [],
       "reserved_tags": []
     },
     {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
       "fields": [
         {
           "merge": null,
           "name": "barrier_id",
           "optional": false,
+          "options": {},
           "tag": 1,
           "transient": false,
           "type": {
@@ -999,6 +1239,7 @@
           "merge": null,
           "name": "offset",
           "optional": false,
+          "options": {},
           "tag": 2,
           "transient": false,
           "type": {
@@ -1009,15 +1250,21 @@
       ],
       "name": "Barrier",
       "next_id": null,
+      "options": {},
       "reserved_names": [],
       "reserved_tags": []
     },
     {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
       "fields": [
         {
           "merge": null,
           "name": "final_offset",
           "optional": false,
+          "options": {},
           "tag": 1,
           "transient": false,
           "type": {
@@ -1028,15 +1275,21 @@
       ],
       "name": "EndWrite",
       "next_id": null,
+      "options": {},
       "reserved_names": [],
       "reserved_tags": []
     },
     {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
       "fields": [
         {
           "merge": null,
           "name": "final_offset",
           "optional": false,
+          "options": {},
           "tag": 1,
           "transient": false,
           "type": {
@@ -1047,15 +1300,21 @@
       ],
       "name": "Close",
       "next_id": null,
+      "options": {},
       "reserved_names": [],
       "reserved_tags": []
     },
     {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
       "fields": [
         {
           "merge": null,
           "name": "disposition",
           "optional": false,
+          "options": {},
           "tag": 1,
           "transient": false,
           "type": {
@@ -1067,6 +1326,7 @@
           "merge": null,
           "name": "unread_response_discarded",
           "optional": false,
+          "options": {},
           "tag": 2,
           "transient": false,
           "type": {
@@ -1078,6 +1338,7 @@
           "merge": null,
           "name": "facts",
           "optional": false,
+          "options": {},
           "tag": 3,
           "transient": false,
           "type": {
@@ -1089,6 +1350,7 @@
           "merge": null,
           "name": "failure",
           "optional": true,
+          "options": {},
           "tag": 4,
           "transient": false,
           "type": {
@@ -1099,15 +1361,21 @@
       ],
       "name": "Closed",
       "next_id": null,
+      "options": {},
       "reserved_names": [],
       "reserved_tags": []
     },
     {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
       "fields": [
         {
           "merge": null,
           "name": "reason",
           "optional": false,
+          "options": {},
           "tag": 1,
           "transient": false,
           "type": {
@@ -1118,15 +1386,21 @@
       ],
       "name": "Cancel",
       "next_id": null,
+      "options": {},
       "reserved_names": [],
       "reserved_tags": []
     },
     {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
       "fields": [
         {
           "merge": null,
           "name": "version",
           "optional": false,
+          "options": {},
           "tag": 1,
           "transient": false,
           "type": {
@@ -1138,6 +1412,7 @@
           "merge": null,
           "name": "session_id",
           "optional": false,
+          "options": {},
           "tag": 2,
           "transient": false,
           "type": {
@@ -1149,6 +1424,7 @@
           "merge": null,
           "name": "stream_id",
           "optional": false,
+          "options": {},
           "tag": 3,
           "transient": false,
           "type": {
@@ -1160,6 +1436,7 @@
           "merge": null,
           "name": "kind",
           "optional": false,
+          "options": {},
           "tag": 4,
           "transient": false,
           "type": {
@@ -1171,6 +1448,7 @@
           "merge": null,
           "name": "message_seq",
           "optional": "missing_ok",
+          "options": {},
           "tag": 5,
           "transient": false,
           "type": {
@@ -1182,6 +1460,7 @@
           "merge": null,
           "name": "bind",
           "optional": true,
+          "options": {},
           "tag": 10,
           "transient": false,
           "type": {
@@ -1193,6 +1472,7 @@
           "merge": null,
           "name": "bound",
           "optional": true,
+          "options": {},
           "tag": 11,
           "transient": false,
           "type": {
@@ -1204,6 +1484,7 @@
           "merge": null,
           "name": "bind_rejected",
           "optional": true,
+          "options": {},
           "tag": 12,
           "transient": false,
           "type": {
@@ -1215,6 +1496,7 @@
           "merge": null,
           "name": "open",
           "optional": true,
+          "options": {},
           "tag": 13,
           "transient": false,
           "type": {
@@ -1226,6 +1508,7 @@
           "merge": null,
           "name": "opened",
           "optional": true,
+          "options": {},
           "tag": 14,
           "transient": false,
           "type": {
@@ -1237,6 +1520,7 @@
           "merge": null,
           "name": "open_failed",
           "optional": true,
+          "options": {},
           "tag": 15,
           "transient": false,
           "type": {
@@ -1248,6 +1532,7 @@
           "merge": null,
           "name": "data",
           "optional": true,
+          "options": {},
           "tag": 16,
           "transient": false,
           "type": {
@@ -1259,6 +1544,7 @@
           "merge": null,
           "name": "window",
           "optional": true,
+          "options": {},
           "tag": 17,
           "transient": false,
           "type": {
@@ -1270,6 +1556,7 @@
           "merge": null,
           "name": "flush",
           "optional": true,
+          "options": {},
           "tag": 18,
           "transient": false,
           "type": {
@@ -1281,6 +1568,7 @@
           "merge": null,
           "name": "flushed",
           "optional": true,
+          "options": {},
           "tag": 19,
           "transient": false,
           "type": {
@@ -1292,6 +1580,7 @@
           "merge": null,
           "name": "end_write",
           "optional": true,
+          "options": {},
           "tag": 20,
           "transient": false,
           "type": {
@@ -1303,6 +1592,7 @@
           "merge": null,
           "name": "close",
           "optional": true,
+          "options": {},
           "tag": 21,
           "transient": false,
           "type": {
@@ -1314,6 +1604,7 @@
           "merge": null,
           "name": "closed",
           "optional": true,
+          "options": {},
           "tag": 22,
           "transient": false,
           "type": {
@@ -1325,6 +1616,7 @@
           "merge": null,
           "name": "cancel",
           "optional": true,
+          "options": {},
           "tag": 23,
           "transient": false,
           "type": {
@@ -1336,6 +1628,7 @@
           "merge": null,
           "name": "failed",
           "optional": true,
+          "options": {},
           "tag": 24,
           "transient": false,
           "type": {
@@ -1347,6 +1640,7 @@
           "merge": null,
           "name": "check_identity",
           "optional": "missing_ok",
+          "options": {},
           "tag": 25,
           "transient": false,
           "type": {
@@ -1358,6 +1652,7 @@
           "merge": null,
           "name": "identity_checked",
           "optional": "missing_ok",
+          "options": {},
           "tag": 26,
           "transient": false,
           "type": {
@@ -1369,6 +1664,7 @@
           "merge": null,
           "name": "identity_check_failed",
           "optional": "missing_ok",
+          "options": {},
           "tag": 27,
           "transient": false,
           "type": {
@@ -1379,10 +1675,12 @@
       ],
       "name": "Envelope",
       "next_id": null,
+      "options": {},
       "reserved_names": [],
       "reserved_tags": []
     }
   ],
+  "options": {},
   "services": [],
   "shapes": {
     "atom": {
@@ -1631,5 +1929,5 @@
       "writers": "multi-attributed"
     }
   },
-  "version": 1
+  "version": 2
 }

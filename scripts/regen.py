@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
-"""Regenerate transport artifacts using taut-proto==0.9.1; ordinary builds need no Python."""
+"""Regenerate transport artifacts with the taut-proto release protocol/generator.json pins.
+
+Ordinary builds need no Python. Generation imports taut only from the taut-proto
+release installed in this interpreter's site directories at the pinned version: a
+`taut` package or `taut-proto` metadata anywhere else on sys.path or PYTHONPATH is
+refused.
+"""
 import argparse
-import hashlib
+import importlib.metadata
 import json
 from pathlib import Path
+import site
 import subprocess
 import sys
+import sysconfig
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,84 +25,61 @@ def verify_formatter(pin):
         raise SystemExit(f"Expected rustfmt {pin['rustfmt']!r}; got {actual!r}")
 
 
-def verify_taut_source(source, pin):
-    source = source.resolve()
-    if source.name != 'src' or not (source / 'taut').is_dir():
-        raise SystemExit(f'Expected canonical taut source directory; got {source}')
-    repo = Path(subprocess.check_output(
-        ['git', '-C', str(source), 'rev-parse', '--show-toplevel'], text=True,
-    ).strip()).resolve()
-    expected_revision = pin.get('taut-source-revision')
-    if expected_revision:
-        revision = subprocess.check_output(
-            ['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True,
-        ).strip()
-        if revision != expected_revision:
-            raise SystemExit(
-                f'Expected taut source revision {expected_revision!r}; got {revision!r}'
-            )
-    dirty = subprocess.check_output(
-        ['git', '-C', str(repo), 'status', '--porcelain', '--untracked-files=all', '--', 'src'],
-        text=True,
-    ).strip()
-    if dirty:
-        raise SystemExit(f'Pinned taut source checkout is dirty under src/: {dirty}')
-    for relative, expected in pin.get('taut-extension-sha256', {}).items():
-        path = repo / relative
-        if not path.is_file():
-            raise SystemExit(f'Missing pinned taut extension: {path}')
-        actual = hashlib.sha256(path.read_bytes()).hexdigest()
-        if actual != expected:
-            raise SystemExit(
-                f'Pinned taut extension digest mismatch for {relative}: '
-                f'expected {expected}, got {actual}'
-            )
-    return source
+def site_directories():
+    """This interpreter's site directories, the only places an installed release lives."""
+    directories = {Path(sysconfig.get_paths()[key]).resolve() for key in ('purelib', 'platlib')}
+    directories.update(Path(path).resolve() for path in site.getsitepackages())
+    directories.add(Path(site.getusersitepackages()).resolve())
+    return directories
 
 
-def verify_taut_module(name, module, source):
-    origin = getattr(module, '__file__', None)
-    if not isinstance(origin, str):
-        raise SystemExit(f'Imported {name} has no file origin')
-    path = Path(origin).resolve()
-    if path != source and source not in path.parents:
-        raise SystemExit(f'Imported {name} is outside pinned taut source: {path}')
+def released_taut(pin):
+    """The package directory of the installed taut-proto release the pin names."""
+    try:
+        distribution = importlib.metadata.distribution('taut-proto')
+    except importlib.metadata.PackageNotFoundError:
+        raise SystemExit(f"taut-proto {pin['taut-proto']} is not installed") from None
+    location = Path(distribution.locate_file('')).resolve()
+    if location not in site_directories():
+        raise SystemExit(
+            f'taut-proto metadata at {location} is not the installed taut-proto release: '
+            "it lies outside this interpreter's site directories"
+        )
+    if distribution.version != pin['taut-proto']:
+        raise SystemExit(
+            f"taut-proto pin mismatch: expected {pin['taut-proto']}, got {distribution.version}"
+        )
+    return Path(distribution.locate_file('taut')).resolve()
+
+
+def verify_taut_modules(package):
+    for name, module in list(sys.modules.items()):
+        if name == 'taut' or name.startswith('taut.'):
+            origin = getattr(module, '__file__', None)
+            if not isinstance(origin, str) or package not in Path(origin).resolve().parents:
+                raise SystemExit(f'Imported {name} is not the installed taut-proto release: {origin}')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true')
-    parser.add_argument('--taut-source', type=Path,
-                        help='canonical taut checkout src directory')
     args = parser.parse_args()
     pin = json.loads((ROOT / 'protocol/generator.json').read_text())
-    if args.taut_source is None and pin.get('taut-source-revision'):
-        raise SystemExit(
-            'This schema requires the pinned local taut source; '
-            'pass --taut-source <checkout>/src'
-        )
-    if args.taut_source is not None:
-        source = verify_taut_source(args.taut_source, pin)
-        loaded = [name for name in sys.modules
-                  if name == 'taut' or name.startswith('taut.')]
-        if loaded:
-            raise SystemExit('taut modules are already loaded; use a fresh interpreter')
-        sys.path.insert(0, str(source))
-    import taut
+    if any(name == 'taut' or name.startswith('taut.') for name in sys.modules):
+        raise SystemExit('taut modules are already loaded; use a fresh interpreter')
+    package = released_taut(pin)
+    import taut  # noqa: F401 -- checked before anything imports from it
+    verify_taut_modules(package)
     from admission_codegen import emit as admission
     from taut.gen.scaffold import emit
     from taut.ir.export import schema_json
     from taut.ir.load import load_schema
     from taut.ir.validate import validate_or_raise
-    if args.taut_source is not None:
-        for name, module in [('taut', taut),
-                             ('taut.gen.scaffold', sys.modules['taut.gen.scaffold'])]:
-            verify_taut_module(name, module, source)
-    if args.taut_source is None and taut.__version__ != pin['taut-proto']:
-        raise SystemExit(f"Expected taut-proto=={pin['taut-proto']}; got {taut.__version__}")
+    verify_taut_modules(package)
     verify_formatter(pin)
     schema = load_schema(ROOT / 'protocol/transport.taut.py')
     validate_or_raise(schema)
+    verify_taut_modules(package)
     with tempfile.TemporaryDirectory() as tmp:
         generated = Path(tmp)
         emit(schema, generated, langs=['rust'], services=[], runtime=True)

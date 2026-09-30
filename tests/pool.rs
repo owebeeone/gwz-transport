@@ -51,7 +51,10 @@ fn paired_install_refuses_busy_other_scheme_without_changing_either_limit() {
         total: 100,
         max_requests: 1024,
     };
-    assert_eq!(ssh.install_capacity_pair(&https, raised), Err(Error::ActiveOperation));
+    assert_eq!(
+        ssh.install_capacity_pair(&https, raised),
+        Err(Error::ActiveOperation)
+    );
     assert_eq!(ssh.capacity(), initial);
     assert_eq!(https.capacity(), initial);
     drop(busy);

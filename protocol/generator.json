@@ -1,20 +1,4 @@
 {
-  "taut-proto": "0.9.1",
-  "rustfmt": "rustfmt 1.9.0-stable (ac68faa20c 2026-05-25)",
-  "codec": "fail-closed",
-  "forward_compat": false,
-  "taut-source-revision": "81ba89420d513ae6dda25a5d816db8d2a85d90cb",
-  "taut-extension-sha256": {
-    "src/taut/gen/runtime/cbor.rs": "f6b96fb0fc038df2344bfd4c3f63c5fc7ddb8d24979ae9eb5d7b898184663d55",
-    "src/taut/gen/runtime/cbor_fail_closed.rs": "c276f0845efa48030a31cce8137516c5010c377781065cc353db186223275744",
-    "src/taut/gen/rust.py": "84880726fc219ccc40c6e528728f80ac2000febf17345691fff6773eefb9cf4a",
-    "src/taut/gen/scaffold.py": "ae1c8b14970f01d75cad2be1b2ea1d583c50b24860367c792502e88da856daed",
-    "src/taut/ir/compat.py": "0ef44c9f2133cc25f87191b36ee240a3cf591d224cd298ed9219701340a59128",
-    "src/taut/ir/dsl.py": "a5a714a310438183f33851589f3e50b236064f95a1f5ef8d48d8848d59ddfad3",
-    "src/taut/ir/export.py": "3648ff0d5ae4a42cbae722b8a2bd0b046226012be22ae4c9b2b01194c248f42b",
-    "src/taut/ir/load.py": "07499a0ac9213d5630f0bc22b0460359f558ae12f0a3c4760034d5b0c7c14dc0",
-    "src/taut/ir/model.py": "20671f8478d1f74470e70fa57ff6d67c669e2e72e87b3bdea7f9e6bf0be4834b",
-    "src/taut/ir/validate.py": "3926633d55dff6eb60498541ae4452f49b1972b4ac23b295270d78e2adbb8c17",
-    "src/taut/wire/codec.py": "f5ba442518102a6ffbb98b6adcf8be74dcbd487414d878b7fee14411ed79f252"
-  }
+  "taut-proto": "0.10.0",
+  "rustfmt": "rustfmt 1.9.0-stable (ac68faa20c 2026-05-25)"
 }

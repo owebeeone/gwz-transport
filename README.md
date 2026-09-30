@@ -302,20 +302,16 @@ and acknowledge every disposal until `shutdown_complete()` is true. Drop the
 driver only after disposal. There are no installed services or remote resources
 to undo in these tests.
 
-For generation install the base dependencies of `taut-proto==0.9.1` and Rust
-1.96.0's rustfmt, then provide the clean Taut checkout pinned in
-`protocol/generator.json`:
-`python3 scripts/regen.py --check --taut-source ../taut/src`.
-The new optional-field compatibility requires that source extension; published
-0.9.1 alone is insufficient. The workflow checks out the same immutable pin.
-That pin must be published before remote CI can run; only local execution is
-claimed at this candidate checkpoint. The script verifies the exact formatter
-build recorded in `protocol/generator.json`. `.github/workflows/contracts.yml`
-runs this drift check, formatting, the MSRV suite and standalone packaging.
-The workflow is prepared for repository CI; remote execution has not been
-established while this member has no remote. Core's unpublished consumer has a
-separate archive proof and source-pinned generator check; it is not part of this
-standalone job and does not silently fetch sibling repositories.
+For generation install `taut-proto==0.10.0` and Rust 1.96.0's rustfmt, then run
+`python3 scripts/regen.py --check`. The script generates only with the taut-proto
+release installed in the interpreter's site directories at the version
+`protocol/generator.json` pins. It refuses a `taut` package or `taut-proto`
+metadata found anywhere else on `sys.path` or `PYTHONPATH`, such as a checkout,
+and verifies the exact formatter build recorded there.
+`.github/workflows/contracts.yml` runs this drift check, formatting, the MSRV
+suite and standalone packaging. Core's unpublished consumer has a separate
+archive proof and a generator check pinned to the same release; it is not part
+of this standalone job and does not silently fetch sibling repositories.
 
 ## Reproducible randomized tests
 
