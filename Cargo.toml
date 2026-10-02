@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 license = "GPL-2.0-only"
+repository = "https://github.com/owebeeone/gwz-transport"
 description = "Bounded taut message conversations for endpoint-owned Git transport"
 readme = "README.md"
 include = ["/Cargo.toml", "/src/**", "/protocol/*.py", "/protocol/*.json", "/scripts/*.py", "/tests/**/*.rs", "/LICENSE", "/LICENSE-taut", "/README.md"]
