@@ -155,8 +155,9 @@ impl EndpointConfig {
         if bind.role != self.role {
             return Err(failure(ErrorCode::UnsupportedOperation));
         }
-        let version = [1, 2, 3]
-            .into_iter()
+        let version = profile::BINDABLE
+            .iter()
+            .copied()
             .filter(|candidate| bind.versions.contains(candidate))
             .max()
             .ok_or_else(|| failure(ErrorCode::UnsupportedVersion))?;
@@ -180,10 +181,7 @@ impl EndpointConfig {
         }
         let receive_limits = minimum(&bind.receive_limits, &self.limits);
         usable(&receive_limits)?;
-        if version == 3 {
-            crate::sequenced::valid_limits(&receive_limits)
-                .map_err(|_| failure(ErrorCode::UnsupportedOperation))?;
-        }
+        profile::admit(version, &receive_limits)?;
         let bound = Bound {
             version,
             endpoint_id: self.endpoint_id.clone(),
@@ -226,7 +224,7 @@ pub fn verify(offer: &Envelope, reply: &Envelope) -> Result<Binding, Failure> {
         .ok_or_else(|| failure(ErrorCode::Unavailable))?;
     if reply.session_id != offer.session_id
         || bound.role != requested.role
-        || ![1, 2, 3].contains(&bound.version)
+        || !profile::BINDABLE.contains(&bound.version)
         || !requested.versions.contains(&bound.version)
         || !bound.schemes.iter().all(|v| requested.schemes.contains(v))
         || !bound
@@ -238,14 +236,49 @@ pub fn verify(offer: &Envelope, reply: &Envelope) -> Result<Binding, Failure> {
         return Err(failure(ErrorCode::InvalidRequest));
     }
     usable(&bound.receive_limits)?;
-    if bound.version == 3 {
-        crate::sequenced::valid_limits(&bound.receive_limits)
-            .map_err(|_| failure(ErrorCode::UnsupportedOperation))?;
-    }
+    profile::admit(bound.version, &bound.receive_limits)?;
     Ok(Binding {
         session_id: reply.session_id.clone(),
         bound: bound.clone(),
     })
+}
+
+/// The profiles a Bind can select. Profile 3 is the sequenced profile, whose
+/// kernel (`crate::sequenced`) compiles only with the unreviewed
+/// `unstable-sequenced` feature. The two `profile` modules are this file's
+/// explicit boundary for it, under the kernel's own condition, and exactly
+/// one of them is compiled.
+#[cfg(feature = "unstable-sequenced")]
+mod profile {
+    use super::failure;
+    use crate::protocol::{ErrorCode, Failure, Limits};
+
+    pub(super) const BINDABLE: &[i64] = &[1, 2, 3];
+
+    /// Profile 3's limits must also hold the kernel's reorder reserve.
+    pub(super) fn admit(version: i64, limits: &Limits) -> Result<(), Failure> {
+        if version == 3 {
+            crate::sequenced::valid_limits(limits)
+                .map_err(|_| failure(ErrorCode::UnsupportedOperation))?;
+        }
+        Ok(())
+    }
+}
+
+/// Without the feature, profile 3 is not bindable, and the endpoint answers
+/// as one older than the profile: a Bind that offers only profile 3 is
+/// refused as `UnsupportedVersion` before any effect, and a host refuses a
+/// Bound at profile 3.
+#[cfg(not(feature = "unstable-sequenced"))]
+mod profile {
+    use crate::protocol::{Failure, Limits};
+
+    pub(super) const BINDABLE: &[i64] = &[1, 2];
+
+    /// Profiles 1 and 2 need no more than `usable` limits.
+    pub(super) fn admit(_version: i64, _limits: &Limits) -> Result<(), Failure> {
+        Ok(())
+    }
 }
 
 pub(crate) fn usable(limits: &Limits) -> Result<(), Failure> {

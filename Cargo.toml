@@ -15,5 +15,18 @@ resolver = "2"
 
 [dependencies]
 
+[features]
+# The sequenced-stream kernel (`sequenced`) and profile 3 in Bind and Bound.
+# Unreviewed, with no compatibility promise; off by default.
+unstable-sequenced = []
+
+[[test]]
+name = "sequenced"
+required-features = ["unstable-sequenced"]
+
+[[test]]
+name = "sequenced_random"
+required-features = ["unstable-sequenced"]
+
 [lints.rust]
 unsafe_code = "forbid"

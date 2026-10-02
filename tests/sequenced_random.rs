@@ -355,7 +355,7 @@ fn seeded_reordered_bidi_message_streams() {
         let seed = case_seed(run_seed, index);
         if let Err(failure) = catch_unwind(AssertUnwindSafe(|| run_case(seed))) {
             eprintln!(
-                "run_seed={run_seed:#018x} case={index} case_seed={seed:#018x}\nReplay: GWZ_SEQUENCED_CASE_SEED={seed:#018x} cargo test --locked --test sequenced_random seeded_reordered_bidi_message_streams -- --exact --nocapture"
+                "run_seed={run_seed:#018x} case={index} case_seed={seed:#018x}\nReplay: GWZ_SEQUENCED_CASE_SEED={seed:#018x} cargo test --locked --features unstable-sequenced --test sequenced_random seeded_reordered_bidi_message_streams -- --exact --nocapture"
             );
             std::panic::resume_unwind(failure);
         }
@@ -372,7 +372,7 @@ fn seeded_file_like_streams_through_sequencer() {
         let seed = case_seed(RUN_SEED ^ 0xfeed_beef, index);
         if let Err(failure) = catch_unwind(AssertUnwindSafe(|| run_file_case(seed))) {
             eprintln!(
-                "case={index} case_seed={seed:#018x}\nReplay: GWZ_SEQUENCED_FILE_CASE_SEED={seed:#018x} cargo test --locked --test sequenced_random seeded_file_like_streams_through_sequencer -- --exact --nocapture"
+                "case={index} case_seed={seed:#018x}\nReplay: GWZ_SEQUENCED_FILE_CASE_SEED={seed:#018x} cargo test --locked --features unstable-sequenced --test sequenced_random seeded_file_like_streams_through_sequencer -- --exact --nocapture"
             );
             std::panic::resume_unwind(failure);
         }

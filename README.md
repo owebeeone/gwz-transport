@@ -12,7 +12,8 @@ Normal builds use checked-in generated code and do not require Python, a sibling
 checkout or network schema discovery. Regeneration is explicit and version-pinned
 by `protocol/generator.json`; see `python3 scripts/regen.py --help`.
 
-Run `cargo test --locked`. The communication layer is supplied by the host;
+Run `cargo test --locked`, and `cargo test --locked --features unstable-sequenced`
+for the sequenced kernel's suites. The communication layer is supplied by the host;
 this package does not define physical framing or change the CLI–core interface.
 The stream runtime passes typed `protocol::Envelope` values directly. It never
 encodes, frames or transports them. Schema codecs are separate utilities for a
@@ -74,6 +75,14 @@ identity. All other combinations are rejected before effects. A binding cannot
 advertise a scheme or policy without a compatible partner in its capability set.
 
 ## Sequenced profile candidate
+
+**Unstable.** The `sequenced` module exists only with the non-default
+`unstable-sequenced` Cargo feature. It is unreviewed and has no compatibility
+promise: any release may change or remove it, and enabling the feature opts in
+to that. Without the feature, profile 3 is not bindable: an endpoint answers a
+Bind that offers only profile 3 with `UnsupportedVersion`, before any Git,
+credential or pool effect, and a host refuses a Bound at profile 3. The
+`message_seq` field below stays in the schema in either build.
 
 Profile 3 adds `Envelope.message_seq` to every stream frame, including lifecycle
 controls. `sequenced::Outbound` assigns a per-stream, per-direction sequence only

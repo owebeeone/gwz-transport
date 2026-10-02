@@ -1,5 +1,11 @@
 //! Profile-3 typed-message ordering kernel. The host still owns request
 //! authority, application admission, delivery tickets and physical delivery.
+//!
+//! **Unstable.** Compiled only with the non-default `unstable-sequenced`
+//! feature, whose condition below bounds this whole module. The kernel is
+//! unreviewed and has no compatibility promise: any release may change or
+//! remove it. Without the feature, profile 3 is not bindable (`binding`).
+#![cfg(feature = "unstable-sequenced")]
 use crate::{binding, codec, protocol::*};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 

@@ -17,6 +17,7 @@ mod budget;
 pub mod codec;
 mod policy;
 pub mod pool;
+// Only with the unstable-sequenced feature: the module's own `#![cfg]` bounds it.
 pub mod sequenced;
 pub mod stream;
 

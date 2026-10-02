@@ -31,5 +31,7 @@ jobs:
           cargo fmt --all -- --check
       - name: Test contracts and deterministic replay at the MSRV
         run: cargo +1.95.0 test --locked
+      - name: Test with the unstable sequenced kernel, whose suites need its feature
+        run: cargo +1.95.0 test --locked --features unstable-sequenced
       - name: Verify the standalone package
         run: cargo +1.95.0 package --locked
