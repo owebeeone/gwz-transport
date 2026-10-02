@@ -60,4 +60,3 @@ pub struct StreamMachine {
     pub(super) peak_recv: usize,
     pub(super) revision: u64,
 }
-
