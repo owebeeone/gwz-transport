@@ -60,6 +60,24 @@ def verify_taut_modules(package):
                 raise SystemExit(f'Imported {name} is not the installed taut-proto release: {origin}')
 
 
+def rust_failure_detail_box(source):
+    """Keep the optional diagnostic out of the common Failure's stack layout.
+
+    taut's release generator has no boxed-reference option. This exact local
+    representation projection changes no schema, tag, CBOR or admission walk.
+    Refuse generator drift rather than silently emit a different representation.
+    """
+    replacements = {
+        'pub detail: Option<FailureDetail>,': 'pub detail: Option<Box<FailureDetail>>,',
+        'Some(FailureDetail::from_cbor(v)?)': 'Some(Box::new(FailureDetail::from_cbor(v)?))',
+    }
+    for before, after in replacements.items():
+        if source.count(before) != 1:
+            raise SystemExit(f'Failure detail projection expected exactly one {before!r}')
+        source = source.replace(before, after)
+    return source
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true')
@@ -83,6 +101,8 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         generated = Path(tmp)
         emit(schema, generated, langs=['rust'], services=[], runtime=True)
+        rust_api = generated / 'rust/api.rs'
+        rust_api.write_text(rust_failure_detail_box(rust_api.read_text()))
         (generated / 'admission.rs').write_text(admission(schema))
         # Formatting is part of reproducible generation, never a hand edit.
         subprocess.run(['rustfmt', '--edition=2024', str(generated / 'rust/api.rs'),

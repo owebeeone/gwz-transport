@@ -439,6 +439,7 @@ fn queued_terminal(kind: MessageKind) -> (Mux, Mux, gwz_transport::mux::Attachme
         ..Default::default()
     };
     let failure = Failure {
+        detail: None,
         setup_cause: None,
         code: ErrorCode::RepositoryRefused,
         effect: Effect::None,
@@ -449,6 +450,7 @@ fn queued_terminal(kind: MessageKind) -> (Mux, Mux, gwz_transport::mux::Attachme
         MessageKind::IdentityChecked => message.identity_checked = Some(IdentityChecked {}),
         MessageKind::IdentityCheckFailed => {
             message.identity_check_failed = Some(Failure {
+                detail: None,
                 setup_cause: None,
                 code: ErrorCode::Authentication,
                 effect: Effect::None,
@@ -463,6 +465,7 @@ fn queued_terminal(kind: MessageKind) -> (Mux, Mux, gwz_transport::mux::Attachme
                 unread_response_discarded: false,
                 facts,
                 failure: Some(Failure {
+                    detail: None,
                     setup_cause: None,
                     facts: None,
                     ..failure
@@ -638,6 +641,7 @@ fn incompatible_binding_limits_send_the_exact_typed_rejection() {
     assert_eq!(
         terminal.1.bind_rejected,
         Some(Failure {
+            detail: None,
             setup_cause: None,
             code: ErrorCode::UnsupportedOperation,
             effect: Effect::None,
@@ -675,6 +679,7 @@ fn finish_preserves_timeout_terminal_and_peer_terminal_cleanup_action() {
     let id = open_stream(&mut core, &mut cli);
     let mut failed = core.message(id, MessageKind::Failed).unwrap();
     failed.failed = Some(Failure {
+        detail: None,
         setup_cause: None,
         code: ErrorCode::Io,
         effect: Effect::Possible,
@@ -730,6 +735,7 @@ fn async_bootstrap_rejection_retains_typed_reason_after_both_ports_retire() {
             Poll::Ready(Ok(()))
         );
         let expected = Some(Failure {
+            detail: None,
             setup_cause: None,
             code,
             effect: Effect::None,
@@ -802,6 +808,7 @@ fn bootstrap_rejection_rejects_operation_errors_without_retaining_them() {
             session_id: "session".into(),
             kind: MessageKind::BindRejected,
             bind_rejected: Some(Failure {
+                detail: None,
                 setup_cause: None,
                 code,
                 effect: Effect::None,
@@ -829,6 +836,7 @@ fn bootstrap_rejection_codec_enforces_its_entire_failure_domain() {
                     session_id: "session".into(),
                     kind: MessageKind::BindRejected,
                     bind_rejected: Some(Failure {
+                        detail: None,
                         setup_cause: None,
                         code,
                         effect,

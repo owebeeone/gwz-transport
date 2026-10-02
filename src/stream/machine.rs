@@ -247,6 +247,7 @@ impl StreamMachine {
             disposition,
             facts,
             Some(Failure {
+                detail: None,
                 setup_cause: None,
                 code,
                 effect,
@@ -487,6 +488,7 @@ impl StreamMachine {
             } else {
                 let mut message = self.envelope(MessageKind::Failed);
                 message.failed = Some(Failure {
+                    detail: None,
                     setup_cause: None,
                     code: if error == Error::Timeout {
                         ErrorCode::Timeout

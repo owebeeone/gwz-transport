@@ -138,6 +138,7 @@ fn frame(stream_id: i64, sequence: i64, kind: MessageKind) -> Envelope {
                 code: ErrorCode::Io,
                 effect: Effect::Possible,
                 facts: None,
+                detail: None,
                 setup_cause: None,
             });
         }

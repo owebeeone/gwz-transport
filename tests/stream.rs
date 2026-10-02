@@ -246,6 +246,7 @@ fn typed_failure_code_and_effect_survive_prefixes_and_failed_close() {
                 stream_id: 1,
                 kind: MessageKind::Failed,
                 failed: Some(Failure {
+                    detail: None,
                     setup_cause: None,
                     code,
                     effect,
@@ -280,6 +281,7 @@ fn typed_failure_code_and_effect_survive_prefixes_and_failed_close() {
                     facts: Facts::default(),
                     unread_response_discarded: false,
                     failure: Some(Failure {
+                        detail: None,
                         setup_cause: None,
                         code,
                         effect,

@@ -2,6 +2,7 @@
 use crate::{cbor, protocol::Envelope};
 use std::fmt;
 
+mod failure_detail;
 mod preflight;
 mod validate;
 

@@ -19,6 +19,7 @@ fn setup_causes_have_fixed_wire_values_and_fail_closed() {
             code: ErrorCode::Timeout,
             effect: Effect::None,
             facts: None,
+            detail: None,
             setup_cause: Some(cause),
         };
         let encoded = failure.to_cbor();
@@ -45,6 +46,7 @@ fn missing_cause_is_none_and_old_reader_retains_old_fields() {
             key_fingerprint: Some("real-fingerprint".into()),
             ..Facts::default()
         }),
+        detail: None,
         setup_cause: Some(SetupFailureCause::ConnectionRefused),
     };
     let mut old_reader = failure.to_cbor();

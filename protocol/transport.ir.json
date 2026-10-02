@@ -176,6 +176,28 @@
     },
     {
       "member_options": {
+        "control_character": {},
+        "missing_field": {},
+        "missing_newline": {},
+        "not_utf8": {},
+        "output_limit": {},
+        "pipe_failure": {},
+        "username_colon": {}
+      },
+      "members": {
+        "control_character": 3,
+        "missing_field": 7,
+        "missing_newline": 6,
+        "not_utf8": 5,
+        "output_limit": 2,
+        "pipe_failure": 1,
+        "username_colon": 4
+      },
+      "name": "HelperFailureCause",
+      "options": {}
+    },
+    {
+      "member_options": {
         "none": {},
         "possible": {}
       },
@@ -555,6 +577,107 @@
       "fields": [
         {
           "merge": null,
+          "name": "attempt",
+          "optional": false,
+          "options": {},
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "attempts",
+          "optional": false,
+          "options": {},
+          "tag": 2,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        }
+      ],
+      "name": "RetryAttempt",
+      "next_id": null,
+      "options": {},
+      "reserved_names": [],
+      "reserved_tags": []
+    },
+    {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
+      "fields": [
+        {
+          "merge": null,
+          "name": "helper_cause",
+          "optional": "missing_ok",
+          "options": {},
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "k": "enum",
+            "name": "HelperFailureCause"
+          }
+        },
+        {
+          "merge": null,
+          "name": "pipe_kind",
+          "optional": "missing_ok",
+          "options": {},
+          "tag": 2,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "str"
+          }
+        },
+        {
+          "merge": null,
+          "name": "schemes",
+          "optional": "missing_ok",
+          "options": {},
+          "tag": 3,
+          "transient": false,
+          "type": {
+            "elem": {
+              "k": "scalar",
+              "scalar": "str"
+            },
+            "k": "list"
+          }
+        },
+        {
+          "merge": null,
+          "name": "retry_attempt",
+          "optional": "missing_ok",
+          "options": {},
+          "tag": 4,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "RetryAttempt"
+          }
+        }
+      ],
+      "name": "FailureDetail",
+      "next_id": null,
+      "options": {},
+      "reserved_names": [],
+      "reserved_tags": []
+    },
+    {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
+      "fields": [
+        {
+          "merge": null,
           "name": "code",
           "optional": false,
           "options": {},
@@ -599,6 +722,18 @@
           "type": {
             "k": "enum",
             "name": "SetupFailureCause"
+          }
+        },
+        {
+          "merge": null,
+          "name": "detail",
+          "optional": "missing_ok",
+          "options": {},
+          "tag": 5,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "FailureDetail"
           }
         }
       ],

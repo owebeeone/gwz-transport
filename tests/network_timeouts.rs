@@ -169,6 +169,7 @@ fn stream_accepts_native_maximum_and_rejects_above_it() {
     pool.connected(
         connection,
         Err(Failure {
+            detail: None,
             setup_cause: None,
             code: ErrorCode::Io,
             effect: Effect::Possible,
@@ -209,6 +210,7 @@ fn disabled_pool_connect_survives_ticks_and_cleanup_stays_bounded() {
     pool.connected(
         connection,
         Err(Failure {
+            detail: None,
             setup_cause: None,
             code: ErrorCode::Io,
             effect: Effect::Possible,
@@ -273,6 +275,7 @@ fn helper_wait_expires_when_network_connect_timeout_is_disabled() {
     pool.connected(
         connection,
         Err(Failure {
+            detail: None,
             setup_cause: None,
             code: ErrorCode::Io,
             effect: Effect::Possible,
@@ -335,6 +338,7 @@ fn shutdown_disposes_disabled_connect_with_bounded_cleanup() {
     pool.connected(
         connection,
         Err(Failure {
+            detail: None,
             setup_cause: None,
             code: ErrorCode::Io,
             effect: Effect::Possible,

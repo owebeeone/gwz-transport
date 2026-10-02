@@ -91,8 +91,49 @@ fn visit_bound(value: &Bound, b: &mut Budget, depth: usize) -> Result<(), Error>
     Ok(())
 }
 
-fn visit_failure(value: &Failure, b: &mut Budget, depth: usize) -> Result<(), Error> {
+fn visit_retryattempt(value: &RetryAttempt, b: &mut Budget, depth: usize) -> Result<(), Error> {
+    b.container(2, depth)?;
+    b.key(1)?;
+    b.integer(value.attempt, depth + 1)?;
+    b.key(2)?;
+    b.integer(value.attempts, depth + 1)?;
+    Ok(())
+}
+
+fn visit_failuredetail(value: &FailureDetail, b: &mut Budget, depth: usize) -> Result<(), Error> {
     b.container(4, depth)?;
+    b.key(1)?;
+    if let Some(item) = &value.helper_cause {
+        b.integer(item.wire(), depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
+    b.key(2)?;
+    if let Some(item) = &value.pipe_kind {
+        b.bytes(item.len(), MAX_METADATA, depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
+    b.key(3)?;
+    if let Some(item) = &value.schemes {
+        b.container(item.len(), depth + 1)?;
+        for item in item {
+            b.bytes(item.len(), MAX_METADATA, depth + 1 + 1)?;
+        }
+    } else {
+        b.scalar(depth + 1)?;
+    }
+    b.key(4)?;
+    if let Some(item) = &value.retry_attempt {
+        visit_retryattempt(item, b, depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
+    Ok(())
+}
+
+fn visit_failure(value: &Failure, b: &mut Budget, depth: usize) -> Result<(), Error> {
+    b.container(5, depth)?;
     b.key(1)?;
     b.integer(value.code.wire(), depth + 1)?;
     b.key(2)?;
@@ -106,6 +147,12 @@ fn visit_failure(value: &Failure, b: &mut Budget, depth: usize) -> Result<(), Er
     b.key(4)?;
     if let Some(item) = &value.setup_cause {
         b.integer(item.wire(), depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
+    b.key(5)?;
+    if let Some(item) = &value.detail {
+        visit_failuredetail(item, b, depth + 1)?;
     } else {
         b.scalar(depth + 1)?;
     }

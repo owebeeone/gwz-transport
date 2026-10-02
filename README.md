@@ -472,6 +472,7 @@ client.send(&request_id, &Envelope {
     version: 2, session_id: check.session_id, stream_id: check.stream_id,
     kind: MessageKind::IdentityCheckFailed,
     identity_check_failed: Some(Failure {
+        detail: None,
         code: ErrorCode::UnsupportedOperation, effect: Effect::None, facts: None,
         setup_cause: None,
     }),

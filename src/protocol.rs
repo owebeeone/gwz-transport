@@ -335,6 +335,48 @@ impl SetupFailureCause {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum HelperFailureCause {
+    #[default]
+    PipeFailure,
+    OutputLimit,
+    ControlCharacter,
+    UsernameColon,
+    NotUtf8,
+    MissingNewline,
+    MissingField,
+}
+impl HelperFailureCause {
+    pub fn wire(self) -> i64 {
+        match self {
+            Self::PipeFailure => 1,
+            Self::OutputLimit => 2,
+            Self::ControlCharacter => 3,
+            Self::UsernameColon => 4,
+            Self::NotUtf8 => 5,
+            Self::MissingNewline => 6,
+            Self::MissingField => 7,
+        }
+    }
+    pub fn from_wire(v: i64) -> Result<Self, DecodeError> {
+        Ok(match v {
+            1 => Self::PipeFailure,
+            2 => Self::OutputLimit,
+            3 => Self::ControlCharacter,
+            4 => Self::UsernameColon,
+            5 => Self::NotUtf8,
+            6 => Self::MissingNewline,
+            7 => Self::MissingField,
+            _ => {
+                return Err(DecodeError::UnknownEnum {
+                    enum_name: "HelperFailureCause",
+                    value: v,
+                });
+            }
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum Effect {
     #[default]
     None,
@@ -600,11 +642,153 @@ impl Bound {
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
+pub struct RetryAttempt {
+    pub attempt: i64,
+    pub attempts: i64,
+}
+impl RetryAttempt {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
+    pub fn to_cbor(&self) -> Cbor {
+        Cbor::Map(vec![
+            (1, Cbor::Int(self.attempt)),
+            (2, Cbor::Int(self.attempts)),
+        ])
+    }
+    pub fn from_cbor(c: &Cbor) -> Result<Self, DecodeError> {
+        Ok(Self {
+            attempt: c.try_get(1)?.try_int()?,
+            attempts: c.try_get(2)?.try_int()?,
+        })
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct FailureDetail {
+    pub helper_cause: Option<HelperFailureCause>,
+    pub pipe_kind: Option<String>,
+    pub schemes: Option<Vec<String>>,
+    pub retry_attempt: Option<RetryAttempt>,
+}
+impl FailureDetail {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
+    pub fn to_cbor(&self) -> Cbor {
+        Cbor::Map(vec![
+            (
+                1,
+                match &self.helper_cause {
+                    Some(v) => Cbor::Int(v.wire()),
+                    None => Cbor::Null,
+                },
+            ),
+            (
+                2,
+                match &self.pipe_kind {
+                    Some(v) => Cbor::Text(v.clone()),
+                    None => Cbor::Null,
+                },
+            ),
+            (
+                3,
+                match &self.schemes {
+                    Some(v) => Cbor::Array(v.iter().map(|x| Cbor::Text(x.clone())).collect()),
+                    None => Cbor::Null,
+                },
+            ),
+            (
+                4,
+                match &self.retry_attempt {
+                    Some(v) => v.to_cbor(),
+                    None => Cbor::Null,
+                },
+            ),
+        ])
+    }
+    pub fn from_cbor(c: &Cbor) -> Result<Self, DecodeError> {
+        Ok(Self {
+            helper_cause: {
+                let v = c.try_get_opt(1)?;
+                match v {
+                    None => None,
+                    Some(v) => {
+                        if v.is_null() {
+                            None
+                        } else {
+                            Some(HelperFailureCause::from_wire(v.try_int()?)?)
+                        }
+                    }
+                }
+            },
+            pipe_kind: {
+                let v = c.try_get_opt(2)?;
+                match v {
+                    None => None,
+                    Some(v) => {
+                        if v.is_null() {
+                            None
+                        } else {
+                            Some(v.try_text()?)
+                        }
+                    }
+                }
+            },
+            schemes: {
+                let v = c.try_get_opt(3)?;
+                match v {
+                    None => None,
+                    Some(v) => {
+                        if v.is_null() {
+                            None
+                        } else {
+                            Some(
+                                v.try_array()?
+                                    .iter()
+                                    .map(|x| Ok(x.try_text()?))
+                                    .collect::<Result<Vec<_>, DecodeError>>()?,
+                            )
+                        }
+                    }
+                }
+            },
+            retry_attempt: {
+                let v = c.try_get_opt(4)?;
+                match v {
+                    None => None,
+                    Some(v) => {
+                        if v.is_null() {
+                            None
+                        } else {
+                            Some(RetryAttempt::from_cbor(v)?)
+                        }
+                    }
+                }
+            },
+        })
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct Failure {
     pub code: ErrorCode,
     pub effect: Effect,
     pub facts: Option<Facts>,
     pub setup_cause: Option<SetupFailureCause>,
+    pub detail: Option<Box<FailureDetail>>,
 }
 impl Failure {
     pub const MAX_DEPTH: usize = 32;
@@ -624,6 +808,13 @@ impl Failure {
                 4,
                 match &self.setup_cause {
                     Some(v) => Cbor::Int(v.wire()),
+                    None => Cbor::Null,
+                },
+            ),
+            (
+                5,
+                match &self.detail {
+                    Some(v) => v.to_cbor(),
                     None => Cbor::Null,
                 },
             ),
@@ -655,6 +846,19 @@ impl Failure {
                             None
                         } else {
                             Some(SetupFailureCause::from_wire(v.try_int()?)?)
+                        }
+                    }
+                }
+            },
+            detail: {
+                let v = c.try_get_opt(5)?;
+                match v {
+                    None => None,
+                    Some(v) => {
+                        if v.is_null() {
+                            None
+                        } else {
+                            Some(Box::new(FailureDetail::from_cbor(v)?))
                         }
                     }
                 }

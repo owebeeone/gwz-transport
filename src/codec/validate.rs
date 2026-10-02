@@ -104,6 +104,21 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
     if let Some(failure) = &value.bind_rejected {
         bind_rejection(failure)?;
     }
+    for failure in [
+        value.bind_rejected.as_ref(),
+        value.open_failed.as_ref(),
+        value.failed.as_ref(),
+        value.identity_check_failed.as_ref(),
+        value
+            .closed
+            .as_ref()
+            .and_then(|closed| closed.failure.as_ref()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        super::failure_detail::validate(failure)?;
+    }
     if value.version == 1
         && (value
             .open_failed

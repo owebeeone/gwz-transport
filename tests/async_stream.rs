@@ -219,6 +219,7 @@ fn typed_peer_failure_wakes_async_reader_with_exact_cause() {
         stream_id: 1,
         kind: MessageKind::Failed,
         failed: Some(Failure {
+            detail: None,
             setup_cause: None,
             code: ErrorCode::Io,
             effect: Effect::Possible,
@@ -255,6 +256,7 @@ fn endpoint_failure_is_emitted_before_eof_and_wakes_reader() {
     assert!(read.as_mut().poll(&mut cx).is_pending());
     endpoint_port
         .fail_terminal(Failure {
+            detail: None,
             setup_cause: None,
             code: ErrorCode::RepositoryRefused,
             effect: Effect::None,
@@ -263,6 +265,7 @@ fn endpoint_failure_is_emitted_before_eof_and_wakes_reader() {
         .unwrap();
     assert_eq!(
         endpoint_port.fail_terminal(Failure {
+            detail: None,
             setup_cause: None,
             code: ErrorCode::Timeout,
             effect: Effect::Possible,

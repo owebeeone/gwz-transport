@@ -374,6 +374,7 @@ fn connect_timeout_and_reported_failure_do_not_retry_the_request() {
     pool.connected(
         connection,
         Err(Failure {
+            detail: None,
             setup_cause: None,
             code: ErrorCode::Io,
             effect: Effect::None,
@@ -389,6 +390,7 @@ fn connect_timeout_and_reported_failure_do_not_retry_the_request() {
     pool.connected(
         connection,
         Err(Failure {
+            detail: None,
             setup_cause: None,
             code: ErrorCode::Io,
             effect: Effect::Possible,
@@ -421,6 +423,7 @@ fn connection_failure_retains_typed_setup_cause() {
             code: ErrorCode::Unavailable,
             effect: Effect::None,
             facts: None,
+            detail: None,
             setup_cause: Some(SetupFailureCause::ConnectionRefused),
         }),
     )
