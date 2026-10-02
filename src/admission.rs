@@ -101,7 +101,7 @@ fn visit_retryattempt(value: &RetryAttempt, b: &mut Budget, depth: usize) -> Res
 }
 
 fn visit_failuredetail(value: &FailureDetail, b: &mut Budget, depth: usize) -> Result<(), Error> {
-    b.container(4, depth)?;
+    b.container(5, depth)?;
     b.key(1)?;
     if let Some(item) = &value.helper_cause {
         b.integer(item.wire(), depth + 1)?;
@@ -126,6 +126,12 @@ fn visit_failuredetail(value: &FailureDetail, b: &mut Budget, depth: usize) -> R
     b.key(4)?;
     if let Some(item) = &value.retry_attempt {
         visit_retryattempt(item, b, depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
+    b.key(5)?;
+    if let Some(item) = &value.helper_budget_ms {
+        b.integer(*item, depth + 1)?;
     } else {
         b.scalar(depth + 1)?;
     }
@@ -160,7 +166,7 @@ fn visit_failure(value: &Failure, b: &mut Budget, depth: usize) -> Result<(), Er
 }
 
 fn visit_destination(value: &Destination, b: &mut Budget, depth: usize) -> Result<(), Error> {
-    b.container(5, depth)?;
+    b.container(6, depth)?;
     b.key(1)?;
     b.integer(value.scheme.wire(), depth + 1)?;
     b.key(2)?;
@@ -171,6 +177,12 @@ fn visit_destination(value: &Destination, b: &mut Budget, depth: usize) -> Resul
     b.bytes(value.path.len(), MAX_METADATA, depth + 1)?;
     b.key(5)?;
     if let Some(item) = &value.ssh_username {
+        b.bytes(item.len(), MAX_METADATA, depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
+    b.key(6)?;
+    if let Some(item) = &value.https_username {
         b.bytes(item.len(), MAX_METADATA, depth + 1)?;
     } else {
         b.scalar(depth + 1)?;

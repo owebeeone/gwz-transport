@@ -177,6 +177,7 @@
     {
       "member_options": {
         "control_character": {},
+        "malformed_output": {},
         "missing_field": {},
         "missing_newline": {},
         "not_utf8": {},
@@ -186,6 +187,7 @@
       },
       "members": {
         "control_character": 3,
+        "malformed_output": 8,
         "missing_field": 7,
         "missing_newline": 6,
         "not_utf8": 5,
@@ -662,6 +664,18 @@
             "k": "msg",
             "name": "RetryAttempt"
           }
+        },
+        {
+          "merge": null,
+          "name": "helper_budget_ms",
+          "optional": "missing_ok",
+          "options": {},
+          "tag": 5,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
         }
       ],
       "name": "FailureDetail",
@@ -803,6 +817,18 @@
           "optional": true,
           "options": {},
           "tag": 5,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "str"
+          }
+        },
+        {
+          "merge": null,
+          "name": "https_username",
+          "optional": "missing_ok",
+          "options": {},
+          "tag": 6,
           "transient": false,
           "type": {
             "k": "scalar",

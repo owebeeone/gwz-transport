@@ -201,6 +201,7 @@ fn begin_stream(core: &mut Mux, cli: &mut Mux) -> i64 {
                     port: 22,
                     path: "repo".into(),
                     ssh_username: Some("git".into()),
+                    https_username: None,
                 },
                 service: GitService::UploadPackExchange,
                 identity: Identity {

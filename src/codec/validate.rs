@@ -262,6 +262,25 @@ fn destination(value: &Destination) -> Result<(), Error> {
     {
         return Err(Error::InvalidMessage);
     }
+    if value.scheme == Scheme::Https {
+        let username = value.https_username.as_deref();
+        if username.is_some_and(|value| {
+            value.is_empty() || value.len() > 18_000 || !value.is_ascii()
+                || value.bytes().any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace()
+                    || b"@:/?#\\".contains(&byte))
+                || super::https_shape::has_decoded_control(value)
+        }) || value.path.len() > 18_000 || super::https_shape::has_decoded_control(&value.path) {
+            return Err(Error::InvalidMessage);
+        }
+        let brackets = usize::from(value.host.contains(':') && !value.host.starts_with('[')) * 2;
+        let port = if value.port == 443 { 0 } else { 1 + value.port.to_string().len() };
+        let selector = username.map_or(0, |value| value.len() + 1);
+        if 8 + value.host.len() + brackets + port + selector + value.path.len() > 18_000 {
+            return Err(Error::InvalidMessage);
+        }
+    } else if value.https_username.is_some() {
+        return Err(Error::InvalidMessage);
+    }
     if value.scheme == Scheme::Ssh
         && value
             .ssh_username

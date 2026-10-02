@@ -78,6 +78,35 @@ def rust_failure_detail_box(source):
     return source
 
 
+def rust_destination_debug(source):
+    """Redact HTTPS account selectors in the generated wrapper, fail closed."""
+    start = '#[derive(Clone, Debug, PartialEq, Default)]\npub struct Destination {'
+    end = '\nimpl Destination {'
+    if source.count(start) != 1:
+        raise SystemExit('Destination debug projection expected one declaration')
+    offset = source.index(start)
+    finish = source.index(end, offset)
+    declaration = source[offset:finish]
+    if declaration.count('pub https_username: Option<String>,') != 1:
+        raise SystemExit('Destination debug projection expected HTTPS selector field')
+    declaration = declaration.replace('Clone, Debug, PartialEq', 'Clone, PartialEq')
+    debug = """
+impl std::fmt::Debug for Destination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Destination")
+            .field("scheme", &self.scheme)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("path", &self.path)
+            .field("ssh_username", &self.ssh_username)
+            .field("https_username", &self.https_username.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+"""
+    return source[:offset] + declaration + debug + source[finish:]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true')
@@ -102,7 +131,7 @@ def main():
         generated = Path(tmp)
         emit(schema, generated, langs=['rust'], services=[], runtime=True)
         rust_api = generated / 'rust/api.rs'
-        rust_api.write_text(rust_failure_detail_box(rust_api.read_text()))
+        rust_api.write_text(rust_destination_debug(rust_failure_detail_box(rust_api.read_text())))
         (generated / 'admission.rs').write_text(admission(schema))
         # Formatting is part of reproducible generation, never a hand edit.
         subprocess.run(['rustfmt', '--edition=2024', str(generated / 'rust/api.rs'),

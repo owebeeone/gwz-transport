@@ -3,6 +3,7 @@ use crate::{cbor, protocol::Envelope};
 use std::fmt;
 
 mod failure_detail;
+mod https_shape;
 mod preflight;
 mod validate;
 

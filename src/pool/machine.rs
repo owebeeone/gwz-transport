@@ -47,16 +47,18 @@ pub(super) enum State {
         cleanup: Cleanup,
     },
 }
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) enum ConnectClock {
     Network(Option<u64>),
     Interaction { until: u64, remaining: Option<u64> },
+    Shared(SetupClock),
 }
 impl ConnectClock {
-    pub fn deadline(self) -> Option<u64> {
+    pub fn deadline(&self) -> Option<u64> {
         match self {
-            Self::Network(until) => until,
-            Self::Interaction { until, .. } => Some(until),
+            Self::Network(until) => *until,
+            Self::Interaction { until, .. } => Some(*until),
+            Self::Shared(clock) => clock.cached_deadline(),
         }
     }
 }
@@ -87,6 +89,8 @@ pub struct PoolMachine {
     pub(super) stopped: bool,
     pub(super) driver_lost: bool,
     pub(super) revision: u64,
+    pub(super) clock_wakes: Vec<std::sync::Arc<std::task::Waker>>,
+    pub(super) clock_retired: Vec<std::sync::Arc<std::task::Waker>>,
 }
 impl PoolMachine {
     pub fn new(config: Config) -> Result<Self, Error> {
@@ -106,6 +110,8 @@ impl PoolMachine {
             stopped: false,
             driver_lost: false,
             revision: 0,
+            clock_wakes: Vec::new(),
+            clock_retired: Vec::new(),
         })
     }
     pub fn capacity(&self) -> Capacity {

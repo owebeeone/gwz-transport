@@ -9,9 +9,10 @@ mod asynchronous;
 mod incoming;
 mod io_clock;
 mod machine;
+mod state;
 mod outgoing;
 pub use asynchronous::{MessageEndpoint, Stream};
-pub use machine::{Snapshot, StreamMachine};
+pub use state::{Snapshot, StreamMachine};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {

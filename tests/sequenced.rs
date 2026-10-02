@@ -98,6 +98,7 @@ fn frame(stream_id: i64, sequence: i64, kind: MessageKind) -> Envelope {
                     port: 22,
                     path: "/repo".into(),
                     ssh_username: Some("git".into()),
+                    https_username: None,
                 },
                 service: GitService::UploadPackExchange,
                 identity: Identity {

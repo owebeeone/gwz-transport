@@ -138,6 +138,66 @@ impl PoolMachine {
         connection: ConnectionId,
         result: Result<Option<Identity>, crate::protocol::Failure>,
     ) -> Result<(), Error> {
+        let shared_clock = self.shared_setup_clock(connection);
+        if let Some(clock) = &shared_clock {
+            let identity_matches = result
+                .as_ref()
+                .ok()
+                .and_then(|proof| proof.as_ref())
+                .is_none_or(|proof| {
+                    self.entries
+                        .get(&connection)
+                        .is_some_and(|entry| entry.identity == *proof)
+                });
+            let cause = match &result {
+                Ok(_) if identity_matches => SetupCause::Completed,
+                Ok(_) => SetupCause::ResourceFailure {
+                    code: ErrorCode::Authentication,
+                    effect: Effect::None,
+                    setup_cause: None,
+                },
+                Err(failure) => SetupCause::ResourceFailure {
+                    code: failure.code,
+                    effect: failure.effect,
+                    setup_cause: failure.setup_cause,
+                },
+            };
+            let record = if cause == SetupCause::Completed {
+                match self.absorb_clock_update(clock.admit_completed()) {
+                    Ok(record) | Err(PublicationError::ActiveTerminal(record)) => record,
+                    Err(_) => {
+                        self.absorb_clock_update(clock.terminate(SetupCause::ResourceFailure {
+                            code: ErrorCode::InvalidRequest,
+                            effect: Effect::None,
+                            setup_cause: None,
+                        }))
+                    }
+                }
+            } else {
+                self.absorb_clock_update(clock.terminate(cause))
+            };
+            if !matches!(record.cause, SetupCause::Completed) || result.is_err() {
+                let request = self
+                    .entries
+                    .get(&connection)
+                    .and_then(|entry| match entry.state {
+                        State::Opening { request, .. } => request,
+                        _ => None,
+                    });
+                if let Some(id) = request {
+                    self.requests.get_mut(&id).expect("opening request").state =
+                        RequestState::Failed(Error::SetupEnded(record));
+                }
+                if result.is_err() {
+                    self.entries.remove(&connection);
+                } else {
+                    self.start_closing(connection, CloseReason::Cancelled);
+                }
+                self.schedule();
+                self.touch();
+                return Ok(());
+            }
+        }
         let entry = self.entries.get(&connection).ok_or(Error::Stale)?;
         let State::Opening {
             request,
@@ -152,14 +212,16 @@ impl PoolMachine {
             return Err(Error::WrongState);
         }
         let request = *request;
-        let expired = request
-            .and_then(|id| self.requests.get(&id))
-            .and_then(|pending| pending.absolute_deadline)
-            .is_some_and(|deadline| self.now >= deadline);
+        let expired = shared_clock.is_none()
+            && request
+                .and_then(|id| self.requests.get(&id))
+                .and_then(|pending| pending.absolute_deadline)
+                .is_some_and(|deadline| self.now >= deadline);
         if expired {
-            let error = match clock.expect("connected opening clock") {
+            let error = match clock.as_ref().expect("connected opening clock") {
                 ConnectClock::Network(_) => Error::ConnectTimeout,
                 ConnectClock::Interaction { .. } => Error::InteractionTimeout,
+                ConnectClock::Shared(_) => unreachable!(),
             };
             if let Some(id) = request {
                 self.fail_request(id, error, CloseReason::Cancelled)?;

@@ -220,6 +220,9 @@ impl Stream {
     pub fn cancel(&self) {
         self.shared.change(StreamMachine::cancel);
     }
+    pub fn retained_failure(&self) -> Option<crate::protocol::Failure> {
+        self.shared.change(|machine| machine.retained_failure().cloned())
+    }
     pub fn retained_failure_facts(&self) -> Option<Facts> {
         self.shared
             .change(|machine| machine.retained_failure_facts().cloned())

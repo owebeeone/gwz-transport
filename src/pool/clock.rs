@@ -10,6 +10,7 @@ impl PoolMachine {
         let previous_now = self.now;
         let before_revision = self.revision;
         self.now = now_ms;
+        let mut updates = Vec::new();
         let expired: Vec<_> = self
             .requests
             .iter()
@@ -26,13 +27,30 @@ impl PoolMachine {
                             clock: Some(clock),
                             cancel: None,
                             ..
-                        } => clock
-                            .deadline()
-                            .filter(|deadline| self.now >= *deadline)
-                            .map(|_| match clock {
-                                ConnectClock::Network(_) => Error::ConnectTimeout,
-                                ConnectClock::Interaction { .. } => Error::InteractionTimeout,
-                            }),
+                        } => {
+                            if let ConnectClock::Shared(shared) = clock {
+                                let update = shared.observe();
+                                let error = match update.value {
+                                    Observation::Terminal(record) => {
+                                        Some(Error::SetupEnded(record))
+                                    }
+                                    _ => None,
+                                };
+                                updates.push(update);
+                                error
+                            } else {
+                                clock
+                                    .deadline()
+                                    .filter(|deadline| self.now >= *deadline)
+                                    .map(|_| match clock {
+                                        ConnectClock::Network(_) => Error::ConnectTimeout,
+                                        ConnectClock::Interaction { .. } => {
+                                            Error::InteractionTimeout
+                                        }
+                                        ConnectClock::Shared(_) => unreachable!(),
+                                    })
+                            }
+                        }
                         _ => None,
                     },
                     RequestState::Ready(_) => pending
@@ -44,6 +62,9 @@ impl PoolMachine {
                 error.map(|error| (*id, error))
             })
             .collect();
+        for update in updates {
+            self.absorb_clock_update(update);
+        }
         for (id, error) in expired {
             let _ = self.fail_request(id, error, CloseReason::Cancelled);
         }

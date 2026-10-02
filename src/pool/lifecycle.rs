@@ -2,6 +2,45 @@ use super::{machine::*, *};
 use crate::protocol::Disposition;
 
 impl PoolMachine {
+    /// A live HTTPS lease can gain one opaque credential scope, never lose it
+    /// or change it. The endpoint calls this before offering that credential.
+    pub fn scope_https(&mut self, lease: LeaseId, scope: &str) -> Result<(), Error> {
+        if !self.is_live(lease) {
+            return Err(Error::Stale);
+        }
+        let entry = self
+            .entries
+            .get_mut(&lease.connection)
+            .ok_or(Error::Stale)?;
+        let scoped = Identity::HttpsScoped(scope.into());
+        if !scoped.valid_for(&entry.key) {
+            return Err(Error::InvalidRequest);
+        }
+        match &entry.identity {
+            Identity::Https => entry.identity = scoped,
+            Identity::HttpsScoped(existing) if existing == scope => {}
+            _ => {
+                return Err(Error::WrongState);
+            }
+        }
+        self.touch();
+        Ok(())
+    }
+    /// Retiring the route's credential disposes its scoped physical resources.
+    pub fn retire_https_scope(&mut self, scope: &str) {
+        let scoped: Vec<_> = self
+            .entries
+            .iter()
+            .filter_map(|(id, entry)| {
+                matches!(&entry.identity, Identity::HttpsScoped(existing) if existing == scope)
+                    .then_some(*id)
+            })
+            .collect();
+        for connection in scoped {
+            self.start_closing(connection, CloseReason::Cancelled);
+        }
+        self.schedule();
+    }
     pub(super) fn start_closing(&mut self, connection: ConnectionId, reason: CloseReason) {
         let entry = self.entries.get_mut(&connection).expect("owned connection");
         if matches!(entry.state, State::Closing { .. }) {
@@ -28,6 +67,10 @@ impl PoolMachine {
         reason: CloseReason,
     ) -> Result<(), Error> {
         let state = self.requests.get(&id).ok_or(Error::Stale)?.state;
+        let error = match state {
+            RequestState::Opening(connection) => self.arbitrate_setup_error(connection, error),
+            _ => error,
+        };
         match state {
             RequestState::Failed(_) => {
                 return Ok(());

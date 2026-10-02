@@ -1,11 +1,23 @@
 //! The closed diagnostic vocabulary authorized by TR1.6 OQ7(1).
 use super::Error;
-use crate::protocol::{Failure, HelperFailureCause};
+use crate::protocol::{Effect, ErrorCode, Failure, HelperFailureCause, SetupFailureCause};
 
 pub(super) fn validate(failure: &Failure) -> Result<(), Error> {
     let Some(detail) = &failure.detail else {
         return Ok(());
     };
+    if let Some(allowance) = detail.helper_budget_ms {
+        let bounded = match failure.setup_cause {
+            Some(SetupFailureCause::Interaction) => (1..=120_000).contains(&allowance),
+            Some(SetupFailureCause::Allocation) => (0..=86_400_000).contains(&allowance),
+            _ => false,
+        };
+        if failure.code != ErrorCode::Timeout || failure.effect != Effect::None || !bounded
+            || detail.helper_cause.is_some() || detail.pipe_kind.is_some() || detail.schemes.is_some()
+        {
+            return Err(Error::InvalidMessage);
+        }
+    }
     if detail.helper_cause.is_some() && detail.schemes.is_some() {
         return Err(Error::InvalidMessage);
     }

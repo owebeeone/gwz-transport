@@ -156,6 +156,7 @@ impl StreamMachine {
                     },
                     false,
                 );
+                self.retained_failure = Some(failure);
             }
             _ => {
                 return Err(Error::Protocol);

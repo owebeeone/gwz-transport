@@ -344,6 +344,7 @@ pub enum HelperFailureCause {
     NotUtf8,
     MissingNewline,
     MissingField,
+    MalformedOutput,
 }
 impl HelperFailureCause {
     pub fn wire(self) -> i64 {
@@ -355,6 +356,7 @@ impl HelperFailureCause {
             Self::NotUtf8 => 5,
             Self::MissingNewline => 6,
             Self::MissingField => 7,
+            Self::MalformedOutput => 8,
         }
     }
     pub fn from_wire(v: i64) -> Result<Self, DecodeError> {
@@ -366,6 +368,7 @@ impl HelperFailureCause {
             5 => Self::NotUtf8,
             6 => Self::MissingNewline,
             7 => Self::MissingField,
+            8 => Self::MalformedOutput,
             _ => {
                 return Err(DecodeError::UnknownEnum {
                     enum_name: "HelperFailureCause",
@@ -676,6 +679,7 @@ pub struct FailureDetail {
     pub pipe_kind: Option<String>,
     pub schemes: Option<Vec<String>>,
     pub retry_attempt: Option<RetryAttempt>,
+    pub helper_budget_ms: Option<i64>,
 }
 impl FailureDetail {
     pub const MAX_DEPTH: usize = 32;
@@ -707,6 +711,13 @@ impl FailureDetail {
                 4,
                 match &self.retry_attempt {
                     Some(v) => v.to_cbor(),
+                    None => Cbor::Null,
+                },
+            ),
+            (
+                5,
+                match &self.helper_budget_ms {
+                    Some(v) => Cbor::Int(*v),
                     None => Cbor::Null,
                 },
             ),
@@ -767,6 +778,19 @@ impl FailureDetail {
                             None
                         } else {
                             Some(RetryAttempt::from_cbor(v)?)
+                        }
+                    }
+                }
+            },
+            helper_budget_ms: {
+                let v = c.try_get_opt(5)?;
+                match v {
+                    None => None,
+                    Some(v) => {
+                        if v.is_null() {
+                            None
+                        } else {
+                            Some(v.try_int()?)
                         }
                     }
                 }
@@ -874,14 +898,31 @@ impl Failure {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, PartialEq, Default)]
 pub struct Destination {
     pub scheme: Scheme,
     pub host: String,
     pub port: i64,
     pub path: String,
     pub ssh_username: Option<String>,
+    pub https_username: Option<String>,
 }
+impl std::fmt::Debug for Destination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Destination")
+            .field("scheme", &self.scheme)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("path", &self.path)
+            .field("ssh_username", &self.ssh_username)
+            .field(
+                "https_username",
+                &self.https_username.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
 impl Destination {
     pub const MAX_DEPTH: usize = 32;
     pub const MAX_ENCODED_LEN: Option<usize> = None;
@@ -894,6 +935,13 @@ impl Destination {
             (
                 5,
                 match &self.ssh_username {
+                    Some(v) => Cbor::Text(v.clone()),
+                    None => Cbor::Null,
+                },
+            ),
+            (
+                6,
+                match &self.https_username {
                     Some(v) => Cbor::Text(v.clone()),
                     None => Cbor::Null,
                 },
@@ -912,6 +960,19 @@ impl Destination {
                     None
                 } else {
                     Some(v.try_text()?)
+                }
+            },
+            https_username: {
+                let v = c.try_get_opt(6)?;
+                match v {
+                    None => None,
+                    Some(v) => {
+                        if v.is_null() {
+                            None
+                        } else {
+                            Some(v.try_text()?)
+                        }
+                    }
                 }
             },
         })

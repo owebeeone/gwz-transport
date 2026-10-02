@@ -42,6 +42,7 @@ fn open_stream(core: &mut Mux, endpoint: &mut Mux, scheme: Scheme, policy: AuthP
                     port: if scheme == Scheme::Https { 443 } else { 22 },
                     path: "repo".into(),
                     ssh_username: (scheme == Scheme::Ssh).then(|| "git".into()),
+                    https_username: None,
                 },
                 service: GitService::UploadPackExchange,
                 identity: Identity {

@@ -23,7 +23,7 @@ struct Shared {
 }
 impl Shared {
     fn change<T>(&self, action: impl FnOnce(&mut Runtime) -> T) -> T {
-        let (result, wakes) = {
+        let (result, wakes, clock_wakes, retired) = {
             let mut state = self.runtime.lock().expect("pool lock poisoned");
             let before = state.machine.revision;
             let result = action(&mut state);
@@ -37,10 +37,16 @@ impl Shared {
             } else {
                 Vec::new()
             };
-            (result, wakes)
+            let clock_wakes = std::mem::take(&mut state.machine.clock_wakes);
+            let retired = std::mem::take(&mut state.machine.clock_retired);
+            (result, wakes, clock_wakes, retired)
         };
+        drop(retired);
         for waker in wakes {
             waker.wake();
+        }
+        for waker in clock_wakes {
+            waker.wake_by_ref();
         }
         result
     }
@@ -164,6 +170,10 @@ impl Pool {
         self.shared
             .change(|state| state.machine.cancel_operation(owner));
     }
+    pub fn retire_https_scope(&self, scope: &str) {
+        self.shared
+            .change(|state| state.machine.retire_https_scope(scope));
+    }
 }
 impl Clone for Pool {
     fn clone(&self) -> Self {
@@ -245,6 +255,11 @@ impl Lease {
             }
         })
     }
+    pub fn scope_https(&self, scope: &str) -> Result<(), Error> {
+        let token = self.token.ok_or(Error::Stale)?;
+        self.shared
+            .change(|state| state.machine.scope_https(token, scope))
+    }
     /// Only use Reusable after successful exchange cleanup. This consumes the
     /// lease so no later Drop can return a newly allocated lease accidentally.
     pub fn release(mut self, disposition: Disposition) -> Result<(), Error> {
@@ -273,6 +288,69 @@ impl Drop for DriverWaiter {
     }
 }
 impl PoolDriver {
+    /// Allocation remaining when the Connect action was dispatched, before
+    /// network setup begins. Local admission may retain this ordinary budget.
+    pub fn opening_allocation_remaining(&self, connection: ConnectionId) -> Option<u64> {
+        self.shared.change(|state| {
+            let machine::State::Opening {
+                request: Some(request),
+                ..
+            } = state.machine.entries.get(&connection)?.state
+            else {
+                return None;
+            };
+            Some(
+                state
+                    .machine
+                    .requests
+                    .get(&request)?
+                    .deadline
+                    .saturating_sub(state.machine.now),
+            )
+        })
+    }
+    /// Service a connecting resource's sole phase receipt before polling work.
+    pub fn service_setup_clock(
+        &self,
+        connection: ConnectionId,
+        waker: &Waker,
+    ) -> Result<(), Error> {
+        let registration = Arc::new(waker.clone());
+        self.shared.change(|state| {
+            let Some(clock) = state.machine.shared_setup_clock(connection) else {
+                return Ok(());
+            };
+            state
+                .machine
+                .absorb_clock_update(clock.register_driver(registration));
+            let receipt = state.machine.absorb_clock_update(clock.pending_receipt());
+            if let Some(receipt) = receipt {
+                match state
+                    .machine
+                    .absorb_clock_update(clock.acknowledge(receipt))
+                {
+                    Ok(()) => {}
+                    Err(PublicationError::ActiveTerminal(record)) => {
+                        return Err(Error::SetupEnded(record));
+                    }
+                    Err(_) => return Err(Error::InvalidRequest),
+                }
+            }
+            Ok(())
+        })
+    }
+    pub fn install_setup_clock(
+        &self,
+        connection: ConnectionId,
+        source: Arc<dyn Fn() -> u64 + Send + Sync>,
+        stall_ms: u64,
+    ) -> Result<SetupClock, Error> {
+        self.shared.change(|state| {
+            state
+                .machine
+                .install_setup_clock(connection, source, stall_ms)
+        })
+    }
     /// Exactly one command receiver, enforced by mutable borrowing. Cancelling
     /// this future unregisters its waker. The driver slot is reserved separately
     /// from request capacity, so a full queue cannot prevent pool progress.

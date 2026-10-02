@@ -18,6 +18,7 @@ fn open(scheme: Scheme, policy: AuthPolicy, mode: IdentityMode) -> Envelope {
                 host: "example.test".into(),
                 port: 443,
                 path: "/repo".into(),
+                https_username: None,
                 ssh_username: if scheme == Scheme::Ssh {
                     Some("git".into())
                 } else {

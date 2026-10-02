@@ -8,8 +8,14 @@ mod asynchronous;
 mod clock;
 mod lifecycle;
 mod machine;
+mod setup;
+mod setup_clock;
 pub use asynchronous::{Checkout, Lease, Pool, PoolDriver};
 pub use machine::PoolMachine;
+pub use setup_clock::{
+    ClockUpdate, LocalPhase, Observation, PhaseId, PreparedPhase, PublicationError, SetupCause,
+    SetupClock, SetupReceipt, SetupTerminal,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Capacity {
@@ -128,18 +134,21 @@ fn bounded_text(text: &str, max: usize) -> bool {
 
 /// Explicit proofs must be resolved and validated by the endpoint for each
 /// request. Never put a private key or its filename here. HTTPS reuse carries
-/// no account claim: authentication is independently applied to every request.
+/// no account claim until an endpoint promotes its lease to an opaque,
+/// credential-owned HTTPS scope (TR1.6 §6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Identity {
     Ambient,
     Explicit(String),
     Https,
+    HttpsScoped(String),
 }
 impl Identity {
     fn valid_for(&self, key: &Key) -> bool {
         match (key.scheme, self) {
             (Scheme::Ssh, Self::Ambient) | (Scheme::Https, Self::Https) => true,
             (Scheme::Ssh, Self::Explicit(proof)) => bounded_text(proof, 1024),
+            (Scheme::Https, Self::HttpsScoped(scope)) => bounded_text(scope, 1024),
             _ => false,
         }
     }
@@ -259,6 +268,7 @@ pub enum Error {
     ConnectTimeout,
     InteractionTimeout,
     IdentityMismatch,
+    SetupEnded(SetupTerminal),
     ConnectFailed {
         code: ErrorCode,
         effect: Effect,
