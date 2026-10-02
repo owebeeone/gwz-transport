@@ -126,6 +126,7 @@ impl StreamMachine {
                         },
                         false,
                     );
+                    self.retained_failure = Some(failure);
                 } else {
                     self.completed = Some(CloseResult {
                         disposition: closed.disposition,

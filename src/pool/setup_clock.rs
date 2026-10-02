@@ -211,6 +211,16 @@ impl SetupClock {
             s.terminal.expect("terminal")
         })
     }
+    /// Distinguish this caller's admission from an already committed terminal.
+    pub fn terminate_if_alive(&self, cause: SetupCause) -> ClockUpdate<Result<SetupTerminal, SetupTerminal>> {
+        self.change(|s| {
+            if let Some(record) = s.terminal {
+                return Err(record);
+            }
+            s.finish(cause, s.phase);
+            Ok(s.terminal.expect("terminal"))
+        })
+    }
     pub fn register_driver(&self, waker: Arc<Waker>) -> ClockUpdate<()> {
         self.change(|s| {
             if s.terminal.is_some() {

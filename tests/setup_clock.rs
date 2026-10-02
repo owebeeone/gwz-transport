@@ -474,3 +474,7 @@ fn connect_dispatch_retains_allocation_wait_without_charging_network() {
         "network work does not spend the captured allocation"
     );
 }
+
+
+#[path = "setup_clock/atomic_admission.rs"]
+mod atomic_admission;
