@@ -15,6 +15,26 @@ pub(crate) fn envelope(value: &Envelope, limits: &Limits) -> Result<(), Error> {
     allocation_charge(value, limits).map(|_| ())
 }
 
+fn visit_nativefacts(value: &NativeFacts, b: &mut Budget, depth: usize) -> Result<(), Error> {
+    b.container(5, depth)?;
+    b.key(1)?;
+    b.integer(value.source.wire(), depth + 1)?;
+    b.key(2)?;
+    b.integer(value.scheme.wire(), depth + 1)?;
+    b.key(3)?;
+    b.integer(value.observation.wire(), depth + 1)?;
+    b.key(4)?;
+    if let Some(item) = &value.mechanism {
+        b.integer(item.wire(), depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
+    b.key(5)?;
+    let _ = &value.authoritative;
+    b.scalar(depth + 1)?;
+    Ok(())
+}
+
 fn visit_limits(value: &Limits, b: &mut Budget, depth: usize) -> Result<(), Error> {
     b.container(11, depth)?;
     b.key(1)?;
@@ -269,7 +289,7 @@ fn visit_identitychecked(
 }
 
 fn visit_facts(value: &Facts, b: &mut Budget, depth: usize) -> Result<(), Error> {
-    b.container(6, depth)?;
+    b.container(7, depth)?;
     b.key(1)?;
     b.integer(value.method.wire(), depth + 1)?;
     b.key(2)?;
@@ -297,6 +317,12 @@ fn visit_facts(value: &Facts, b: &mut Budget, depth: usize) -> Result<(), Error>
     b.key(6)?;
     if let Some(item) = &value.ssh_exit_status {
         b.integer(*item, depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
+    b.key(7)?;
+    if let Some(item) = &value.native {
+        visit_nativefacts(item, b, depth + 1)?;
     } else {
         b.scalar(depth + 1)?;
     }

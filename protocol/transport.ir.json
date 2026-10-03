@@ -77,13 +77,17 @@
         "anonymous": {},
         "gh": {},
         "ssh_ambient": {},
-        "ssh_explicit": {}
+        "ssh_explicit": {},
+        "windows_configured": {},
+        "windows_default": {}
       },
       "members": {
         "anonymous": 3,
         "gh": 4,
         "ssh_ambient": 1,
-        "ssh_explicit": 2
+        "ssh_explicit": 2,
+        "windows_configured": 5,
+        "windows_default": 6
       },
       "name": "AuthPolicy",
       "options": {}
@@ -227,20 +231,147 @@
         "gh": {},
         "none": {},
         "ssh_agent": {},
-        "ssh_key": {}
+        "ssh_key": {},
+        "sspi": {}
       },
       "members": {
         "gh": 4,
         "none": 1,
         "ssh_agent": 2,
-        "ssh_key": 3
+        "ssh_key": 3,
+        "sspi": 5
       },
       "name": "AuthMethod",
+      "options": {}
+    },
+    {
+      "member_options": {
+        "configured": {},
+        "current_logon": {}
+      },
+      "members": {
+        "configured": 1,
+        "current_logon": 2
+      },
+      "name": "NativeSource",
+      "options": {}
+    },
+    {
+      "member_options": {
+        "digest": {},
+        "negotiate": {},
+        "ntlm": {}
+      },
+      "members": {
+        "digest": 3,
+        "negotiate": 1,
+        "ntlm": 2
+      },
+      "name": "NativeScheme",
+      "options": {}
+    },
+    {
+      "member_options": {
+        "not_started": {},
+        "selected": {},
+        "unresolved": {}
+      },
+      "members": {
+        "not_started": 1,
+        "selected": 3,
+        "unresolved": 2
+      },
+      "name": "NativeObservation",
+      "options": {}
+    },
+    {
+      "member_options": {
+        "kerberos": {},
+        "ntlm": {}
+      },
+      "members": {
+        "kerberos": 1,
+        "ntlm": 2
+      },
+      "name": "NativeMechanism",
       "options": {}
     }
   ],
   "extensions": [],
   "messages": [
+    {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
+      "fields": [
+        {
+          "merge": null,
+          "name": "source",
+          "optional": false,
+          "options": {},
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "k": "enum",
+            "name": "NativeSource"
+          }
+        },
+        {
+          "merge": null,
+          "name": "scheme",
+          "optional": false,
+          "options": {},
+          "tag": 2,
+          "transient": false,
+          "type": {
+            "k": "enum",
+            "name": "NativeScheme"
+          }
+        },
+        {
+          "merge": null,
+          "name": "observation",
+          "optional": false,
+          "options": {},
+          "tag": 3,
+          "transient": false,
+          "type": {
+            "k": "enum",
+            "name": "NativeObservation"
+          }
+        },
+        {
+          "merge": null,
+          "name": "mechanism",
+          "optional": true,
+          "options": {},
+          "tag": 4,
+          "transient": false,
+          "type": {
+            "k": "enum",
+            "name": "NativeMechanism"
+          }
+        },
+        {
+          "merge": null,
+          "name": "authoritative",
+          "optional": false,
+          "options": {},
+          "tag": 5,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "bool"
+          }
+        }
+      ],
+      "name": "NativeFacts",
+      "next_id": null,
+      "options": {},
+      "reserved_names": [],
+      "reserved_tags": []
+    },
     {
       "effective": {
         "max_depth": 32,
@@ -1222,6 +1353,18 @@
           "type": {
             "k": "scalar",
             "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "native",
+          "optional": "missing_ok",
+          "options": {},
+          "tag": 7,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "NativeFacts"
           }
         }
       ],

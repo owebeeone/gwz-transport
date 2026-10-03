@@ -16,6 +16,17 @@ pub(crate) fn allows(scheme: Scheme, policy: AuthPolicy, identity: IdentityMode)
                 IdentityMode::CredentialsDisabled
             )
             | (Scheme::Https, AuthPolicy::Gh, IdentityMode::Ambient)
+            | (
+                Scheme::Https,
+                AuthPolicy::WindowsConfigured | AuthPolicy::WindowsDefault,
+                IdentityMode::Ambient
+            )
+    )
+}
+pub(crate) fn native(policy: AuthPolicy) -> bool {
+    matches!(
+        policy,
+        AuthPolicy::WindowsConfigured | AuthPolicy::WindowsDefault
     )
 }
 pub(crate) fn supports(scheme: Scheme, policy: AuthPolicy) -> bool {

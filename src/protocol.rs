@@ -143,6 +143,8 @@ pub enum AuthPolicy {
     SshExplicit,
     Anonymous,
     Gh,
+    WindowsConfigured,
+    WindowsDefault,
 }
 impl AuthPolicy {
     pub fn wire(self) -> i64 {
@@ -151,6 +153,8 @@ impl AuthPolicy {
             Self::SshExplicit => 2,
             Self::Anonymous => 3,
             Self::Gh => 4,
+            Self::WindowsConfigured => 5,
+            Self::WindowsDefault => 6,
         }
     }
     pub fn from_wire(v: i64) -> Result<Self, DecodeError> {
@@ -159,6 +163,8 @@ impl AuthPolicy {
             2 => Self::SshExplicit,
             3 => Self::Anonymous,
             4 => Self::Gh,
+            5 => Self::WindowsConfigured,
+            6 => Self::WindowsDefault,
             _ => {
                 return Err(DecodeError::UnknownEnum {
                     enum_name: "AuthPolicy",
@@ -440,6 +446,7 @@ pub enum AuthMethod {
     SshAgent,
     SshKey,
     Gh,
+    Sspi,
 }
 impl AuthMethod {
     pub fn wire(self) -> i64 {
@@ -448,6 +455,7 @@ impl AuthMethod {
             Self::SshAgent => 2,
             Self::SshKey => 3,
             Self::Gh => 4,
+            Self::Sspi => 5,
         }
     }
     pub fn from_wire(v: i64) -> Result<Self, DecodeError> {
@@ -456,6 +464,7 @@ impl AuthMethod {
             2 => Self::SshAgent,
             3 => Self::SshKey,
             4 => Self::Gh,
+            5 => Self::Sspi,
             _ => {
                 return Err(DecodeError::UnknownEnum {
                     enum_name: "AuthMethod",
@@ -463,6 +472,171 @@ impl AuthMethod {
                 });
             }
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum NativeSource {
+    #[default]
+    Configured,
+    CurrentLogon,
+}
+impl NativeSource {
+    pub fn wire(self) -> i64 {
+        match self {
+            Self::Configured => 1,
+            Self::CurrentLogon => 2,
+        }
+    }
+    pub fn from_wire(v: i64) -> Result<Self, DecodeError> {
+        Ok(match v {
+            1 => Self::Configured,
+            2 => Self::CurrentLogon,
+            _ => {
+                return Err(DecodeError::UnknownEnum {
+                    enum_name: "NativeSource",
+                    value: v,
+                });
+            }
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum NativeScheme {
+    #[default]
+    Negotiate,
+    Ntlm,
+    Digest,
+}
+impl NativeScheme {
+    pub fn wire(self) -> i64 {
+        match self {
+            Self::Negotiate => 1,
+            Self::Ntlm => 2,
+            Self::Digest => 3,
+        }
+    }
+    pub fn from_wire(v: i64) -> Result<Self, DecodeError> {
+        Ok(match v {
+            1 => Self::Negotiate,
+            2 => Self::Ntlm,
+            3 => Self::Digest,
+            _ => {
+                return Err(DecodeError::UnknownEnum {
+                    enum_name: "NativeScheme",
+                    value: v,
+                });
+            }
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum NativeObservation {
+    #[default]
+    NotStarted,
+    Unresolved,
+    Selected,
+}
+impl NativeObservation {
+    pub fn wire(self) -> i64 {
+        match self {
+            Self::NotStarted => 1,
+            Self::Unresolved => 2,
+            Self::Selected => 3,
+        }
+    }
+    pub fn from_wire(v: i64) -> Result<Self, DecodeError> {
+        Ok(match v {
+            1 => Self::NotStarted,
+            2 => Self::Unresolved,
+            3 => Self::Selected,
+            _ => {
+                return Err(DecodeError::UnknownEnum {
+                    enum_name: "NativeObservation",
+                    value: v,
+                });
+            }
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum NativeMechanism {
+    #[default]
+    Kerberos,
+    Ntlm,
+}
+impl NativeMechanism {
+    pub fn wire(self) -> i64 {
+        match self {
+            Self::Kerberos => 1,
+            Self::Ntlm => 2,
+        }
+    }
+    pub fn from_wire(v: i64) -> Result<Self, DecodeError> {
+        Ok(match v {
+            1 => Self::Kerberos,
+            2 => Self::Ntlm,
+            _ => {
+                return Err(DecodeError::UnknownEnum {
+                    enum_name: "NativeMechanism",
+                    value: v,
+                });
+            }
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct NativeFacts {
+    pub source: NativeSource,
+    pub scheme: NativeScheme,
+    pub observation: NativeObservation,
+    pub mechanism: Option<NativeMechanism>,
+    pub authoritative: bool,
+}
+impl NativeFacts {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
+    pub fn to_cbor(&self) -> Cbor {
+        Cbor::Map(vec![
+            (1, Cbor::Int(self.source.wire())),
+            (2, Cbor::Int(self.scheme.wire())),
+            (3, Cbor::Int(self.observation.wire())),
+            (
+                4,
+                match &self.mechanism {
+                    Some(v) => Cbor::Int(v.wire()),
+                    None => Cbor::Null,
+                },
+            ),
+            (5, Cbor::Bool(self.authoritative)),
+        ])
+    }
+    pub fn from_cbor(c: &Cbor) -> Result<Self, DecodeError> {
+        Ok(Self {
+            source: NativeSource::from_wire(c.try_get(1)?.try_int()?)?,
+            scheme: NativeScheme::from_wire(c.try_get(2)?.try_int()?)?,
+            observation: NativeObservation::from_wire(c.try_get(3)?.try_int()?)?,
+            mechanism: {
+                let v = c.try_get(4)?;
+                if v.is_null() {
+                    None
+                } else {
+                    Some(NativeMechanism::from_wire(v.try_int()?)?)
+                }
+            },
+            authoritative: c.try_get(5)?.try_bool()?,
+        })
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
     }
 }
 
@@ -1195,6 +1369,7 @@ pub struct Facts {
     pub key_fingerprint: Option<String>,
     pub http_status: Option<i64>,
     pub ssh_exit_status: Option<i64>,
+    pub native: Option<NativeFacts>,
 }
 impl Facts {
     pub const MAX_DEPTH: usize = 32;
@@ -1228,6 +1403,13 @@ impl Facts {
                 6,
                 match &self.ssh_exit_status {
                     Some(v) => Cbor::Int(*v),
+                    None => Cbor::Null,
+                },
+            ),
+            (
+                7,
+                match &self.native {
+                    Some(v) => v.to_cbor(),
                     None => Cbor::Null,
                 },
             ),
@@ -1267,6 +1449,19 @@ impl Facts {
                     None
                 } else {
                     Some(v.try_int()?)
+                }
+            },
+            native: {
+                let v = c.try_get_opt(7)?;
+                match v {
+                    None => None,
+                    Some(v) => {
+                        if v.is_null() {
+                            None
+                        } else {
+                            Some(NativeFacts::from_cbor(v)?)
+                        }
+                    }
                 }
             },
         })

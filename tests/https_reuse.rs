@@ -4,6 +4,114 @@ use gwz_transport::{
     protocol::*,
 };
 
+fn native_facts() -> Facts {
+    Facts {
+        method: AuthMethod::Sspi,
+        native: Some(NativeFacts {
+            source: NativeSource::CurrentLogon,
+            scheme: NativeScheme::Ntlm,
+            observation: NativeObservation::Selected,
+            mechanism: Some(NativeMechanism::Ntlm),
+            authoritative: true,
+        }),
+        credential_offered: true,
+        ..Default::default()
+    }
+}
+fn native_opened(facts: Facts, version: i64) -> Envelope {
+    Envelope {
+        version,
+        session_id: "native".into(),
+        stream_id: 1,
+        kind: MessageKind::Opened,
+        opened: Some(Opened {
+            connection_id: "physical".into(),
+            endpoint_id: "endpoint".into(),
+            trust_owner: "account".into(),
+            reused: true,
+            facts,
+            receive_limits: binding::default_limits(),
+        }),
+        ..Default::default()
+    }
+}
+#[test]
+fn native_facts_are_profile_gated_and_preserve_authority_without_remote_success() {
+    let message = native_opened(native_facts(), 2);
+    let bytes = codec::encode(&message).unwrap();
+    let decoded = codec::decode(&bytes).unwrap();
+    let facts = decoded.opened.unwrap().facts;
+    assert!(facts.native.unwrap().authoritative);
+    assert_eq!(facts.authenticated, None);
+    assert!(codec::encode(&native_opened(native_facts(), 1)).is_err());
+    let mut invalid = native_facts();
+    invalid.native = None;
+    assert!(codec::encode(&native_opened(invalid, 2)).is_err());
+    let mut invalid = native_facts();
+    invalid.method = AuthMethod::Gh;
+    assert!(codec::encode(&native_opened(invalid, 2)).is_err());
+    for case in 0..5 {
+        let mut invalid = native_facts();
+        let native = invalid.native.as_mut().unwrap();
+        match case {
+            0 => native.mechanism = None,
+            1 => native.mechanism = Some(NativeMechanism::Kerberos),
+            2 => {
+                native.observation = NativeObservation::Unresolved;
+                native.mechanism = None;
+                native.authoritative = false;
+            }
+            3 => {
+                native.observation = NativeObservation::NotStarted;
+                native.mechanism = None;
+                native.authoritative = false;
+            }
+            _ => native.scheme = NativeScheme::Digest,
+        }
+        assert!(
+            codec::encode(&native_opened(invalid, 2)).is_err(),
+            "case={case}"
+        );
+    }
+    let mut unknown = native_facts();
+    unknown.credential_offered = false;
+    let native = unknown.native.as_mut().unwrap();
+    native.observation = NativeObservation::NotStarted;
+    native.mechanism = None;
+    native.authoritative = false;
+    let mut message = native_opened(unknown, 2);
+    message.opened.as_mut().unwrap().reused = false;
+    assert!(codec::encode(&message).is_ok());
+    message.opened.as_mut().unwrap().facts.authenticated = Some(true);
+    assert!(codec::encode(&message).is_err());
+}
+#[test]
+fn native_binding_requires_an_acknowledged_policy_and_profile_two() {
+    let endpoint = binding::EndpointConfig {
+        endpoint_id: "endpoint".into(),
+        role: EndpointRole::Driver,
+        schemes: vec![Scheme::Https],
+        policies: vec![AuthPolicy::WindowsDefault],
+        limits: binding::default_limits(),
+        trust_owner: "account".into(),
+    };
+    let mut offer = binding::offer("native", EndpointRole::Driver);
+    let bind = offer.bind.as_mut().unwrap();
+    bind.versions = vec![2];
+    bind.schemes = vec![Scheme::Https];
+    bind.policies = vec![AuthPolicy::WindowsDefault];
+    let (reply, _) = endpoint.accept(&offer).unwrap();
+    assert_eq!(
+        binding::verify(&offer, &reply).unwrap().profile_version(),
+        2
+    );
+    offer.bind.as_mut().unwrap().versions = vec![1];
+    assert_eq!(
+        endpoint.accept(&offer).err().unwrap().code,
+        ErrorCode::UnsupportedOperation
+    );
+}
+
 fn pair_for(scheme: Scheme, policy: AuthPolicy) -> (Mux, Mux) {
     let config = Config::default();
     let endpoint = binding::EndpointConfig {
@@ -46,7 +154,10 @@ fn open_stream(core: &mut Mux, endpoint: &mut Mux, scheme: Scheme, policy: AuthP
                 },
                 service: GitService::UploadPackExchange,
                 identity: Identity {
-                    mode: if policy == AuthPolicy::Gh {
+                    mode: if matches!(
+                        policy,
+                        AuthPolicy::Gh | AuthPolicy::WindowsConfigured | AuthPolicy::WindowsDefault
+                    ) {
                         IdentityMode::Ambient
                     } else if scheme == Scheme::Https {
                         IdentityMode::CredentialsDisabled
@@ -175,5 +286,46 @@ fn https_discovery_failures_are_open_failed_before_opened() {
         assert_eq!(terminal.open_failed, Some(failure));
         assert!(terminal.opened.is_none());
         assert!(terminal.failed.is_none());
+    }
+}
+
+#[test]
+fn native_default_rejects_configured_claims_in_every_terminal_shape() {
+    for method in [AuthMethod::Sspi, AuthMethod::Gh] {
+        for kind in [MessageKind::Opened, MessageKind::OpenFailed] {
+            let (mut core, mut endpoint) = pair_for(Scheme::Https, AuthPolicy::WindowsDefault);
+            bind(&mut core, &mut endpoint);
+            let id = open_stream(
+                &mut core,
+                &mut endpoint,
+                Scheme::Https,
+                AuthPolicy::WindowsDefault,
+            );
+            let mut facts = native_facts();
+            if method == AuthMethod::Sspi {
+                facts.native.as_mut().unwrap().source = NativeSource::Configured;
+            } else {
+                facts.method = method;
+                facts.native = None;
+            }
+            let mut message = endpoint.message(id, kind).unwrap();
+            if kind == MessageKind::Opened {
+                message.opened = Some(Opened {
+                    endpoint_id: "endpoint".into(),
+                    connection_id: "generation".into(),
+                    trust_owner: "account".into(),
+                    reused: false,
+                    facts,
+                    receive_limits: binding::default_limits(),
+                });
+            } else {
+                message.open_failed = Some(Failure {
+                    code: ErrorCode::Authentication,
+                    facts: Some(facts),
+                    ..Default::default()
+                });
+            }
+            assert_eq!(endpoint.send("a", &message), Err(Error::Protocol));
+        }
     }
 }

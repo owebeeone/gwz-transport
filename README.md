@@ -492,3 +492,11 @@ client_port.disconnect();
 
 `cargo test --doc` type-checks this example. The executable in-memory lifecycle
 and closure regressions are in `tests/mux.rs` and `tests/mux_async.rs`.
+
+Native HTTPS policies WindowsConfigured and WindowsDefault are explicit profile
+2/3 capabilities; profile 1 offers remain unchanged. SSPI Facts carry source,
+scheme, observation, selected mechanism and authority. NotStarted never claims
+credential publication. Authoritative Continue is valid evidence but does not
+mean native Complete or remote acceptance. WindowsDefault refuses configured
+native and helper/Basic facts, including nonreused terminal messages; a peer must
+advertise the matching policy before any credential or connection effect.

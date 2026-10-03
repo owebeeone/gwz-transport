@@ -175,6 +175,9 @@ impl EndpointConfig {
             .copied()
             .filter(|p| bind.policies.contains(p))
             .collect();
+        if version == 1 {
+            policies.retain(|policy| !crate::policy::native(*policy));
+        }
         schemes.retain(|s| policies.iter().any(|p| crate::policy::supports(*s, *p)));
         policies.retain(|p| schemes.iter().any(|s| crate::policy::supports(*s, *p)));
         if schemes.is_empty() || policies.is_empty() {

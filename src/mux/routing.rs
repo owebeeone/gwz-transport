@@ -195,6 +195,42 @@ impl Mux {
         Ok(())
     }
     pub(super) fn validate_opened(&self, message: &Envelope) -> Result<(), Error> {
+        for facts in [
+            message.opened.as_ref().map(|body| &body.facts),
+            message.closed.as_ref().map(|body| &body.facts),
+            message
+                .open_failed
+                .as_ref()
+                .and_then(|body| body.facts.as_ref()),
+            message.failed.as_ref().and_then(|body| body.facts.as_ref()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let route = self.routes.get(&message.stream_id).ok_or(Error::Protocol)?;
+            if facts.method == AuthMethod::Gh
+                && route.scheme == Some(Scheme::Https)
+                && !matches!(
+                    route.policy,
+                    Some(AuthPolicy::Gh | AuthPolicy::WindowsConfigured)
+                )
+            {
+                return Err(Error::Protocol);
+            }
+            if facts.method == AuthMethod::Sspi {
+                let route = self.routes.get(&message.stream_id).ok_or(Error::Protocol)?;
+                if route.scheme != Some(Scheme::Https)
+                    || !route.policy.is_some_and(crate::policy::native)
+                    || (route.policy == Some(AuthPolicy::WindowsDefault)
+                        && facts
+                            .native
+                            .as_ref()
+                            .is_some_and(|native| native.source == NativeSource::Configured))
+                {
+                    return Err(Error::Protocol);
+                }
+            }
+        }
         if let Some(opened) = &message.opened {
             let binding = self.binding.as_ref().ok_or(Error::Protocol)?;
             if opened.endpoint_id != binding.endpoint_id()
@@ -205,10 +241,13 @@ impl Mux {
             }
             if opened.reused && opened.facts.credential_offered {
                 let route = self.routes.get(&message.stream_id).ok_or(Error::Protocol)?;
-                if route.scheme != Some(Scheme::Https)
-                    || route.policy != Some(AuthPolicy::Gh)
-                    || opened.facts.method != AuthMethod::Gh
-                {
+                let credential_method = (matches!(
+                    route.policy,
+                    Some(AuthPolicy::Gh | AuthPolicy::WindowsConfigured)
+                ) && opened.facts.method == AuthMethod::Gh)
+                    || (route.policy.is_some_and(crate::policy::native)
+                        && opened.facts.method == AuthMethod::Sspi);
+                if route.scheme != Some(Scheme::Https) || !credential_method {
                     return Err(Error::Protocol);
                 }
             }

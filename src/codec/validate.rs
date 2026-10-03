@@ -96,6 +96,11 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
             || bound.endpoint_id.is_empty()
             || bound.trust_owner.is_empty()
             || !crate::policy::capabilities(&bound.schemes, &bound.policies)
+            || (bound.version == 1
+                && bound
+                    .policies
+                    .iter()
+                    .any(|policy| crate::policy::native(*policy)))
         {
             return Err(Error::InvalidMessage);
         }
@@ -118,6 +123,24 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
     .flatten()
     {
         super::failure_detail::validate(failure)?;
+    }
+    for facts in [
+        value.opened.as_ref().map(|body| &body.facts),
+        value.closed.as_ref().map(|body| &body.facts),
+        value
+            .bind_rejected
+            .as_ref()
+            .and_then(|body| body.facts.as_ref()),
+        value
+            .open_failed
+            .as_ref()
+            .and_then(|body| body.facts.as_ref()),
+        value.failed.as_ref().and_then(|body| body.facts.as_ref()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        native_facts(facts, value.version)?;
     }
     if value.version == 1
         && (value
@@ -153,6 +176,9 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
         if !crate::policy::allows(open.destination.scheme, open.policy, open.identity.mode) {
             return Err(Error::InvalidMessage);
         }
+        if value.version == 1 && crate::policy::native(open.policy) {
+            return Err(Error::InvalidMessage);
+        }
         let d = &open.deadlines;
         if [d.allocation_ms, d.interaction_ms, d.cleanup_ms]
             .iter()
@@ -181,7 +207,7 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
             || opened.trust_owner.is_empty()
             || (opened.reused
                 && opened.facts.credential_offered
-                && opened.facts.method != AuthMethod::Gh)
+                && !matches!(opened.facts.method, AuthMethod::Gh | AuthMethod::Sspi))
         {
             return Err(Error::InvalidMessage);
         }
@@ -208,6 +234,47 @@ pub(super) fn envelope(value: &Envelope) -> Result<(), Error> {
         .cancel
         .as_ref()
         .is_some_and(|cancel| !matches!(cancel.reason, ErrorCode::Cancelled | ErrorCode::Timeout))
+    {
+        return Err(Error::InvalidMessage);
+    }
+    Ok(())
+}
+
+fn native_facts(facts: &Facts, version: i64) -> Result<(), Error> {
+    if (facts.method == AuthMethod::Sspi) != facts.native.is_some() {
+        return Err(Error::InvalidMessage);
+    }
+    let Some(native) = &facts.native else {
+        return Ok(());
+    };
+    if version == 1 || facts.key_fingerprint.is_some() || facts.ssh_exit_status.is_some() {
+        return Err(Error::InvalidMessage);
+    }
+    let valid = match native.observation {
+        NativeObservation::NotStarted => {
+            native.mechanism.is_none() && !native.authoritative && !facts.credential_offered
+        }
+        NativeObservation::Unresolved => {
+            native.scheme == NativeScheme::Negotiate
+                && native.mechanism.is_none()
+                && !native.authoritative
+        }
+        NativeObservation::Selected => matches!(
+            (native.scheme, native.mechanism),
+            (
+                NativeScheme::Negotiate,
+                Some(NativeMechanism::Kerberos | NativeMechanism::Ntlm)
+            ) | (NativeScheme::Ntlm, Some(NativeMechanism::Ntlm))
+        ),
+    };
+    if !valid
+        || (native.scheme == NativeScheme::Digest
+            && (native.source != NativeSource::Configured
+                || native.observation != NativeObservation::NotStarted))
+        || (facts.authenticated == Some(true)
+            && (!facts.credential_offered
+                || native.observation != NativeObservation::Selected
+                || !native.authoritative))
     {
         return Err(Error::InvalidMessage);
     }
@@ -265,15 +332,26 @@ fn destination(value: &Destination) -> Result<(), Error> {
     if value.scheme == Scheme::Https {
         let username = value.https_username.as_deref();
         if username.is_some_and(|value| {
-            value.is_empty() || value.len() > 18_000 || !value.is_ascii()
-                || value.bytes().any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace()
-                    || b"@:/?#\\".contains(&byte))
+            value.is_empty()
+                || value.len() > 18_000
+                || !value.is_ascii()
+                || value.bytes().any(|byte| {
+                    byte.is_ascii_control()
+                        || byte.is_ascii_whitespace()
+                        || b"@:/?#\\".contains(&byte)
+                })
                 || super::https_shape::has_decoded_control(value)
-        }) || value.path.len() > 18_000 || super::https_shape::has_decoded_control(&value.path) {
+        }) || value.path.len() > 18_000
+            || super::https_shape::has_decoded_control(&value.path)
+        {
             return Err(Error::InvalidMessage);
         }
         let brackets = usize::from(value.host.contains(':') && !value.host.starts_with('[')) * 2;
-        let port = if value.port == 443 { 0 } else { 1 + value.port.to_string().len() };
+        let port = if value.port == 443 {
+            0
+        } else {
+            1 + value.port.to_string().len()
+        };
         let selector = username.map_or(0, |value| value.len() + 1);
         if 8 + value.host.len() + brackets + port + selector + value.path.len() > 18_000 {
             return Err(Error::InvalidMessage);

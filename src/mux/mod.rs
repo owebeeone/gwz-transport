@@ -277,6 +277,8 @@ impl Mux {
                 let mut offer = binding::offer(&self.session, self.config.role);
                 let body = offer.bind.as_mut().expect("offer body");
                 body.versions = vec![2];
+                body.policies
+                    .extend([AuthPolicy::WindowsConfigured, AuthPolicy::WindowsDefault]);
                 body.receive_limits = self.config.limits.clone();
                 let item = (request.into(), offer);
                 self.enqueue(&item, true)?;
