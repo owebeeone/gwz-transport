@@ -132,10 +132,10 @@ pins that Gearu does not.
   1.1.0's release batch (the transport release plan's Phase 10), whose reviewed
   change lifts the guard.
 - **crates.io.** The name exists as the placeholder `0.0.0-bootstrap.1`
-  (2026-09-23, `bootstrap-crate.yml`). Its trusted publisher must be owner
-  `owebeeone`, repository `gwz-transport`, workflow `release.yml`, environment
-  `crates-io`, configured before the release (TR3.3). `release.yml` has no token
-  fallback.
+  (2026-09-23, `bootstrap-crate.yml`). Its trusted publisher, configured on
+  2026-10-05, is owner `owebeeone` (GitHub ID 366621), repository
+  `gwz-transport`, workflow `release.yml`, with no environment, by the operator's
+  choice; `release.yml`'s job runs in none. It has no token fallback.
 - **The release interpreter, once per machine.** Gearu's checks run
   `{repo}/.release-venv/bin/python`. It must hold the taut-proto release that
   `protocol/generator.json` pins in its own site directories, since

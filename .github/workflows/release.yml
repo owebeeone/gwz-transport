@@ -3,8 +3,9 @@
 # stages on the release tag first.
 #
 # Authentication is crates.io Trusted Publishing only, with no token fallback. The
-# crate's trusted publisher is owner owebeeone, repository gwz-transport, workflow
-# release.yml, environment crates-io.
+# crate's trusted publisher is owner owebeeone (GitHub ID 366621), repository
+# gwz-transport, workflow release.yml, with no environment (operator, 2026-10-05),
+# so this job runs in none.
 name: Release gwz-transport
 on:
   release:
@@ -15,7 +16,6 @@ jobs:
   publish:
     if: github.repository == 'owebeeone/gwz-transport'
     runs-on: ubuntu-24.04
-    environment: crates-io
     timeout-minutes: 30
     concurrency:
       group: gwz-transport-crates-io
