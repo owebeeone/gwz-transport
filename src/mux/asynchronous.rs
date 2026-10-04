@@ -74,6 +74,33 @@ impl Owner {
     pub fn send(&self, request: &str, message: &Envelope) -> Result<(), Error> {
         self.0.change(|m| m.send(request, message))
     }
+    /// Sends like [`Owner::send`], but only if `admit` allows it.
+    ///
+    /// `admit` runs exactly once, while this owner holds the mux mutex,
+    /// immediately before the send, so its answer and the queueing it allows
+    /// are one step for every other user of this mux. If `admit` returns
+    /// false, nothing is queued, no route changes and the result is
+    /// `Ok(false)`. Otherwise the result is the send's: `Ok(true)` once the
+    /// message is queued, or the send's error.
+    ///
+    /// `admit` must be short and must not call back into this owner or its
+    /// port, which would deadlock: the lock order is the mux mutex, then
+    /// whatever `admit` reads. The transport gives the answer no meaning; it
+    /// carries no notion of time or policy.
+    pub fn send_if(
+        &self,
+        request: &str,
+        message: &Envelope,
+        admit: impl FnOnce() -> bool,
+    ) -> Result<bool, Error> {
+        self.0.change(|m| {
+            if admit() {
+                m.send(request, message).map(|()| true)
+            } else {
+                Ok(false)
+            }
+        })
+    }
     pub fn cancel(&self, request: &str) -> Result<(), Error> {
         self.0.change(|m| m.cancel(request))
     }
