@@ -1,0 +1,22 @@
+[project]
+name = "gwz-transport"
+branch = "main"
+remote = "origin"
+tag_prefix = "v"
+github_repo = "owebeeone/gwz-transport"
+
+[rust]
+manifests = ["Cargo.toml"]
+lockfile = "Cargo.lock"
+# gwz-transport has no dependencies, so a fresh lock changes only its own version.
+lock_command = ["cargo", "generate-lockfile", "--offline"]
+
+[release]
+# {repo}/.release-venv holds the taut-proto release protocol/generator.json pins in
+# its own site directories, which scripts/regen.py requires (RELEASE.md). The
+# candidate stage runs the contracts job's gates; the exact stage packages the
+# release commit, since cargo package refuses the uncommitted candidate.
+checks = [["{repo}/.release-venv/bin/python", "scripts/release_checks.py", "--version", "{version}"]]
+exact_checks = [["{repo}/.release-venv/bin/python", "scripts/release_checks.py", "--version", "{version}", "--exact"]]
+commit_message = "chore(release): {name} {version}"
+github_notes = "{name} {tag}. See RELEASE.md for scope."

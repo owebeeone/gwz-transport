@@ -1,0 +1,56 @@
+# Publish gwz-transport to crates.io when a GitHub Release is published, which
+# `gearu release --github-release` does (RELEASE.md). It reruns both release-check
+# stages on the release tag first.
+#
+# Authentication is crates.io Trusted Publishing only, with no token fallback. The
+# crate's trusted publisher is owner owebeeone, repository gwz-transport, workflow
+# release.yml, environment crates-io.
+name: Release gwz-transport
+on:
+  release:
+    types: [published]
+permissions:
+  contents: read
+jobs:
+  publish:
+    if: github.repository == 'owebeeone/gwz-transport'
+    runs-on: ubuntu-24.04
+    environment: crates-io
+    timeout-minutes: 30
+    concurrency:
+      group: gwz-transport-crates-io
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the pinned generator and the exact toolchains
+        run: |
+          python -m pip install "taut-proto==$(python -c 'import json; print(json.load(open("protocol/generator.json"))["taut-proto"])')"
+          rustup toolchain install 1.96.0 --profile minimal --component rustfmt
+          rustup toolchain install 1.95.0 --profile minimal
+      - name: Verify the tag, the version and both release-check stages
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+          if [ "$RELEASE_TAG" != "v$version" ]; then
+            echo "::error::release tag $RELEASE_TAG and Cargo version $version differ"
+            exit 1
+          fi
+          python scripts/release_checks.py --version "$version"
+          python scripts/release_checks.py --version "$version" --exact
+      - name: Authenticate using Trusted Publishing
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: Publish the verified crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo +1.95.0 publish --locked
