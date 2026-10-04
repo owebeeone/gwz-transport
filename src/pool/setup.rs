@@ -5,7 +5,10 @@ impl PoolMachine {
     /// A raw-machine host takes this after each step and delivers it after
     /// releasing its owner lock. PoolDriver performs that handoff automatically.
     pub fn take_setup_notifications(&mut self) -> ClockUpdate<()> {
-        ClockUpdate::<()>::notifications(std::mem::take(&mut self.clock_wakes), std::mem::take(&mut self.clock_retired))
+        ClockUpdate::<()>::notifications(
+            std::mem::take(&mut self.clock_wakes),
+            std::mem::take(&mut self.clock_retired),
+        )
     }
     pub(super) fn absorb_clock_update<T>(&mut self, update: ClockUpdate<T>) -> T {
         let (value, wakes, retired) = update.into_parts();

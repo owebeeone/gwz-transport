@@ -343,23 +343,58 @@ fn encoded_helper_timing_cannot_be_ignored_or_unbounded() {
 #[test]
 fn retained_incoming_failure_moves_the_first_admitted_answer_and_ignores_late_terminals() {
     use gwz_transport::stream::{Config, Error, Side, StreamMachine};
-    let config = || { let mut config = Config::new("retained", 1, Side::Initiator); config.profile_version = 2; config };
+    let config = || {
+        let mut config = Config::new("retained", 1, Side::Initiator);
+        config.profile_version = 2;
+        config
+    };
     let make = |token: &str| Envelope {
-        version: 2, session_id: "retained".into(), stream_id: 1,
+        version: 2,
+        session_id: "retained".into(),
+        stream_id: 1,
         kind: MessageKind::Failed,
-        failed: Some(Failure { code: ErrorCode::Authentication,
-            detail: Some(Box::new(FailureDetail { schemes: Some(vec![token.into()]), ..Default::default() })),
+        failed: Some(Failure {
+            code: ErrorCode::Authentication,
+            detail: Some(Box::new(FailureDetail {
+                schemes: Some(vec![token.into()]),
+                ..Default::default()
+            })),
             ..Default::default()
-        }), ..Default::default()
+        }),
+        ..Default::default()
     };
     let mut stream = StreamMachine::new(config()).unwrap();
     let first = make("Negotiate");
-    let pointer = first.failed.as_ref().unwrap().detail.as_ref().unwrap().schemes.as_ref().unwrap()[0].as_ptr();
+    let pointer = first
+        .failed
+        .as_ref()
+        .unwrap()
+        .detail
+        .as_ref()
+        .unwrap()
+        .schemes
+        .as_ref()
+        .unwrap()[0]
+        .as_ptr();
     stream.receive(first).unwrap();
     let held = stream.retained_failure().unwrap();
-    assert_eq!(held.detail.as_ref().unwrap().schemes.as_ref().unwrap()[0].as_ptr(), pointer);
+    assert_eq!(
+        held.detail.as_ref().unwrap().schemes.as_ref().unwrap()[0].as_ptr(),
+        pointer
+    );
     stream.receive(make("Basic")).unwrap();
-    assert_eq!(stream.retained_failure().unwrap().detail.as_ref().unwrap().schemes.as_ref().unwrap()[0], "Negotiate");
+    assert_eq!(
+        stream
+            .retained_failure()
+            .unwrap()
+            .detail
+            .as_ref()
+            .unwrap()
+            .schemes
+            .as_ref()
+            .unwrap()[0],
+        "Negotiate"
+    );
     let mut invalid = StreamMachine::new(config()).unwrap();
     assert_eq!(invalid.receive(make(&"x".repeat(33))), Err(Error::Protocol));
     assert!(invalid.retained_failure().is_none());

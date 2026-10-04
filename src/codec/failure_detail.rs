@@ -12,8 +12,12 @@ pub(super) fn validate(failure: &Failure) -> Result<(), Error> {
             Some(SetupFailureCause::Allocation) => (0..=86_400_000).contains(&allowance),
             _ => false,
         };
-        if failure.code != ErrorCode::Timeout || failure.effect != Effect::None || !bounded
-            || detail.helper_cause.is_some() || detail.pipe_kind.is_some() || detail.schemes.is_some()
+        if failure.code != ErrorCode::Timeout
+            || failure.effect != Effect::None
+            || !bounded
+            || detail.helper_cause.is_some()
+            || detail.pipe_kind.is_some()
+            || detail.schemes.is_some()
         {
             return Err(Error::InvalidMessage);
         }

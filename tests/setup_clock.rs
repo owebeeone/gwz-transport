@@ -475,6 +475,5 @@ fn connect_dispatch_retains_allocation_wait_without_charging_network() {
     );
 }
 
-
 #[path = "setup_clock/atomic_admission.rs"]
 mod atomic_admission;

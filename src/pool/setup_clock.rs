@@ -212,7 +212,10 @@ impl SetupClock {
         })
     }
     /// Distinguish this caller's admission from an already committed terminal.
-    pub fn terminate_if_alive(&self, cause: SetupCause) -> ClockUpdate<Result<SetupTerminal, SetupTerminal>> {
+    pub fn terminate_if_alive(
+        &self,
+        cause: SetupCause,
+    ) -> ClockUpdate<Result<SetupTerminal, SetupTerminal>> {
         self.change(|s| {
             if let Some(record) = s.terminal {
                 return Err(record);

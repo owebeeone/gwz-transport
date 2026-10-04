@@ -38,12 +38,20 @@ fn open(selector: Option<&str>) -> Envelope {
 
 fn refused(value: &Envelope) {
     assert_eq!(codec::admit(value), Err(codec::Error::InvalidMessage));
-    assert_eq!(codec::decode(&cbor::encode(&value.to_cbor())), Err(codec::Error::InvalidMessage));
+    assert_eq!(
+        codec::decode(&cbor::encode(&value.to_cbor())),
+        Err(codec::Error::InvalidMessage)
+    );
 }
 
 #[test]
 fn encoded_selector_is_private_and_round_trips_unchanged() {
-    for selector in [None, Some("account%2Bselector%40team"), Some("name%oops"), Some("%FF")] {
+    for selector in [
+        None,
+        Some("account%2Bselector%40team"),
+        Some("name%oops"),
+        Some("%FF"),
+    ] {
         let value = open(selector);
         assert_eq!(codec::decode(&codec::encode(&value).unwrap()), Ok(value));
     }
@@ -55,12 +63,21 @@ fn encoded_selector_is_private_and_round_trips_unchanged() {
 
 #[test]
 fn refused_selectors_and_decoded_controls_never_enter_open() {
-    for selector in ["", "a:b", "a@b", "a/b", "a?b", "a#b", "a\\b", "a b", "ümlaut", "%00", "%0d", "%0A", "%7f", "%C2%85", "%FF%0a"] {
+    for selector in [
+        "", "a:b", "a@b", "a/b", "a?b", "a#b", "a\\b", "a b", "ümlaut", "%00", "%0d", "%0A", "%7f",
+        "%C2%85", "%FF%0a",
+    ] {
         refused(&open(Some(selector)));
     }
     for suffix in ["%00", "%0d", "%0A", "%7f", "%C2%85", "%FF%0a"] {
         let mut value = open(None);
-        value.open.as_mut().unwrap().destination.path.push_str(suffix);
+        value
+            .open
+            .as_mut()
+            .unwrap()
+            .destination
+            .path
+            .push_str(suffix);
         refused(&value);
     }
     let mut ssh = open(Some("account"));

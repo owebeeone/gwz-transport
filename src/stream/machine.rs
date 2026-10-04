@@ -1,5 +1,5 @@
-use super::*;
 use super::state::PendingFlush;
+use super::*;
 use crate::protocol::*;
 use std::collections::VecDeque;
 

@@ -9,8 +9,8 @@ mod asynchronous;
 mod incoming;
 mod io_clock;
 mod machine;
-mod state;
 mod outgoing;
+mod state;
 pub use asynchronous::{MessageEndpoint, Stream};
 pub use state::{Snapshot, StreamMachine};
 
