@@ -289,3 +289,42 @@ fn send_if_admits_once_under_the_mux_lock() {
     // The send it admitted queued the message.
     assert_eq!(drain(&cli_port), vec![("r".into(), opened)]);
 }
+/// Records, on each wake, the message the endpoint port has ready, if any. A
+/// mux change wakes its waiters only after it releases the mutex.
+struct Probe {
+    port: Port,
+    seen: std::sync::Mutex<Vec<Option<Attachment>>>,
+}
+impl std::task::Wake for Probe {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        let mut cx = Context::from_waker(Waker::noop());
+        let ready = match pin!(self.port.next_message()).poll(&mut cx) {
+            Poll::Ready(Ok(item)) => item,
+            _ => None,
+        };
+        self.seen.lock().unwrap().push(ready);
+    }
+}
+#[test]
+fn send_if_admits_and_queues_in_one_critical_section() {
+    let (_, (cli, cli_port), opened) = opening();
+    let probe = Arc::new(Probe {
+        port: cli_port.clone(),
+        seen: Default::default(),
+    });
+    let waker = Waker::from(probe.clone());
+    let mut waiting = pin!(cli_port.next_message());
+    assert!(
+        waiting
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    assert_eq!(cli.send_if("r", &opened, || true), Ok(true));
+    // The first wake after admit already finds the message it allowed: no
+    // other user of the mux could run between the two.
+    assert_eq!(*probe.seen.lock().unwrap(), [Some(("r".into(), opened))]);
+}
