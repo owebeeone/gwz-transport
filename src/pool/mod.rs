@@ -271,6 +271,9 @@ pub enum Error {
     AllocationTimeout,
     ConnectTimeout,
     InteractionTimeout,
+    /// A connecting resource's wait on a local budget outlasted the request's
+    /// allocation. A local expiry, never a connect timeout.
+    LocalWaitExpired,
     IdentityMismatch,
     SetupEnded(SetupTerminal),
     ConnectFailed {

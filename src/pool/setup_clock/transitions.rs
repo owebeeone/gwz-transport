@@ -131,4 +131,45 @@ impl SetupClock {
             Ok(())
         })
     }
+    /// Pause the aggregate and stall timers while the connecting resource
+    /// waits on a local budget, for at most `milliseconds`. The wait takes no
+    /// slot and needs no acknowledgement.
+    pub fn begin_local_wait(&self, milliseconds: u64) -> ClockUpdate<Result<(), PublicationError>> {
+        self.change(|s| {
+            s.alive()?;
+            if s.local == Some(LocalPhase::Wait) {
+                return Ok(());
+            }
+            if s.local.is_some() || s.slot.is_some() {
+                return Err(PublicationError::WrongState);
+            }
+            let until = s
+                .now
+                .checked_add(milliseconds)
+                .ok_or(PublicationError::Overflow)?;
+            s.aggregate.pause(s.now);
+            s.stall.pause(s.now);
+            s.local = Some(LocalPhase::Wait);
+            s.local_until = Some(until);
+            Ok(())
+        })
+    }
+    /// The wait ended: the timers run again from what they had left.
+    pub fn end_local_wait(&self) -> ClockUpdate<Result<(), PublicationError>> {
+        self.change(|s| {
+            s.alive()?;
+            if s.local != Some(LocalPhase::Wait) {
+                return Err(PublicationError::WrongState);
+            }
+            let mut aggregate = s.aggregate;
+            let mut stall = s.stall;
+            aggregate.resume(s.now)?;
+            stall.resume(s.now)?;
+            s.aggregate = aggregate;
+            s.stall = stall;
+            s.local = None;
+            s.local_until = None;
+            Ok(())
+        })
+    }
 }

@@ -18,12 +18,16 @@ pub struct PhaseId(u64);
 pub enum LocalPhase {
     Admission,
     Interaction,
+    /// The connecting resource waits on a local budget (`SetupClock::begin_local_wait`).
+    Wait,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SetupCause {
     NetworkAggregate,
     NetworkStall,
     LocalDeadline,
+    /// A wait on a local budget outlasted the allocation.
+    LocalWaitExpired,
     PreparationDeadline,
     Cancelled,
     DriverLost,

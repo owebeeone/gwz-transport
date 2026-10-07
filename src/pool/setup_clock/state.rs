@@ -124,9 +124,16 @@ impl State {
             return;
         }
         let cause = if self.local.is_some() {
+            let phase = self.local;
             self.local_until
                 .filter(|until| *until <= self.now)
-                .map(|_| SetupCause::LocalDeadline)
+                .map(|_| {
+                    if phase == Some(LocalPhase::Wait) {
+                        SetupCause::LocalWaitExpired
+                    } else {
+                        SetupCause::LocalDeadline
+                    }
+                })
         } else {
             let aggregate = self.aggregate.deadline().filter(|until| *until <= self.now);
             let stall = self.stall.deadline().filter(|until| *until <= self.now);

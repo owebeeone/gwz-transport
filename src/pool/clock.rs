@@ -47,6 +47,7 @@ impl PoolMachine {
                                         ConnectClock::Interaction { .. } => {
                                             Error::InteractionTimeout
                                         }
+                                        ConnectClock::LocalWait { .. } => Error::LocalWaitExpired,
                                         ConnectClock::Shared(_) => unreachable!(),
                                     })
                             }
@@ -210,5 +211,106 @@ impl PoolMachine {
         };
         *clock = ConnectClock::Network(resumed);
         Ok(())
+    }
+    /// Pause the network-connect budget while the connecting resource waits
+    /// on a local budget. Only the request's allocation deadline bounds the
+    /// wait. Reporting a wait that is already reported changes nothing.
+    pub fn begin_local_wait(&mut self, connection: ConnectionId) -> Result<(), Error> {
+        let entry = self.entries.get(&connection).ok_or(Error::Stale)?;
+        let State::Opening {
+            request,
+            clock: Some(clock),
+            cancel: None,
+            ..
+        } = &entry.state
+        else {
+            return Err(Error::WrongState);
+        };
+        let allocation = request
+            .and_then(|id| self.requests.get(&id))
+            .map(|pending| pending.deadline);
+        match clock {
+            ConnectClock::LocalWait { .. } => Ok(()),
+            ConnectClock::Interaction { .. } => Err(Error::WrongState),
+            ConnectClock::Network(until) => {
+                let Some(allocation) = allocation else {
+                    return Err(Error::WrongState);
+                };
+                let remaining = until.map(|deadline| deadline.saturating_sub(self.now));
+                if remaining == Some(0) {
+                    return Err(Error::ConnectTimeout);
+                }
+                if allocation <= self.now {
+                    return Err(Error::LocalWaitExpired);
+                }
+                self.set_connect_clock(
+                    connection,
+                    ConnectClock::LocalWait {
+                        until: allocation,
+                        remaining,
+                    },
+                );
+                Ok(())
+            }
+            ConnectClock::Shared(shared) => {
+                let milliseconds = allocation.map(|deadline| deadline.saturating_sub(self.now));
+                let Some(milliseconds) = milliseconds else {
+                    return Err(Error::WrongState);
+                };
+                let shared = shared.clone();
+                match self.absorb_clock_update(shared.begin_local_wait(milliseconds)) {
+                    Ok(()) => Ok(()),
+                    Err(PublicationError::ActiveTerminal(record)) => Err(Error::SetupEnded(record)),
+                    Err(_) => Err(Error::WrongState),
+                }
+            }
+        }
+    }
+    /// The wait ended: the network budget runs again from what it had left.
+    pub fn end_local_wait(&mut self, connection: ConnectionId) -> Result<(), Error> {
+        let entry = self.entries.get(&connection).ok_or(Error::Stale)?;
+        let State::Opening {
+            request,
+            clock: Some(clock),
+            cancel: None,
+            ..
+        } = &entry.state
+        else {
+            return Err(Error::WrongState);
+        };
+        let absolute_deadline = request
+            .and_then(|id| self.requests.get(&id))
+            .and_then(|pending| pending.absolute_deadline);
+        match clock {
+            ConnectClock::LocalWait { remaining, .. } => {
+                let resumed = remaining.map(|remaining| self.now.saturating_add(remaining));
+                let resumed = match (resumed, absolute_deadline) {
+                    (Some(network), Some(absolute)) => Some(network.min(absolute)),
+                    (None, Some(absolute)) => Some(absolute),
+                    (network, None) => network,
+                };
+                self.set_connect_clock(connection, ConnectClock::Network(resumed));
+                Ok(())
+            }
+            ConnectClock::Shared(shared) => {
+                let shared = shared.clone();
+                match self.absorb_clock_update(shared.end_local_wait()) {
+                    Ok(()) => Ok(()),
+                    Err(PublicationError::ActiveTerminal(record)) => Err(Error::SetupEnded(record)),
+                    Err(_) => Err(Error::WrongState),
+                }
+            }
+            _ => Err(Error::WrongState),
+        }
+    }
+    fn set_connect_clock(&mut self, connection: ConnectionId, next: ConnectClock) {
+        if let Some(Entry {
+            state: State::Opening { clock, .. },
+            ..
+        }) = self.entries.get_mut(&connection)
+        {
+            *clock = Some(next);
+        }
+        self.touch();
     }
 }

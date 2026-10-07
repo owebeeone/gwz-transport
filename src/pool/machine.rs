@@ -50,14 +50,24 @@ pub(super) enum State {
 #[derive(Clone)]
 pub(super) enum ConnectClock {
     Network(Option<u64>),
-    Interaction { until: u64, remaining: Option<u64> },
+    Interaction {
+        until: u64,
+        remaining: Option<u64>,
+    },
+    /// The network budget is paused while the resource waits on a local
+    /// budget. Only the request's allocation deadline (`until`) bounds the
+    /// wait; `remaining` is what the network budget had left.
+    LocalWait {
+        until: u64,
+        remaining: Option<u64>,
+    },
     Shared(SetupClock),
 }
 impl ConnectClock {
     pub fn deadline(&self) -> Option<u64> {
         match self {
             Self::Network(until) => *until,
-            Self::Interaction { until, .. } => Some(*until),
+            Self::Interaction { until, .. } | Self::LocalWait { until, .. } => Some(*until),
             Self::Shared(clock) => clock.cached_deadline(),
         }
     }

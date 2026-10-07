@@ -409,6 +409,16 @@ impl PoolDriver {
         self.shared
             .change(|state| state.machine.end_interaction(connection))
     }
+    /// The connecting resource waits on a local budget: the connect clock is
+    /// paused, and only the request's allocation bounds the wait.
+    pub fn begin_local_wait(&self, connection: ConnectionId) -> Result<(), Error> {
+        self.shared
+            .change(|state| state.machine.begin_local_wait(connection))
+    }
+    pub fn end_local_wait(&self, connection: ConnectionId) -> Result<(), Error> {
+        self.shared
+            .change(|state| state.machine.end_local_wait(connection))
+    }
     pub fn shutdown_complete(&self) -> bool {
         self.shared
             .change(|state| state.machine.shutdown_complete())

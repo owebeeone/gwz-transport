@@ -224,6 +224,7 @@ impl PoolMachine {
             let error = match clock.as_ref().expect("connected opening clock") {
                 ConnectClock::Network(_) => Error::ConnectTimeout,
                 ConnectClock::Interaction { .. } => Error::InteractionTimeout,
+                ConnectClock::LocalWait { .. } => Error::LocalWaitExpired,
                 ConnectClock::Shared(_) => unreachable!(),
             };
             if let Some(id) = request {
