@@ -291,6 +291,10 @@ receive windows, 16 KiB payload, 100 ms coalescing, 5,000 ms close timeout,
 window to its agreed advertisement. Stream IDs must be unique within a session.
 Pool key, identity and owner are mandatory in `Request::new`; optional request
 allocation/connect/interaction overrides default to `None` (use pool policy).
+`fresh` defaults to false; a fresh request never leases an idle connection and
+is served by a new one, evicting an idle one for room if it must. A host asks
+for one when a reused connection was found dead before its exchange wrote a
+byte, so that the retry cannot take another dead idle connection.
 
 ## Try the fake host locally
 

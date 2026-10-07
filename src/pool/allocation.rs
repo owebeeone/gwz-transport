@@ -16,6 +16,9 @@ impl PoolMachine {
         // cannot steal the compatible idle resource of a later waiter.
         for id in &waiting {
             let request = &self.requests[id].request;
+            if request.fresh {
+                continue;
+            }
             let idle = self.entries.iter().find_map(|(connection, entry)| {
                 (matches!(entry.state, State::Idle { .. })
                     && entry.key == request.key

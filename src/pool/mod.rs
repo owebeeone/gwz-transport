@@ -184,6 +184,9 @@ pub struct Request {
     pub allocation_timeout_ms: Option<u64>,
     pub connect_timeout_ms: Option<u64>,
     pub interaction_timeout_ms: Option<u64>,
+    /// Never lease an idle connection: open a new one, or evict an idle one
+    /// for room, as for a request no idle connection is compatible with.
+    pub fresh: bool,
 }
 impl Request {
     pub fn new(key: Key, identity: Identity, owner: Owner) -> Self {
@@ -194,6 +197,7 @@ impl Request {
             allocation_timeout_ms: None,
             connect_timeout_ms: None,
             interaction_timeout_ms: None,
+            fresh: false,
         }
     }
     fn valid(&self, config: &Config) -> bool {
