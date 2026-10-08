@@ -58,9 +58,12 @@ acknowledges admission to the bounded read adapter. An endpoint adapter must
 only read as much as it can hand to its sink or another explicitly bounded
 buffer. Flush is not confirmation of a Git operation. End-write preserves the
 reverse direction. Close drains/discards unread response data and exposes that
-fact in its result. The endpoint host calls `complete_close` only after backend
-cleanup has proved whether a connection is reusable. This crate does not infer
-that health or implement SSH, HTTPS or credentials.
+fact in its result. The endpoint host calls `complete_close` when the exchange's
+result is final. Closed reports the exchange: it does not assert the state of
+the physical connection, which the lease's release alone settles (a host may
+finish closing the channel after the member has its Closed, and discard the
+connection if that close fails). This crate does not infer that health or
+implement SSH, HTTPS or credentials.
 
 Peer failures expose their exact `ErrorCode` and `Effect` through
 `Error::PeerFailed { code, effect }`, after any received byte prefix. `Cancel`

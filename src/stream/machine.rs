@@ -172,8 +172,12 @@ impl StreamMachine {
         Ok(())
     }
 
-    /// The endpoint calls this only after its sink/network cleanup is complete.
-    /// The stream never infers reusable connection health or Git success itself.
+    /// The endpoint calls this when the exchange's result is final. Closed
+    /// reports the exchange; it does not assert the state of the physical
+    /// connection, which the lease's release alone settles: a host may finish
+    /// closing the channel after this, and discard the connection if that
+    /// fails. The stream never infers reusable connection health or Git
+    /// success itself.
     pub fn complete_close(&mut self, disposition: Disposition, facts: Facts) -> Result<(), Error> {
         self.complete_close_with_failure(disposition, facts, None)
     }
