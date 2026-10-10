@@ -99,6 +99,15 @@ impl PoolControl {
     pub fn discard_idle(&self, site: &Site) -> usize {
         self.shared.change(|state| state.machine.discard_idle(site))
     }
+    /// Whether evictions are stopped on `site`.
+    pub fn no_evict(&self, site: &Site) -> bool {
+        self.shared.change(|state| state.machine.no_evict(site))
+    }
+    /// Stops or allows idle eviction on `site`; see `PoolMachine::set_no_evict`.
+    pub fn set_no_evict(&self, site: &Site, on: bool) -> Result<(), Error> {
+        self.shared
+            .change(|state| state.machine.set_no_evict(site, on))
+    }
 }
 #[must_use = "dropping a checkout cancels the allocation"]
 pub struct Checkout {
@@ -197,6 +206,14 @@ impl Pool {
     /// `PoolControl::discard_idle`.
     pub fn discard_idle(&self, site: &Site) -> usize {
         self.control().discard_idle(site)
+    }
+    /// `PoolControl::no_evict`.
+    pub fn no_evict(&self, site: &Site) -> bool {
+        self.control().no_evict(site)
+    }
+    /// `PoolControl::set_no_evict`.
+    pub fn set_no_evict(&self, site: &Site, on: bool) -> Result<(), Error> {
+        self.control().set_no_evict(site, on)
     }
     /// Begins allocation immediately; an unpolled future still owns a bounded
     /// request slot and cancels it when dropped.

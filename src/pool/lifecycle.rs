@@ -291,6 +291,9 @@ impl PoolMachine {
             let absolute_deadline = request
                 .and_then(|id| self.requests.get(&id))
                 .and_then(|pending| pending.absolute_deadline);
+            let tag = request
+                .and_then(|id| self.requests.get(&id))
+                .and_then(|pending| pending.request.tag.clone());
             if let State::Opening {
                 clock,
                 network_ms,
@@ -311,6 +314,7 @@ impl PoolMachine {
                     key: entry.key.clone(),
                     identity: entry.identity.clone(),
                     network_deadline: deadline,
+                    tag: tag.clone(),
                 };
                 self.touch();
                 return Some(action);

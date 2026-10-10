@@ -76,6 +76,31 @@ impl PoolMachine {
             .filter(|hold| hold.key.on_site(site))
             .count()
     }
+    /// Stops (or allows again) evicting idle connections for a request waiting
+    /// on `site`: the request waits for room instead, which the host asks for
+    /// while a due test needs the key quiet. Other closes are not affected.
+    /// Lives until the next `install_capacity`.
+    pub fn set_no_evict(&mut self, site: &Site, on: bool) -> Result<(), Error> {
+        self.accepts_numbers()?;
+        if !site.valid() {
+            return Err(Error::InvalidRequest);
+        }
+        let known = self.no_evicts.iter().position(|known| known == site);
+        match (on, known) {
+            (true, None) => self.no_evicts.push(site.clone()),
+            (false, Some(index)) => {
+                self.no_evicts.swap_remove(index);
+            }
+            _ => return Ok(()),
+        }
+        self.schedule();
+        self.touch();
+        Ok(())
+    }
+    /// Whether evictions are stopped on `site`.
+    pub fn no_evict(&self, site: &Site) -> bool {
+        self.no_evicts.contains(site)
+    }
     /// Closes every idle connection of `site` at once, whatever its username
     /// or identity, as `Discarded`; each is then disposed by the host and
     /// acknowledged by `closed`. No request is involved and nothing is

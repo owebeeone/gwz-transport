@@ -109,6 +109,8 @@ pub struct PoolMachine {
     /// operation in force. Scheme is not `Eq`, so these are small lists.
     pub(super) limits: Vec<(Site, usize)>,
     pub(super) settles: Vec<(Site, u64)>,
+    /// Sites where the host has stopped idle eviction.
+    pub(super) no_evicts: Vec<Site>,
     pub(super) holds: BTreeMap<ConnectionId, Hold>,
     pub(super) stopped: bool,
     pub(super) driver_lost: bool,
@@ -133,6 +135,7 @@ impl PoolMachine {
             entries: BTreeMap::new(),
             limits: Vec::new(),
             settles: Vec::new(),
+            no_evicts: Vec::new(),
             holds: BTreeMap::new(),
             stopped: false,
             driver_lost: false,
@@ -175,6 +178,7 @@ impl PoolMachine {
         // Limits, settle times and holds belong to the operation that set them.
         self.limits.clear();
         self.settles.clear();
+        self.no_evicts.clear();
         self.holds.clear();
 
         let mut kept_total = 0usize;

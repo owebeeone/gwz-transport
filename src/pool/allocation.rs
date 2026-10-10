@@ -60,6 +60,9 @@ impl PoolMachine {
                 continue;
             }
             let key = &pending.request.key;
+            if self.no_evicts.iter().any(|site| key.on_site(site)) {
+                continue;
+            }
             let user_host_full = self.user_host_total(key) >= self.config.per_user_host;
             let host_full = self.host_total(&key.host) >= self.config.per_host;
             let site_full = self.site_full(key);

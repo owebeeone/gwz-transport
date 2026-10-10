@@ -215,8 +215,13 @@ evicted its connection, and that request is served first when it lapses. A
 connection the server dropped during setup, or lost while idle, leaves no hold;
 a connect the client cancelled does. `discard_idle(&site)` closes every idle
 connection of the site at once as `Discarded` and returns how many; it is not an
-eviction. `clear_limit` and `limit` remove and read a limit. `install_capacity`
-clears limits, settle times and holds, which belong to one operation. `Pool`
+eviction. `set_no_evict(&site, true)` stops evicting idle connections of other
+identities for a request waiting on the site (it waits for room instead; other
+closes are unaffected) and `no_evict` reads it. A `Request` may carry an opaque
+`tag`, which the pool hands back on the `Connect` action of the connection that
+request opens and reads for nothing else; a host uses it to know which member a
+connection serves. `clear_limit` and `limit` remove and read a limit. `install_capacity`
+clears limits, settle times, eviction switches and holds, which belong to one operation. `Pool`
 offers the same calls, and `Pool::control()` (also `PoolDriver::control()`)
 returns a `PoolControl` with them that is not an owner: dropping the last `Pool`
 still shuts the pool down, after which the control takes no new numbers

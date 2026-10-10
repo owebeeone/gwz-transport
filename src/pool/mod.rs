@@ -222,6 +222,10 @@ pub struct Request {
     /// Never lease an idle connection: open a new one, or evict an idle one
     /// for room, as for a request no idle connection is compatible with.
     pub fresh: bool,
+    /// An opaque tag the host reads back on the `Connect` action of the
+    /// connection this request opens (and nowhere else): it names the member
+    /// the connection serves. The pool decides nothing by it.
+    pub tag: Option<String>,
 }
 impl Request {
     pub fn new(key: Key, identity: Identity, owner: Owner) -> Self {
@@ -233,6 +237,7 @@ impl Request {
             connect_timeout_ms: None,
             interaction_timeout_ms: None,
             fresh: false,
+            tag: None,
         }
     }
     fn valid(&self, config: &Config) -> bool {
@@ -343,6 +348,9 @@ pub enum Action {
         key: Key,
         identity: Identity,
         network_deadline: Option<u64>,
+        /// The tag of the request that opened the connection, if it still
+        /// waits for it.
+        tag: Option<String>,
     },
     CancelConnect {
         connection: ConnectionId,

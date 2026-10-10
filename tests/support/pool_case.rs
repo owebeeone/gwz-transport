@@ -132,6 +132,7 @@ impl Case {
                 key,
                 identity,
                 network_deadline,
+                ..
             } => {
                 self.record(format!(
                     "connect {} {key:?} {identity:?} {network_deadline:?}",
