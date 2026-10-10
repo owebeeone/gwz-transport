@@ -198,6 +198,31 @@ leaves that exclusive lease untouched: route the I/O failure to its active
 exchange, whose host must discard the lease and acknowledge cleanup. This
 callback never cancels a lease using an old idle observation.
 
+A host that adapts its concurrency to what a server allows sets numbers on a
+`Site`, which is scheme, configured host and effective port (`Key::site()`),
+never the username. `set_limit(&site, n)` caps the connections on the site
+(opening, idle, leased, closing and settling holds) next to `per_host` and
+`per_user_host`, in creation and in idle eviction; it applies only to the
+site's own connections, so unlike `per_host` it does not count other ports.
+Lowering it closes nothing: requests wait and idle connections of the site are
+evicted for them. A test request that must open a new connection beside an idle
+one is `Request::fresh` with the limit raised for its duration.
+`set_settle(&site, ms)` makes a slot freed by `closed` a settling hold for `ms`
+(zero holds none): the hold counts in the host, user-host and site totals, so a
+replacement cannot start while the server may still count the old connection,
+and `next_deadline` includes its expiry. A hold remembers the request that
+evicted its connection, and that request is served first when it lapses. A
+connection the server dropped during setup, or lost while idle, leaves no hold;
+a connect the client cancelled does. `discard_idle(&site)` closes every idle
+connection of the site at once as `Discarded` and returns how many; it is not an
+eviction. `clear_limit` and `limit` remove and read a limit. `install_capacity`
+clears limits, settle times and holds, which belong to one operation. `Pool`
+offers the same calls, and `Pool::control()` (also `PoolDriver::control()`)
+returns a `PoolControl` with them that is not an owner: dropping the last `Pool`
+still shuts the pool down, after which the control takes no new numbers
+(`Shutdown`). `settle` and `limit` read the numbers back. The pool learns no
+error codes; none of this is on the wire.
+
 Limits default to 32 connections per user/host across ports
 (`per_user_host`) and 32 per host across users, ports and schemes
 (`per_host`), plus 256 per endpoint and 1,024 outstanding requests. HTTPS has a

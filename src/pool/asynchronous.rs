@@ -64,6 +64,42 @@ pub struct Pool {
 pub struct PoolDriver {
     shared: Arc<Shared>,
 }
+/// The numbers a host sets on the pool's sites (`set_limit`, `set_settle`,
+/// `discard_idle`), through a handle that holds the pool's state but is not an
+/// owner: dropping the last `Pool` still shuts the pool down, and a stopped
+/// pool takes no new numbers. Cloneable and `Send`.
+#[derive(Clone)]
+pub struct PoolControl {
+    shared: Arc<Shared>,
+}
+impl PoolControl {
+    /// Sets the number of connections the pool may hold on `site` at once;
+    /// see `PoolMachine::set_limit`.
+    pub fn set_limit(&self, site: &Site, limit: usize) -> Result<(), Error> {
+        self.shared
+            .change(|state| state.machine.set_limit(site, limit))
+    }
+    pub fn clear_limit(&self, site: &Site) {
+        self.shared.change(|state| state.machine.clear_limit(site));
+    }
+    pub fn limit(&self, site: &Site) -> Option<usize> {
+        self.shared.change(|state| state.machine.limit(site))
+    }
+    /// How long a disposed slot of `site` stays held; see
+    /// `PoolMachine::set_settle`.
+    pub fn set_settle(&self, site: &Site, milliseconds: u64) -> Result<(), Error> {
+        self.shared
+            .change(|state| state.machine.set_settle(site, milliseconds))
+    }
+    pub fn settle(&self, site: &Site) -> u64 {
+        self.shared.change(|state| state.machine.settle(site))
+    }
+    /// Closes every idle connection of `site` in one step under the pool's
+    /// lock; see `PoolMachine::discard_idle`.
+    pub fn discard_idle(&self, site: &Site) -> usize {
+        self.shared.change(|state| state.machine.discard_idle(site))
+    }
+}
 #[must_use = "dropping a checkout cancels the allocation"]
 pub struct Checkout {
     shared: Arc<Shared>,
@@ -133,6 +169,34 @@ impl Pool {
             waker.wake();
         }
         Ok(())
+    }
+    /// A handle for the numbers a host sets on the pool's sites; see
+    /// [`PoolControl`]. Unlike a `Pool` clone it is not an owner.
+    pub fn control(&self) -> PoolControl {
+        PoolControl {
+            shared: self.shared.clone(),
+        }
+    }
+    /// `PoolControl::set_limit`.
+    pub fn set_limit(&self, site: &Site, limit: usize) -> Result<(), Error> {
+        self.control().set_limit(site, limit)
+    }
+    pub fn clear_limit(&self, site: &Site) {
+        self.control().clear_limit(site);
+    }
+    pub fn limit(&self, site: &Site) -> Option<usize> {
+        self.control().limit(site)
+    }
+    /// `PoolControl::set_settle`.
+    pub fn set_settle(&self, site: &Site, milliseconds: u64) -> Result<(), Error> {
+        self.control().set_settle(site, milliseconds)
+    }
+    pub fn settle(&self, site: &Site) -> u64 {
+        self.control().settle(site)
+    }
+    /// `PoolControl::discard_idle`.
+    pub fn discard_idle(&self, site: &Site) -> usize {
+        self.control().discard_idle(site)
     }
     /// Begins allocation immediately; an unpolled future still owns a bounded
     /// request slot and cancels it when dropped.
@@ -288,6 +352,12 @@ impl Drop for DriverWaiter {
     }
 }
 impl PoolDriver {
+    /// A handle for the numbers a host sets on the pool's sites.
+    pub fn control(&self) -> PoolControl {
+        PoolControl {
+            shared: self.shared.clone(),
+        }
+    }
     /// Allocation remaining when the Connect action was dispatched, before
     /// network setup begins. Local admission may retain this ordinary budget.
     pub fn opening_allocation_remaining(&self, connection: ConnectionId) -> Option<u64> {

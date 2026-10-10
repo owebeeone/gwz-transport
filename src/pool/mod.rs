@@ -7,10 +7,11 @@ mod allocation;
 mod asynchronous;
 mod clock;
 mod lifecycle;
+mod limit;
 mod machine;
 mod setup;
 mod setup_clock;
-pub use asynchronous::{Checkout, Lease, Pool, PoolDriver};
+pub use asynchronous::{Checkout, Lease, Pool, PoolControl, PoolDriver};
 pub use machine::PoolMachine;
 pub use setup_clock::{
     ClockUpdate, LocalPhase, Observation, PhaseId, PreparedPhase, PublicationError, SetupCause,
@@ -111,25 +112,59 @@ impl Key {
             port,
         }
     }
+    /// The site this key's connections count against a limit on: scheme,
+    /// configured host and effective port, whatever the username.
+    pub fn site(&self) -> Site {
+        Site {
+            scheme: self.scheme,
+            host: self.host.clone(),
+            port: self.port,
+        }
+    }
     fn same_user_host(&self, other: &Self) -> bool {
         self.host == other.host && self.username == other.username
     }
+    fn same_site(&self, other: &Self) -> bool {
+        self.scheme.wire() == other.scheme.wire()
+            && self.host == other.host
+            && self.port == other.port
+    }
+    fn on_site(&self, site: &Site) -> bool {
+        self.scheme.wire() == site.scheme.wire() && self.host == site.host && self.port == site.port
+    }
     fn valid(&self) -> bool {
-        !self.host.is_empty()
-            && self.host.len() <= 255
-            && self.port != 0
-            && !self
-                .host
-                .chars()
-                .any(|c| c.is_control() || c.is_whitespace() || "@/?#\\".contains(c))
+        valid_site(&self.host, self.port)
             && match self.scheme {
                 Scheme::Ssh => self.username.as_ref().is_some_and(|s| bounded_text(s, 128)),
                 Scheme::Https => self.username.is_none(),
             }
     }
 }
+fn valid_site(host: &str, port: u16) -> bool {
+    !host.is_empty()
+        && host.len() <= 255
+        && port != 0
+        && !host
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || "@/?#\\".contains(c))
+}
 fn bounded_text(text: &str, max: usize) -> bool {
     !text.is_empty() && text.len() <= max && !text.chars().any(char::is_control)
+}
+
+/// What a host's per-site limit and settle time are keyed by: scheme,
+/// configured host and effective port. The username is not part of it, because
+/// a server's connection limit does not see one before authentication.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Site {
+    pub scheme: Scheme,
+    pub host: String,
+    pub port: u16,
+}
+impl Site {
+    fn valid(&self) -> bool {
+        valid_site(&self.host, self.port)
+    }
 }
 
 /// Explicit proofs must be resolved and validated by the endpoint for each

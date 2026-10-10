@@ -192,7 +192,7 @@ impl PoolMachine {
                 return Err(Error::WrongState);
             }
         }
-        self.entries.remove(&connection);
+        self.dispose(connection, true);
         self.schedule();
         self.touch();
         Ok(())
@@ -221,6 +221,7 @@ impl PoolMachine {
     }
     fn stop(&mut self, error: Error, reason: CloseReason) {
         self.stopped = true;
+        self.holds.clear();
         let requests: Vec<_> = self.requests.keys().copied().collect();
         for id in requests {
             let _ = self.fail_request(id, error, reason);

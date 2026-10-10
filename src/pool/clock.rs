@@ -75,6 +75,7 @@ impl PoolMachine {
         for id in idle {
             self.start_closing(id, CloseReason::IdleExpired);
         }
+        self.lapse_holds();
         self.schedule();
         // A sent cleanup command becomes abortable at its deadline. Preserve
         // that wakeup without waking on ordinary clock bookkeeping.
@@ -138,7 +139,7 @@ impl PoolMachine {
                 } => clock.deadline(),
                 _ => None,
             });
-        queue.chain(resources).min()
+        queue.chain(resources).chain(self.next_hold_expiry()).min()
     }
     /// Pause only the network-connect budget for a bounded helper interaction.
     /// Repeated interactions share the original total interaction allowance.

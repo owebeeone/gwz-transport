@@ -48,66 +48,21 @@ impl PoolMachine {
             }
         }
         for id in &waiting {
-            let pending = &self.requests[id];
-            if !matches!(pending.state, RequestState::Waiting) {
-                continue;
-            }
-            let key = &pending.request.key;
-            if self.entries.len() >= self.config.total
-                || self.counts_for_user_host(key).total() >= self.config.per_user_host
-                || self.counts_for_host(&key.host).total() >= self.config.per_host
-            {
-                continue;
-            }
-            let Some(serial) = self.connection_serial.checked_add(1) else {
-                self.requests.get_mut(id).expect("waiting request").state =
-                    RequestState::Failed(Error::Capacity);
-                continue;
-            };
-            self.connection_serial = serial;
-            let connection = ConnectionId {
-                pool: self.pool_id,
-                serial,
-            };
-            let pending = self.requests.get_mut(id).expect("waiting request");
-            let request = &pending.request;
-            self.entries.insert(
-                connection,
-                Entry {
-                    key: request.key.clone(),
-                    identity: request.identity.clone(),
-                    reusable: false,
-                    owner: Some(request.owner.clone()),
-                    state: State::Opening {
-                        request: Some(*id),
-                        clock: None,
-                        network_ms: request
-                            .connect_timeout_ms
-                            .unwrap_or(self.config.connect_timeout_ms),
-                        interaction_ms: request
-                            .interaction_timeout_ms
-                            .unwrap_or(self.config.interaction_timeout_ms),
-                        cancel: None,
-                    },
-                },
-            );
-            pending.state = RequestState::Opening(connection);
-            pending.eviction = None;
-            self.touch();
+            self.open_for(*id);
         }
         for id in waiting {
             let pending = &self.requests[&id];
             if !matches!(pending.state, RequestState::Waiting)
-                || pending
-                    .eviction
-                    .is_some_and(|victim| self.entries.contains_key(&victim))
+                || pending.eviction.is_some_and(|victim| {
+                    self.entries.contains_key(&victim) || self.holds.contains_key(&victim)
+                })
             {
                 continue;
             }
             let key = &pending.request.key;
-            let user_host_full =
-                self.counts_for_user_host(key).total() >= self.config.per_user_host;
-            let host_full = self.counts_for_host(&key.host).total() >= self.config.per_host;
+            let user_host_full = self.user_host_total(key) >= self.config.per_user_host;
+            let host_full = self.host_total(&key.host) >= self.config.per_host;
+            let site_full = self.site_full(key);
             let victim = self
                 .entries
                 .iter()
@@ -115,6 +70,7 @@ impl PoolMachine {
                     if let State::Idle { since } = entry.state
                         && (!user_host_full || entry.key.same_user_host(key))
                         && (!host_full || entry.key.host == key.host)
+                        && (!site_full || entry.key.same_site(key))
                     {
                         Some((since, *connection))
                     } else {
@@ -131,6 +87,61 @@ impl PoolMachine {
                     .eviction = Some(connection);
             }
         }
+    }
+
+    /// Opens a connection for waiting request `id` when the endpoint total,
+    /// the host and user-host caps and the site limit leave room for one.
+    /// Held slots count in all but the endpoint total.
+    pub(super) fn open_for(&mut self, id: RequestId) {
+        let Some(pending) = self.requests.get(&id) else {
+            return;
+        };
+        if !matches!(pending.state, RequestState::Waiting) {
+            return;
+        }
+        let key = &pending.request.key;
+        if self.entries.len() >= self.config.total
+            || self.user_host_total(key) >= self.config.per_user_host
+            || self.host_total(&key.host) >= self.config.per_host
+            || self.site_full(key)
+        {
+            return;
+        }
+        let Some(serial) = self.connection_serial.checked_add(1) else {
+            self.requests.get_mut(&id).expect("waiting request").state =
+                RequestState::Failed(Error::Capacity);
+            return;
+        };
+        self.connection_serial = serial;
+        let connection = ConnectionId {
+            pool: self.pool_id,
+            serial,
+        };
+        let pending = self.requests.get_mut(&id).expect("waiting request");
+        let request = &pending.request;
+        self.entries.insert(
+            connection,
+            Entry {
+                key: request.key.clone(),
+                identity: request.identity.clone(),
+                reusable: false,
+                owner: Some(request.owner.clone()),
+                state: State::Opening {
+                    request: Some(id),
+                    clock: None,
+                    network_ms: request
+                        .connect_timeout_ms
+                        .unwrap_or(self.config.connect_timeout_ms),
+                    interaction_ms: request
+                        .interaction_timeout_ms
+                        .unwrap_or(self.config.interaction_timeout_ms),
+                    cancel: None,
+                },
+            },
+        );
+        pending.state = RequestState::Opening(connection);
+        pending.eviction = None;
+        self.touch();
     }
 
     /// Only the connector that received Connect may acknowledge this token.
@@ -192,7 +203,10 @@ impl PoolMachine {
                         RequestState::Failed(Error::SetupEnded(record));
                 }
                 if result.is_err() {
-                    self.entries.remove(&connection);
+                    // A server refusal leaves no hold; a connect the client
+                    // cancelled does, for the server may still count it.
+                    let cancelled = self.cancelled_connect(connection);
+                    self.dispose(connection, cancelled);
                 } else {
                     self.start_closing(connection, CloseReason::Cancelled);
                 }
@@ -237,7 +251,7 @@ impl PoolMachine {
         let cancelled = cancel.is_some();
         match result {
             Err(failure) => {
-                self.entries.remove(&connection);
+                self.dispose(connection, cancelled);
                 if let Some(id) = request {
                     self.requests.get_mut(&id).expect("opening request").state =
                         RequestState::Failed(Error::ConnectFailed {

@@ -72,6 +72,15 @@ impl ConnectClock {
         }
     }
 }
+/// A slot the host has disposed of, held until the server has had time to
+/// stop counting its connection. It counts in the host, user-host and site
+/// totals, holds no resource, and carries the request that evicted its
+/// connection, which is served first when the hold lapses.
+pub(super) struct Hold {
+    pub key: Key,
+    pub expires: u64,
+    pub evictor: Option<RequestId>,
+}
 pub(super) struct Cleanup {
     pub deadline: u64,
     pub sent: bool,
@@ -96,6 +105,11 @@ pub struct PoolMachine {
     pub(super) lease_serial: u64,
     pub(super) requests: BTreeMap<RequestId, Pending>,
     pub(super) entries: BTreeMap<ConnectionId, Entry>,
+    /// Per-site admission targets and settle times, set by the host for the
+    /// operation in force. Scheme is not `Eq`, so these are small lists.
+    pub(super) limits: Vec<(Site, usize)>,
+    pub(super) settles: Vec<(Site, u64)>,
+    pub(super) holds: BTreeMap<ConnectionId, Hold>,
     pub(super) stopped: bool,
     pub(super) driver_lost: bool,
     pub(super) revision: u64,
@@ -117,6 +131,9 @@ impl PoolMachine {
             lease_serial: 0,
             requests: BTreeMap::new(),
             entries: BTreeMap::new(),
+            limits: Vec::new(),
+            settles: Vec::new(),
+            holds: BTreeMap::new(),
             stopped: false,
             driver_lost: false,
             revision: 0,
@@ -155,6 +172,10 @@ impl PoolMachine {
         self.config.per_host = capacity.per_host;
         self.config.total = capacity.total;
         self.config.max_requests = capacity.max_requests;
+        // Limits, settle times and holds belong to the operation that set them.
+        self.limits.clear();
+        self.settles.clear();
+        self.holds.clear();
 
         let mut kept_total = 0usize;
         let mut kept_hosts = BTreeMap::<String, usize>::new();
@@ -279,7 +300,7 @@ impl PoolMachine {
     pub fn shutdown_complete(&self) -> bool {
         self.stopped && self.entries.is_empty()
     }
-    fn count_where(&self, predicate: impl Fn(&Entry) -> bool) -> Counts {
+    pub(super) fn count_where(&self, predicate: impl Fn(&Entry) -> bool) -> Counts {
         let mut counts = Counts::default();
         for entry in self.entries.values().filter(|entry| predicate(entry)) {
             match entry.state {
