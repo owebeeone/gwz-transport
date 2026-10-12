@@ -210,6 +210,32 @@
     },
     {
       "member_options": {
+        "local": {},
+        "server_retry_after": {},
+        "server_throttle": {}
+      },
+      "members": {
+        "local": 3,
+        "server_retry_after": 2,
+        "server_throttle": 1
+      },
+      "name": "CapacityCause",
+      "options": {}
+    },
+    {
+      "member_options": {
+        "http_429": {},
+        "http_503": {}
+      },
+      "members": {
+        "http_429": 1,
+        "http_503": 2
+      },
+      "name": "CapacitySignal",
+      "options": {}
+    },
+    {
+      "member_options": {
         "none": {},
         "possible": {}
       },
@@ -753,6 +779,127 @@
       "fields": [
         {
           "merge": null,
+          "name": "cause",
+          "optional": false,
+          "options": {},
+          "tag": 1,
+          "transient": false,
+          "type": {
+            "k": "enum",
+            "name": "CapacityCause"
+          }
+        },
+        {
+          "merge": null,
+          "name": "scheme",
+          "optional": "missing_ok",
+          "options": {},
+          "tag": 2,
+          "transient": false,
+          "type": {
+            "k": "enum",
+            "name": "Scheme"
+          }
+        },
+        {
+          "merge": null,
+          "name": "host",
+          "optional": "missing_ok",
+          "options": {},
+          "tag": 3,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "str"
+          }
+        },
+        {
+          "merge": null,
+          "name": "port",
+          "optional": "missing_ok",
+          "options": {},
+          "tag": 4,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "limit_applied",
+          "optional": "missing_ok",
+          "options": {},
+          "tag": 5,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "max_per_host",
+          "optional": "missing_ok",
+          "options": {},
+          "tag": 6,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "elapsed_ms",
+          "optional": "missing_ok",
+          "options": {},
+          "tag": 7,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "last_signal",
+          "optional": "missing_ok",
+          "options": {},
+          "tag": 8,
+          "transient": false,
+          "type": {
+            "k": "enum",
+            "name": "CapacitySignal"
+          }
+        },
+        {
+          "merge": null,
+          "name": "retry_after_ms",
+          "optional": "missing_ok",
+          "options": {},
+          "tag": 9,
+          "transient": false,
+          "type": {
+            "k": "scalar",
+            "scalar": "int"
+          }
+        }
+      ],
+      "name": "CapacityDetail",
+      "next_id": null,
+      "options": {},
+      "reserved_names": [],
+      "reserved_tags": []
+    },
+    {
+      "effective": {
+        "max_depth": 32,
+        "max_encoded_len": null
+      },
+      "fields": [
+        {
+          "merge": null,
           "name": "helper_cause",
           "optional": "missing_ok",
           "options": {},
@@ -812,6 +959,18 @@
           "type": {
             "k": "scalar",
             "scalar": "int"
+          }
+        },
+        {
+          "merge": null,
+          "name": "capacity",
+          "optional": "missing_ok",
+          "options": {},
+          "tag": 6,
+          "transient": false,
+          "type": {
+            "k": "msg",
+            "name": "CapacityDetail"
           }
         }
       ],

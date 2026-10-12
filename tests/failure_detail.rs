@@ -2,8 +2,8 @@ use gwz_transport::{
     cbor::{self, Cbor},
     codec,
     protocol::{
-        Effect, Envelope, ErrorCode, Failure, FailureDetail, HelperFailureCause, MessageKind,
-        RetryAttempt,
+        CapacityCause, CapacityDetail, CapacitySignal, Effect, Envelope, ErrorCode, Failure,
+        FailureDetail, HelperFailureCause, MessageKind, RetryAttempt, Scheme,
     },
 };
 
@@ -430,4 +430,441 @@ fn retained_incoming_failure_moves_the_first_admitted_answer_and_ignores_late_te
     cancelled.cancel();
     cancelled.receive(make("Basic")).unwrap();
     assert!(cancelled.retained_failure().is_none());
+}
+
+// Capacity detail (gwz-core's adaptive concurrency design, section 5.3). The code
+// and the cause travel together; the detail holds counts, milliseconds and the
+// host the member configured, never a URL, a response body or a credential.
+
+fn capacity_message(code: ErrorCode, detail: FailureDetail) -> Envelope {
+    let mut value = message(detail);
+    value.open_failed.as_mut().unwrap().code = code;
+    value
+}
+
+fn throttle() -> CapacityDetail {
+    CapacityDetail {
+        cause: CapacityCause::ServerThrottle,
+        scheme: Some(Scheme::Https),
+        host: Some("github.com".into()),
+        port: Some(443),
+        limit_applied: Some(8),
+        max_per_host: Some(32),
+        elapsed_ms: Some(21_000),
+        last_signal: Some(CapacitySignal::Http429),
+        retry_after_ms: Some(2_000),
+    }
+}
+
+fn long_retry_after() -> CapacityDetail {
+    CapacityDetail {
+        cause: CapacityCause::ServerRetryAfter,
+        limit_applied: None,
+        last_signal: Some(CapacitySignal::Http503),
+        retry_after_ms: Some(120_000),
+        ..throttle()
+    }
+}
+
+fn local() -> CapacityDetail {
+    CapacityDetail {
+        cause: CapacityCause::Local,
+        ..CapacityDetail::default()
+    }
+}
+
+fn with_capacity(capacity: CapacityDetail) -> FailureDetail {
+    FailureDetail {
+        capacity: Some(capacity),
+        ..FailureDetail::default()
+    }
+}
+
+fn capacity_refused(capacity: CapacityDetail) {
+    refused_with(ErrorCode::Capacity, with_capacity(capacity));
+}
+
+fn refused_with(code: ErrorCode, detail: FailureDetail) {
+    let value = capacity_message(code, detail);
+    assert_eq!(codec::admit(&value), Err(codec::Error::InvalidMessage));
+    assert_eq!(
+        codec::decode(&cbor::encode(&value.to_cbor())),
+        Err(codec::Error::InvalidMessage)
+    );
+}
+
+#[test]
+fn the_capacity_causes_and_signals_keep_their_wire_numbers() {
+    for (cause, number) in [
+        (CapacityCause::ServerThrottle, 1),
+        (CapacityCause::ServerRetryAfter, 2),
+        (CapacityCause::Local, 3),
+    ] {
+        assert_eq!(cause.wire(), number);
+        assert_eq!(CapacityCause::from_wire(number), Ok(cause));
+    }
+    for (signal, number) in [(CapacitySignal::Http429, 1), (CapacitySignal::Http503, 2)] {
+        assert_eq!(signal.wire(), number);
+        assert_eq!(CapacitySignal::from_wire(number), Ok(signal));
+    }
+    assert!(CapacityCause::from_wire(4).is_err());
+    assert!(CapacityCause::from_wire(0).is_err());
+    assert!(CapacitySignal::from_wire(3).is_err());
+}
+
+#[test]
+fn every_capacity_cause_round_trips_beside_the_retry_attempt() {
+    for capacity in [throttle(), long_retry_after()] {
+        let detail = FailureDetail {
+            retry_attempt: Some(RetryAttempt {
+                attempt: 4,
+                attempts: 4,
+            }),
+            capacity: Some(capacity),
+            ..FailureDetail::default()
+        };
+        let value = capacity_message(ErrorCode::Capacity, detail);
+        assert_eq!(codec::decode(&codec::encode(&value).unwrap()), Ok(value));
+    }
+    let value = capacity_message(ErrorCode::Capacity, with_capacity(local()));
+    assert_eq!(codec::decode(&codec::encode(&value).unwrap()), Ok(value));
+}
+
+#[test]
+fn a_throttle_that_never_lowered_its_limit_or_hid_its_redirect_host_round_trips() {
+    for capacity in [
+        CapacityDetail {
+            limit_applied: None,
+            retry_after_ms: None,
+            ..throttle()
+        },
+        CapacityDetail {
+            scheme: None,
+            host: None,
+            port: None,
+            ..throttle()
+        },
+        CapacityDetail {
+            limit_applied: Some(32),
+            port: Some(65_535),
+            host: Some("::1".into()),
+            ..throttle()
+        },
+    ] {
+        let value = capacity_message(ErrorCode::Capacity, with_capacity(capacity));
+        assert_eq!(codec::decode(&codec::encode(&value).unwrap()), Ok(value));
+    }
+}
+
+#[test]
+fn a_detail_without_the_capacity_field_still_decodes_as_an_older_peer_encodes_it() {
+    // Field 6 absent: the keys an older producer wrote.
+    let mut detail = FailureDetail {
+        retry_attempt: Some(RetryAttempt {
+            attempt: 1,
+            attempts: 4,
+        }),
+        ..FailureDetail::default()
+    }
+    .to_cbor();
+    if let Cbor::Map(fields) = &mut detail {
+        fields.retain(|(tag, _)| *tag != 6);
+    }
+    let decoded = FailureDetail::from_cbor(&detail).unwrap();
+    assert_eq!(decoded.capacity, None);
+    assert!(decoded.retry_attempt.is_some());
+}
+
+#[test]
+fn an_unknown_capacity_cause_or_signal_is_not_a_new_diagnostic() {
+    let mut detail = throttle().to_cbor();
+    if let Cbor::Map(fields) = &mut detail {
+        fields.retain(|(tag, _)| *tag != 1);
+        fields.push((1, Cbor::Int(4)));
+    }
+    assert!(CapacityDetail::from_cbor(&detail).is_err());
+    let mut detail = throttle().to_cbor();
+    if let Cbor::Map(fields) = &mut detail {
+        fields.retain(|(tag, _)| *tag != 8);
+        fields.push((8, Cbor::Int(3)));
+    }
+    assert!(CapacityDetail::from_cbor(&detail).is_err());
+}
+
+#[test]
+fn a_capacity_detail_belongs_to_the_capacity_code_only() {
+    for code in [
+        ErrorCode::Io,
+        ErrorCode::Timeout,
+        ErrorCode::Unavailable,
+        ErrorCode::Authentication,
+        ErrorCode::RepositoryRefused,
+    ] {
+        refused_with(code, with_capacity(throttle()));
+        refused_with(code, with_capacity(local()));
+    }
+}
+
+#[test]
+fn a_local_capacity_carries_no_host_no_signal_and_no_attempt() {
+    for extra in [
+        CapacityDetail {
+            host: Some("github.com".into()),
+            ..local()
+        },
+        CapacityDetail {
+            scheme: Some(Scheme::Https),
+            ..local()
+        },
+        CapacityDetail {
+            port: Some(443),
+            ..local()
+        },
+        CapacityDetail {
+            last_signal: Some(CapacitySignal::Http429),
+            ..local()
+        },
+        CapacityDetail {
+            retry_after_ms: Some(1),
+            ..local()
+        },
+        CapacityDetail {
+            limit_applied: Some(8),
+            ..local()
+        },
+        CapacityDetail {
+            max_per_host: Some(32),
+            ..local()
+        },
+        CapacityDetail {
+            elapsed_ms: Some(30_000),
+            ..local()
+        },
+    ] {
+        capacity_refused(extra);
+    }
+    refused_with(
+        ErrorCode::Capacity,
+        FailureDetail {
+            retry_attempt: Some(RetryAttempt {
+                attempt: 1,
+                attempts: 4,
+            }),
+            capacity: Some(local()),
+            ..FailureDetail::default()
+        },
+    );
+}
+
+#[test]
+fn a_server_capacity_names_its_ceiling_and_time_and_a_long_wait_names_the_wait() {
+    for capacity in [
+        CapacityDetail {
+            max_per_host: None,
+            ..throttle()
+        },
+        CapacityDetail {
+            elapsed_ms: None,
+            ..throttle()
+        },
+        CapacityDetail {
+            retry_after_ms: None,
+            ..long_retry_after()
+        },
+    ] {
+        capacity_refused(capacity);
+    }
+    // A 403 that carried `Retry-After` is a throttle with no 429 or 503 to name.
+    let no_signal = capacity_message(
+        ErrorCode::Capacity,
+        with_capacity(CapacityDetail {
+            last_signal: None,
+            ..throttle()
+        }),
+    );
+    assert_eq!(
+        codec::decode(&codec::encode(&no_signal).unwrap()),
+        Ok(no_signal)
+    );
+}
+
+#[test]
+fn the_host_scheme_and_port_come_together_or_not_at_all() {
+    for capacity in [
+        CapacityDetail {
+            scheme: None,
+            ..throttle()
+        },
+        CapacityDetail {
+            host: None,
+            ..throttle()
+        },
+        CapacityDetail {
+            port: None,
+            ..throttle()
+        },
+    ] {
+        capacity_refused(capacity);
+    }
+}
+
+#[test]
+fn ports_limits_and_times_are_range_checked() {
+    for port in [0, -1, 65_536, i64::MAX] {
+        capacity_refused(CapacityDetail {
+            port: Some(port),
+            ..throttle()
+        });
+    }
+    for limit in [0, -1, 33, i64::MAX] {
+        capacity_refused(CapacityDetail {
+            limit_applied: Some(limit),
+            ..throttle()
+        });
+    }
+    for ceiling in [0, -1, i64::from(u32::MAX) + 1] {
+        capacity_refused(CapacityDetail {
+            max_per_host: Some(ceiling),
+            limit_applied: None,
+            ..throttle()
+        });
+    }
+    capacity_refused(CapacityDetail {
+        elapsed_ms: Some(-1),
+        ..throttle()
+    });
+    capacity_refused(CapacityDetail {
+        retry_after_ms: Some(-1),
+        ..throttle()
+    });
+    // The largest values still pass.
+    let top = capacity_message(
+        ErrorCode::Capacity,
+        with_capacity(CapacityDetail {
+            max_per_host: Some(i64::from(u32::MAX)),
+            limit_applied: Some(i64::from(u32::MAX)),
+            elapsed_ms: Some(i64::MAX),
+            retry_after_ms: Some(i64::MAX),
+            ..long_retry_after()
+        }),
+    );
+    assert_eq!(codec::decode(&codec::encode(&top).unwrap()), Ok(top));
+}
+
+#[test]
+fn a_capacity_host_is_a_bare_host_name_never_a_url_or_instruction() {
+    for host in [
+        "",
+        "https://github.com",
+        "github.com/path",
+        "user@github.com",
+        "github.com:443",
+        "git hub.com",
+        "github.com\nx",
+        "secret=token",
+        "ümlaut.example",
+    ] {
+        capacity_refused(CapacityDetail {
+            host: Some(host.into()),
+            ..throttle()
+        });
+    }
+    capacity_refused(CapacityDetail {
+        host: Some("a".repeat(256)),
+        ..throttle()
+    });
+    for host in [
+        "github.com",
+        "10.0.0.1",
+        "::1",
+        "2001:db8::1",
+        "a-b.c_d.example",
+    ] {
+        let value = capacity_message(
+            ErrorCode::Capacity,
+            with_capacity(CapacityDetail {
+                host: Some(host.into()),
+                ..throttle()
+            }),
+        );
+        assert_eq!(codec::decode(&codec::encode(&value).unwrap()), Ok(value));
+    }
+}
+
+#[test]
+fn a_capacity_detail_stands_alone_among_the_diagnostic_alternatives() {
+    for detail in [
+        FailureDetail {
+            helper_cause: Some(HelperFailureCause::MissingField),
+            capacity: Some(throttle()),
+            ..FailureDetail::default()
+        },
+        FailureDetail {
+            pipe_kind: Some("Other".into()),
+            capacity: Some(throttle()),
+            ..FailureDetail::default()
+        },
+        FailureDetail {
+            schemes: Some(vec!["Basic".into()]),
+            capacity: Some(throttle()),
+            ..FailureDetail::default()
+        },
+        FailureDetail {
+            helper_budget_ms: Some(1),
+            capacity: Some(throttle()),
+            ..FailureDetail::default()
+        },
+    ] {
+        refused_with(ErrorCode::Capacity, detail);
+    }
+}
+
+#[test]
+fn every_failure_carrier_checks_the_capacity_detail() {
+    use gwz_transport::protocol::{Closed, Disposition, Facts};
+    let mut value = capacity_message(ErrorCode::Capacity, with_capacity(throttle()));
+    let good = value.open_failed.take().unwrap();
+    let wrong_code = Failure {
+        code: ErrorCode::Io,
+        ..good.clone()
+    };
+    for kind in [
+        MessageKind::Failed,
+        MessageKind::IdentityCheckFailed,
+        MessageKind::Closed,
+    ] {
+        for (failure, valid) in [(&good, true), (&wrong_code, false)] {
+            value.kind = kind;
+            value.failed = None;
+            value.identity_check_failed = None;
+            value.closed = None;
+            match kind {
+                MessageKind::Failed => value.failed = Some(failure.clone()),
+                MessageKind::IdentityCheckFailed => {
+                    value.identity_check_failed = Some(failure.clone())
+                }
+                MessageKind::Closed => {
+                    value.closed = Some(Closed {
+                        disposition: Disposition::Discarded,
+                        unread_response_discarded: false,
+                        facts: Facts::default(),
+                        failure: Some(failure.clone()),
+                    })
+                }
+                _ => unreachable!(),
+            }
+            if valid {
+                assert_eq!(
+                    codec::decode(&codec::encode(&value).unwrap()),
+                    Ok(value.clone())
+                );
+            } else {
+                assert_eq!(codec::admit(&value), Err(codec::Error::InvalidMessage));
+                assert_eq!(
+                    codec::decode(&cbor::encode(&value.to_cbor())),
+                    Err(codec::Error::InvalidMessage)
+                );
+            }
+        }
+    }
 }

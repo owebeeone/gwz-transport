@@ -395,6 +395,63 @@ impl HelperFailureCause {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum CapacityCause {
+    #[default]
+    ServerThrottle,
+    ServerRetryAfter,
+    Local,
+}
+impl CapacityCause {
+    pub fn wire(self) -> i64 {
+        match self {
+            Self::ServerThrottle => 1,
+            Self::ServerRetryAfter => 2,
+            Self::Local => 3,
+        }
+    }
+    pub fn from_wire(v: i64) -> Result<Self, DecodeError> {
+        Ok(match v {
+            1 => Self::ServerThrottle,
+            2 => Self::ServerRetryAfter,
+            3 => Self::Local,
+            _ => {
+                return Err(DecodeError::UnknownEnum {
+                    enum_name: "CapacityCause",
+                    value: v,
+                });
+            }
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum CapacitySignal {
+    #[default]
+    Http429,
+    Http503,
+}
+impl CapacitySignal {
+    pub fn wire(self) -> i64 {
+        match self {
+            Self::Http429 => 1,
+            Self::Http503 => 2,
+        }
+    }
+    pub fn from_wire(v: i64) -> Result<Self, DecodeError> {
+        Ok(match v {
+            1 => Self::Http429,
+            2 => Self::Http503,
+            _ => {
+                return Err(DecodeError::UnknownEnum {
+                    enum_name: "CapacitySignal",
+                    value: v,
+                });
+            }
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum Effect {
     #[default]
     None,
@@ -857,12 +914,207 @@ impl RetryAttempt {
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
+pub struct CapacityDetail {
+    pub cause: CapacityCause,
+    pub scheme: Option<Scheme>,
+    pub host: Option<String>,
+    pub port: Option<i64>,
+    pub limit_applied: Option<i64>,
+    pub max_per_host: Option<i64>,
+    pub elapsed_ms: Option<i64>,
+    pub last_signal: Option<CapacitySignal>,
+    pub retry_after_ms: Option<i64>,
+}
+impl CapacityDetail {
+    pub const MAX_DEPTH: usize = 32;
+    pub const MAX_ENCODED_LEN: Option<usize> = None;
+    pub fn to_cbor(&self) -> Cbor {
+        Cbor::Map(vec![
+            (1, Cbor::Int(self.cause.wire())),
+            (
+                2,
+                match &self.scheme {
+                    Some(v) => Cbor::Int(v.wire()),
+                    None => Cbor::Null,
+                },
+            ),
+            (
+                3,
+                match &self.host {
+                    Some(v) => Cbor::Text(v.clone()),
+                    None => Cbor::Null,
+                },
+            ),
+            (
+                4,
+                match &self.port {
+                    Some(v) => Cbor::Int(*v),
+                    None => Cbor::Null,
+                },
+            ),
+            (
+                5,
+                match &self.limit_applied {
+                    Some(v) => Cbor::Int(*v),
+                    None => Cbor::Null,
+                },
+            ),
+            (
+                6,
+                match &self.max_per_host {
+                    Some(v) => Cbor::Int(*v),
+                    None => Cbor::Null,
+                },
+            ),
+            (
+                7,
+                match &self.elapsed_ms {
+                    Some(v) => Cbor::Int(*v),
+                    None => Cbor::Null,
+                },
+            ),
+            (
+                8,
+                match &self.last_signal {
+                    Some(v) => Cbor::Int(v.wire()),
+                    None => Cbor::Null,
+                },
+            ),
+            (
+                9,
+                match &self.retry_after_ms {
+                    Some(v) => Cbor::Int(*v),
+                    None => Cbor::Null,
+                },
+            ),
+        ])
+    }
+    pub fn from_cbor(c: &Cbor) -> Result<Self, DecodeError> {
+        Ok(Self {
+            cause: CapacityCause::from_wire(c.try_get(1)?.try_int()?)?,
+            scheme: {
+                let v = c.try_get_opt(2)?;
+                match v {
+                    None => None,
+                    Some(v) => {
+                        if v.is_null() {
+                            None
+                        } else {
+                            Some(Scheme::from_wire(v.try_int()?)?)
+                        }
+                    }
+                }
+            },
+            host: {
+                let v = c.try_get_opt(3)?;
+                match v {
+                    None => None,
+                    Some(v) => {
+                        if v.is_null() {
+                            None
+                        } else {
+                            Some(v.try_text()?)
+                        }
+                    }
+                }
+            },
+            port: {
+                let v = c.try_get_opt(4)?;
+                match v {
+                    None => None,
+                    Some(v) => {
+                        if v.is_null() {
+                            None
+                        } else {
+                            Some(v.try_int()?)
+                        }
+                    }
+                }
+            },
+            limit_applied: {
+                let v = c.try_get_opt(5)?;
+                match v {
+                    None => None,
+                    Some(v) => {
+                        if v.is_null() {
+                            None
+                        } else {
+                            Some(v.try_int()?)
+                        }
+                    }
+                }
+            },
+            max_per_host: {
+                let v = c.try_get_opt(6)?;
+                match v {
+                    None => None,
+                    Some(v) => {
+                        if v.is_null() {
+                            None
+                        } else {
+                            Some(v.try_int()?)
+                        }
+                    }
+                }
+            },
+            elapsed_ms: {
+                let v = c.try_get_opt(7)?;
+                match v {
+                    None => None,
+                    Some(v) => {
+                        if v.is_null() {
+                            None
+                        } else {
+                            Some(v.try_int()?)
+                        }
+                    }
+                }
+            },
+            last_signal: {
+                let v = c.try_get_opt(8)?;
+                match v {
+                    None => None,
+                    Some(v) => {
+                        if v.is_null() {
+                            None
+                        } else {
+                            Some(CapacitySignal::from_wire(v.try_int()?)?)
+                        }
+                    }
+                }
+            },
+            retry_after_ms: {
+                let v = c.try_get_opt(9)?;
+                match v {
+                    None => None,
+                    Some(v) => {
+                        if v.is_null() {
+                            None
+                        } else {
+                            Some(v.try_int()?)
+                        }
+                    }
+                }
+            },
+        })
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor(&crate::cbor::try_decode_with(
+            bytes,
+            Self::MAX_DEPTH,
+            Self::MAX_ENCODED_LEN,
+        )?)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct FailureDetail {
     pub helper_cause: Option<HelperFailureCause>,
     pub pipe_kind: Option<String>,
     pub schemes: Option<Vec<String>>,
     pub retry_attempt: Option<RetryAttempt>,
     pub helper_budget_ms: Option<i64>,
+    pub capacity: Option<CapacityDetail>,
 }
 impl FailureDetail {
     pub const MAX_DEPTH: usize = 32;
@@ -901,6 +1153,13 @@ impl FailureDetail {
                 5,
                 match &self.helper_budget_ms {
                     Some(v) => Cbor::Int(*v),
+                    None => Cbor::Null,
+                },
+            ),
+            (
+                6,
+                match &self.capacity {
+                    Some(v) => v.to_cbor(),
                     None => Cbor::Null,
                 },
             ),
@@ -974,6 +1233,19 @@ impl FailureDetail {
                             None
                         } else {
                             Some(v.try_int()?)
+                        }
+                    }
+                }
+            },
+            capacity: {
+                let v = c.try_get_opt(6)?;
+                match v {
+                    None => None,
+                    Some(v) => {
+                        if v.is_null() {
+                            None
+                        } else {
+                            Some(CapacityDetail::from_cbor(v)?)
                         }
                     }
                 }

@@ -120,8 +120,63 @@ fn visit_retryattempt(value: &RetryAttempt, b: &mut Budget, depth: usize) -> Res
     Ok(())
 }
 
+fn visit_capacitydetail(value: &CapacityDetail, b: &mut Budget, depth: usize) -> Result<(), Error> {
+    b.container(9, depth)?;
+    b.key(1)?;
+    b.integer(value.cause.wire(), depth + 1)?;
+    b.key(2)?;
+    if let Some(item) = &value.scheme {
+        b.integer(item.wire(), depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
+    b.key(3)?;
+    if let Some(item) = &value.host {
+        b.bytes(item.len(), MAX_METADATA, depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
+    b.key(4)?;
+    if let Some(item) = &value.port {
+        b.integer(*item, depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
+    b.key(5)?;
+    if let Some(item) = &value.limit_applied {
+        b.integer(*item, depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
+    b.key(6)?;
+    if let Some(item) = &value.max_per_host {
+        b.integer(*item, depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
+    b.key(7)?;
+    if let Some(item) = &value.elapsed_ms {
+        b.integer(*item, depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
+    b.key(8)?;
+    if let Some(item) = &value.last_signal {
+        b.integer(item.wire(), depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
+    b.key(9)?;
+    if let Some(item) = &value.retry_after_ms {
+        b.integer(*item, depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
+    Ok(())
+}
+
 fn visit_failuredetail(value: &FailureDetail, b: &mut Budget, depth: usize) -> Result<(), Error> {
-    b.container(5, depth)?;
+    b.container(6, depth)?;
     b.key(1)?;
     if let Some(item) = &value.helper_cause {
         b.integer(item.wire(), depth + 1)?;
@@ -152,6 +207,12 @@ fn visit_failuredetail(value: &FailureDetail, b: &mut Budget, depth: usize) -> R
     b.key(5)?;
     if let Some(item) = &value.helper_budget_ms {
         b.integer(*item, depth + 1)?;
+    } else {
+        b.scalar(depth + 1)?;
+    }
+    b.key(6)?;
+    if let Some(item) = &value.capacity {
+        visit_capacitydetail(item, b, depth + 1)?;
     } else {
         b.scalar(depth + 1)?;
     }

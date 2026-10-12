@@ -348,6 +348,36 @@ and acknowledge every disposal until `shutdown_complete()` is true. Drop the
 driver only after disposal. There are no installed services or remote resources
 to undo in these tests.
 
+## Capacity failure detail
+
+A host that ends an open with `ErrorCode::Capacity` and says why puts a
+`CapacityDetail` in `FailureDetail.capacity` (field 6, optional, so a peer that
+never writes it is read as before). `cause` is `ServerThrottle` (a 429, or a 503
+with `Retry-After`, ended the member), `ServerRetryAfter` (the server asked for a
+wait longer than the host holds a server for) or `Local` (a local wait for a
+setup slot expired). The other fields, all optional on the wire, are `scheme`,
+`host` and `port` (the destination the member configured, never a redirect
+target: all three or none), `limit_applied` (the per-host limit in use),
+`max_per_host` (the ceiling), `elapsed_ms`, `last_signal` (`Http429` or
+`Http503`) and `retry_after_ms`. The pool learns none of this; the host builds
+it.
+
+Admission refuses a detail that breaks these rules, as `InvalidMessage`, on
+every failure carrier (`OpenFailed`, `Failed`, `IdentityCheckFailed` and
+`Closed.failure`; a `BindRejected` already admits only two other codes): the
+failure's code must be `Capacity`, and the
+detail carries none of `helper_cause`, `pipe_kind`, `schemes` or
+`helper_budget_ms`. A server cause needs `max_per_host` (1 to `u32::MAX`) and
+`elapsed_ms` (not negative); `last_signal` is absent when a 403 that carried
+`Retry-After` ended the member; `limit_applied` is 1 to
+`max_per_host`; `port` is 1 to 65535; `host` is a bare host name or an IPv4 or
+IPv6 address of at most 255 bytes (no scheme, user, path, bracket or space);
+`retry_after_ms` is not negative, and `ServerRetryAfter` needs it. A `Local`
+detail carries nothing but its cause, and the failure carries no
+`retry_attempt`. An unknown cause or signal fails the whole message to decode,
+as for every enum here, so both peers of a connection must be built from the
+same version.
+
 For generation install `taut-proto==0.10.0` and Rust 1.96.0's rustfmt, then run
 `python3 scripts/regen.py --check`. The script generates only with the taut-proto
 release installed in the interpreter's site directories at the version
