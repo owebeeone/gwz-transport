@@ -180,20 +180,26 @@
     },
     {
       "member_options": {
+        "configuration_refused": {},
         "control_character": {},
+        "declined": {},
         "malformed_output": {},
         "missing_field": {},
         "missing_newline": {},
+        "no_helper": {},
         "not_utf8": {},
         "output_limit": {},
         "pipe_failure": {},
         "username_colon": {}
       },
       "members": {
+        "configuration_refused": 11,
         "control_character": 3,
+        "declined": 10,
         "malformed_output": 8,
         "missing_field": 7,
         "missing_newline": 6,
+        "no_helper": 9,
         "not_utf8": 5,
         "output_limit": 2,
         "pipe_failure": 1,

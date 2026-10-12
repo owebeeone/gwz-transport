@@ -72,6 +72,9 @@ fn absent_detail_and_fixed_causes_round_trip() {
         HelperFailureCause::MissingNewline,
         HelperFailureCause::MissingField,
         HelperFailureCause::MalformedOutput,
+        HelperFailureCause::NoHelper,
+        HelperFailureCause::Declined,
+        HelperFailureCause::ConfigurationRefused,
     ] {
         let detail = FailureDetail {
             helper_cause: Some(cause),
@@ -262,11 +265,34 @@ fn diagnostic_cause_and_scheme_alternatives_cannot_be_combined() {
 }
 
 #[test]
+fn the_three_configured_helper_causes_keep_their_wire_numbers() {
+    for (cause, number) in [
+        (HelperFailureCause::NoHelper, 9),
+        (HelperFailureCause::Declined, 10),
+        (HelperFailureCause::ConfigurationRefused, 11),
+    ] {
+        assert_eq!(cause.wire(), number);
+        assert_eq!(HelperFailureCause::from_wire(number), Ok(cause));
+        // Like every cause, each stands alone: a pipe kind belongs to PipeFailure only.
+        refused(FailureDetail {
+            helper_cause: Some(cause),
+            pipe_kind: Some("Other".into()),
+            ..FailureDetail::default()
+        });
+        refused(FailureDetail {
+            helper_cause: Some(cause),
+            schemes: Some(vec!["Basic".into()]),
+            ..FailureDetail::default()
+        });
+    }
+}
+
+#[test]
 fn an_unknown_helper_cause_is_not_a_new_diagnostic_string() {
     let mut detail = FailureDetail::default().to_cbor();
     if let Cbor::Map(fields) = &mut detail {
         fields.retain(|(tag, _)| *tag != 1);
-        fields.push((1, Cbor::Int(9)));
+        fields.push((1, Cbor::Int(12)));
     }
     assert!(FailureDetail::from_cbor(&detail).is_err());
 }

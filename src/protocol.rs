@@ -351,6 +351,9 @@ pub enum HelperFailureCause {
     MissingNewline,
     MissingField,
     MalformedOutput,
+    NoHelper,
+    Declined,
+    ConfigurationRefused,
 }
 impl HelperFailureCause {
     pub fn wire(self) -> i64 {
@@ -363,6 +366,9 @@ impl HelperFailureCause {
             Self::MissingNewline => 6,
             Self::MissingField => 7,
             Self::MalformedOutput => 8,
+            Self::NoHelper => 9,
+            Self::Declined => 10,
+            Self::ConfigurationRefused => 11,
         }
     }
     pub fn from_wire(v: i64) -> Result<Self, DecodeError> {
@@ -375,6 +381,9 @@ impl HelperFailureCause {
             6 => Self::MissingNewline,
             7 => Self::MissingField,
             8 => Self::MalformedOutput,
+            9 => Self::NoHelper,
+            10 => Self::Declined,
+            11 => Self::ConfigurationRefused,
             _ => {
                 return Err(DecodeError::UnknownEnum {
                     enum_name: "HelperFailureCause",
