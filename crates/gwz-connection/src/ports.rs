@@ -2,7 +2,7 @@
 //! `EndpointFactory`. None gives the library a socket, a file, a thread or a process; the composition implements them
 //! (core's adapters over today's endpoints in step 1.3, fakes in this crate's tests).
 use crate::{
-    BindingId, CleanupDomain, CleanupStatus, EndpointProfile, ExchangeSpec,
+    AuthContext, BindingId, CleanupDomain, CleanupStatus, EndpointProfile, ExchangeSpec,
     safety::SharedProcessSafety,
 };
 use gwz_transport::{
@@ -87,7 +87,8 @@ pub trait Progress: Send + Sync + 'static {
 }
 
 /// The validated, immutable inputs an endpoint adapter is made from: the operation's profile (contract section 7), which
-/// is also what coalesces equal endpoints onto one instance.
+/// is also what coalesces equal endpoints onto one instance. It holds no authentication context: an adapter learns
+/// whose operation it serves only from each connect and exchange.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct EndpointSpec {
@@ -131,6 +132,9 @@ pub struct ConnectCommand {
     pub connection: ConnectionId,
     pub key: Key,
     pub identity: Identity,
+    /// The context of the operation the connection is opened for, which its setup authenticates with; `None` when
+    /// that operation stopped waiting before the connect began, and the setup then has no context to use.
+    pub auth: Option<AuthContext>,
 }
 /// What an adapter reports about work it was given. Connection identifiers are the pool's and are never reused.
 #[derive(Debug)]
@@ -203,11 +207,14 @@ pub trait EndpointAdapter: Send {
     fn cancel_connect(&mut self, connection: ConnectionId);
     /// Dispose of `connection`; `Completion::Closed` confirms it.
     fn close(&mut self, connection: ConnectionId);
-    /// Starts the exchange `spec` names (its Git service and path) on `connection`, which the caller leases.
+    /// Starts the exchange `spec` names (its Git service and path) on `connection`, which the caller leases, for the
+    /// operation whose context is `auth`: what it authenticates with is that context's, never another operation's or
+    /// the instance's.
     fn start_exchange(
         &mut self,
         connection: ConnectionId,
         spec: &ExchangeSpec,
+        auth: &AuthContext,
     ) -> io::Result<Box<dyn ExchangeIo>>;
     /// Contract section 4.1's `authorize_reuse` (section 7.1; step 1.6): starts the proof `command` names and reports
     /// it as `Completion::Reuse`, or returns `false` when it starts none, which the host takes as `Unprovable`. The

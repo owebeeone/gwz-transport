@@ -4,6 +4,9 @@
 //! applies) and returns an `Opening`, which leases a connection from the host's pool for the operation's profile and
 //! yields an `Exchange`: one exclusive lease, one stream. Finishing an exchange returns its connection to idle only if
 //! the adapter proves the protocol clean; anything else discards it. Neither type has a public constructor.
+//!
+//! A lease serves the operation only when its connection was set up under a context of the operation's scope (step
+//! 1.5): a connection set up under another context is retired, never handed over, and the opening asks again.
 use crate::{
     CancelState, ExchangeEnd, ExchangeIo, ExchangeSpec, OpenError, OpenFailure, OperationEnd,
     Registration,
@@ -107,6 +110,7 @@ impl Operation {
         Ok(Opening {
             live: Live::new(self.host.clone(), binding.clone()),
             spec,
+            tag: request,
         })
     }
     /// Seals the operation now (no new opens), and resolves when nothing of it is live: its exchanges and openings
@@ -155,6 +159,19 @@ impl Operation {
                 (pair.driver.active_streams(), pair.endpoint.active_streams())
             }
             Kind::Terminal(_) => (0, 0),
+        }
+    }
+}
+cfg_if::cfg_if! {
+    if #[cfg(test)] {
+        impl Operation {
+            /// The endpoint instance this operation's binding leases from.
+            pub(crate) fn instance_for_test(&self) -> Arc<Instance> {
+                match &self.kind {
+                    Kind::Live(binding) => binding.instance.clone(),
+                    Kind::Terminal(_) => panic!("a terminal operation has no instance"),
+                }
+            }
         }
     }
 }
@@ -250,13 +267,15 @@ impl Drop for Live {
 pub struct Opening {
     live: Live,
     spec: ExchangeSpec,
+    /// The request's name in the binding, which tags its pool request.
+    tag: String,
 }
 impl Opening {
     /// Submits the opening to the host: from here its lease, its connection and the start of its exchange are the
     /// host's driver's to progress, whether or not the returned future is polled (contract section 6: progress is
-    /// independent of the application's calls). The future yields the exchange once the driver has started it.
-    /// Dropping the future cancels this opening only; an exchange already started for it is aborted and its
-    /// connection discarded.
+    /// independent of the application's calls). The future yields the exchange once the driver has started it, on a
+    /// connection of this operation's profile set up under a context of its scope. Dropping the future cancels this
+    /// opening only; an exchange already started for it is aborted and its connection discarded.
     pub fn wait(self) -> OpenWait {
         let binding = self.live.binding.clone();
         let refused = closing_reason(binding.closing.load(Acquire))
@@ -270,18 +289,19 @@ impl Opening {
             .or_else(|| binding.sealed.load(Acquire).then_some(OpenFailure::Sealed));
         let submitted = match refused {
             Some(failure) => Err(failure),
-            None => binding
-                .instance
-                .submit(
-                    Request::new(
-                        self.spec.key.clone(),
-                        self.spec.identity.clone(),
-                        Owner::new(binding.session.clone(), binding.operation.clone()),
-                    ),
-                    binding.id,
-                    self.spec,
-                )
-                .map_err(OpenFailure::Pool),
+            None => {
+                let mut request = Request::new(
+                    self.spec.key.clone(),
+                    self.spec.identity.clone(),
+                    Owner::new(binding.session.clone(), binding.operation.clone()),
+                );
+                // The tag is how a connect the pool starts for this request finds the operation's context.
+                request.tag = Some(self.tag);
+                binding
+                    .instance
+                    .submit(request, binding.id, self.spec, binding.auth.clone())
+                    .map_err(OpenFailure::Pool)
+            }
         };
         let (submitted, early) = match submitted {
             Ok(submitted) => (Some(submitted), None),
@@ -338,7 +358,7 @@ impl Future for OpenWait {
                 this.submitted = None;
                 Poll::Ready(Err(failure))
             }
-            Poll::Ready(Ok((io, lease))) => {
+            Poll::Ready(Ok((io, lease, reused))) => {
                 this.submitted = None;
                 let live = this.live.take().expect("live checked above");
                 Poll::Ready(Ok(Exchange {
@@ -350,6 +370,7 @@ impl Future for OpenWait {
                         instance: binding.instance.clone(),
                         lease: Some(lease),
                     }),
+                    reused,
                     _live: Some(live),
                 }))
             }
@@ -416,11 +437,17 @@ impl MessageStream {
 pub struct Exchange {
     stream: MessageStream,
     lease: Option<LeaseGuard>,
+    reused: bool,
     _live: Option<Live>,
 }
 impl Exchange {
     pub fn stream(&mut self) -> &mut MessageStream {
         &mut self.stream
+    }
+    /// Whether the connection served an exchange before this one (the observation's `reused`): it was idle, of this
+    /// operation's profile, and set up under a context of this operation's scope.
+    pub fn reused(&self) -> bool {
+        self.reused
     }
     /// Ends the exchange: its connection goes back to idle only if the adapter proves the protocol clean and the
     /// operation was not cancelled. The orderly end starts when this is built, and the host's driver settles the

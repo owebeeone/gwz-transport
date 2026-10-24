@@ -446,7 +446,11 @@ fn admission_refuses_invalid_and_over_budget_input_before_any_effect() {
         "op-a",
         crate::EndpointRoute::ssh_and_https(),
         crate::fakes::profile(1),
-        crate::AuthContext::new(16 * 1024 * 1024 + 1, std::sync::Arc::new(())),
+        crate::AuthContext::new(
+            16 * 1024 * 1024 + 1,
+            crate::AuthScope::new([0; 32]),
+            std::sync::Arc::new(()),
+        ),
         crate::OperationPolicy::new(4, 32, 3).unwrap(),
     )
     .unwrap();
@@ -460,7 +464,11 @@ fn admission_refuses_invalid_and_over_budget_input_before_any_effect() {
             name,
             crate::EndpointRoute::ssh_and_https(),
             crate::fakes::profile(1),
-            crate::AuthContext::new(16 * 1024 * 1024, std::sync::Arc::new(())),
+            crate::AuthContext::new(
+                16 * 1024 * 1024,
+                crate::AuthScope::new([0; 32]),
+                std::sync::Arc::new(()),
+            ),
             crate::OperationPolicy::new(4, 32, 3).unwrap(),
         )
         .unwrap()
@@ -485,7 +493,7 @@ fn admission_refuses_invalid_and_over_budget_input_before_any_effect() {
             "",
             crate::EndpointRoute::ssh_and_https(),
             crate::fakes::profile(1),
-            crate::AuthContext::new(1, std::sync::Arc::new(())),
+            crate::AuthContext::new(1, crate::AuthScope::new([0; 32]), std::sync::Arc::new(())),
             crate::OperationPolicy::new(4, 32, 3).unwrap()
         )
         .is_err()

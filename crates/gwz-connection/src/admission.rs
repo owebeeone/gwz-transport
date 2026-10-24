@@ -131,6 +131,7 @@ impl Future for Acquire {
             carrier: CarrierId(host.namespace),
             pair: Mutex::new(pair),
             instance,
+            auth: input.auth,
             cancelled: AtomicBool::new(false),
             closing: AtomicUsize::new(0),
             sealed: AtomicBool::new(false),

@@ -1,11 +1,13 @@
 //! The host's owner and handle against fakes only (step 1.1 of dev-docs/GwzTransportReleaseConvergencePlan.md;
 //! contract sections 4, 4.1, 5, 10, 11 and 13.1): no file, socket, thread or helper is involved.
-use crate::fakes::{FakeSafety, Rig, poll_once, spec};
+use crate::fakes::{FakeSafety, Rig, auth, exchange_spec, now, poll_once, prepared_with, spec};
 use crate::{
-    AttachError, BuildError, CleanupDomain, CleanupDomainOwner, CleanupStatus, CleanupTicket,
-    ConfigReason, DomainClose, HostClose, HostClosing, HostHandle, HostLimits, HostOwner,
-    HostPhase, TicketStatus,
+    AttachError, AuthContext, AuthScope, BuildError, CleanupDomain, CleanupDomainOwner,
+    CleanupStatus, CleanupTicket, ConfigReason, DomainClose, EndpointProfile, EndpointRoute,
+    EndpointSpec, HostClose, HostClosing, HostHandle, HostLimits, HostOwner, HostPhase,
+    OpenFailure, Operation, OperationPolicy, PreparedOperation, TicketStatus,
 };
+use gwz_transport::protocol::Disposition;
 use std::{
     sync::{Arc, atomic::Ordering},
     task::Poll,
@@ -360,4 +362,195 @@ fn a_domain_is_not_manufactured_by_a_host() {
     rig.attach(&first);
     rig.attach(&second);
     assert_eq!(rig.world.domains.lock().unwrap().len(), 2);
+}
+
+// Step 1.5, profile and partition (contract sections 6 and 7; plan row R4), against fakes. Core captures HOME, the
+// agent, the CA file and the proxy into the profile, and the helper environment (`GIT_CONFIG_GLOBAL`, `GH_TOKEN`) into
+// the operation's authentication context; these rows hold what the host does with each.
+
+/// An admitted and registered operation over the profile of kind `profile`, with `auth` as its context.
+fn registered_with(handle: &HostHandle, name: &str, profile: u8, auth: AuthContext) -> Operation {
+    now(handle
+        .admit(prepared_with(name, profile, auth))
+        .unwrap()
+        .acquire())
+    .unwrap()
+    .register()
+}
+
+/// One operation with one exchange, finished cleanly: whether its exchange reused a connection.
+fn one_exchange(handle: &HostHandle, name: &str, profile: u8, auth: AuthContext) -> bool {
+    let operation = registered_with(handle, name, profile, auth);
+    let exchange = now(operation.open(exchange_spec()).unwrap().wait()).unwrap();
+    let reused = exchange.reused();
+    assert_eq!(now(exchange.finish()).disposition, Disposition::Reusable);
+    now(operation.finish());
+    reused
+}
+
+#[test]
+fn a_changed_profile_is_served_by_another_instance_and_reuse_resumes_when_it_changes_back() {
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    assert!(!one_exchange(&handle, "op-1", 1, auth(1, "a")));
+    assert!(
+        one_exchange(&handle, "op-2", 1, auth(1, "a")),
+        "an equal profile reuses"
+    );
+    assert!(
+        !one_exchange(&handle, "op-3", 2, auth(1, "a")),
+        "a changed profile reuses nothing"
+    );
+    assert_eq!(handle.snapshot().endpoint_instances, 2);
+    assert!(
+        one_exchange(&handle, "op-4", 1, auth(1, "a")),
+        "the first profile's instance and idle connection are still there"
+    );
+    assert_eq!(rig.world.connects(), 2);
+    assert_eq!(rig.world.closes(), 0);
+}
+
+#[test]
+fn a_changed_auth_context_on_an_equal_profile_reuses_nothing_and_reuse_resumes_under_the_new_one() {
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    assert!(!one_exchange(&handle, "op-1", 1, auth(1, "a")));
+    assert!(
+        !one_exchange(&handle, "op-2", 1, auth(2, "b")),
+        "a connection set up under another context is never leased"
+    );
+    // Equal profiles share the instance: the context is not a profile field (contract section 7).
+    assert_eq!(handle.snapshot().endpoint_instances, 1);
+    assert_eq!(rig.world.connects(), 2);
+    // The other context's idle connection was retired, not handed over.
+    assert_eq!(rig.world.closes(), 1);
+    assert!(one_exchange(&handle, "op-3", 1, auth(2, "b")));
+    assert_eq!(rig.world.connects(), 2);
+}
+
+#[test]
+fn each_operations_connects_and_exchanges_carry_its_own_auth_context() {
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    let a = registered_with(&handle, "op-a", 1, auth(1, "a"));
+    let b = registered_with(&handle, "op-b", 1, auth(2, "b"));
+    let exchange_a = now(a.open(exchange_spec()).unwrap().wait()).unwrap();
+    let exchange_b = now(b.open(exchange_spec()).unwrap().wait()).unwrap();
+    assert_eq!(handle.snapshot().endpoint_instances, 1);
+    let seen = |kind: &'static str, tag: &str| (kind, Some(tag.to_string()));
+    assert_eq!(
+        *rig.world.contexts.lock().unwrap(),
+        vec![
+            seen("connect", "a"),
+            seen("exchange", "a"),
+            seen("connect", "b"),
+            seen("exchange", "b"),
+        ],
+        "equal-profile operations never run on one another's context"
+    );
+    now(exchange_a.finish());
+    now(exchange_b.finish());
+    now(a.finish());
+    now(b.finish());
+}
+
+#[test]
+fn no_operations_auth_context_outlives_it_in_the_host() {
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    let provider = Arc::new(String::from("a"));
+    let context = || AuthContext::new(64, AuthScope::new([1; 32]), provider.clone());
+    // An opening dropped while its connect is under way leaves nothing behind it.
+    rig.world.asynchronous.store(true, Ordering::SeqCst);
+    let waiting = registered_with(&handle, "op-1", 1, context());
+    let mut opening = waiting.open(exchange_spec()).unwrap().wait();
+    assert!(poll_once(&mut opening).is_pending());
+    drop(opening);
+    // The live operation's binding holds its context, and nothing else does: the instance gave it back.
+    assert_eq!(Arc::strong_count(&provider), 2, "the abandoned opening");
+    drop(waiting);
+    assert_eq!(Arc::strong_count(&provider), 1, "the dropped operation");
+    // A finished operation leaves its connection idle, and none of its context.
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    assert!(!one_exchange(&handle, "op-2", 1, context()));
+    assert_eq!(handle.snapshot().connections.idle, 1);
+    assert_eq!(Arc::strong_count(&provider), 1, "the finished operation");
+}
+
+#[test]
+fn the_factory_is_made_from_the_profiles_validated_inputs() {
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    let profile =
+        EndpointProfile::with_inputs(vec![9; 8], [9; 32], Arc::new(String::from("inputs-9")))
+            .unwrap();
+    let input = PreparedOperation::new(
+        "op",
+        EndpointRoute::ssh_and_https(),
+        profile,
+        auth(1, "a"),
+        OperationPolicy::new(4, 32, 3).unwrap(),
+    )
+    .unwrap();
+    let operation = now(handle.admit(input).unwrap().acquire())
+        .unwrap()
+        .register();
+    assert_eq!(
+        *rig.world.inputs.lock().unwrap(),
+        vec![Some("inputs-9".to_string())]
+    );
+    now(operation.finish());
+    // The inputs are not compared: equal canonical bytes are one profile whatever inputs they carry.
+    let same = EndpointProfile::with_inputs(vec![9; 8], [9; 32], Arc::new(0u8)).unwrap();
+    assert!(same.same_as(&EndpointProfile::new(vec![9; 8], [9; 32]).unwrap()));
+}
+
+#[test]
+fn a_digest_collision_is_not_equality_and_gets_another_instance() {
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    let colliding = |n: u8| EndpointSpec::new(EndpointProfile::new(vec![n; 8], [7; 32]).unwrap());
+    handle.attach_instance(colliding(1)).unwrap();
+    handle.attach_instance(colliding(2)).unwrap();
+    assert_eq!(handle.snapshot().endpoint_instances, 2);
+    handle.attach_instance(colliding(1)).unwrap();
+    assert_eq!(handle.snapshot().endpoint_instances, 2);
+}
+
+#[test]
+fn an_opening_that_no_connection_ever_fits_fails_by_name_within_its_bound() {
+    // Every connection the pool offers was set up under another context (the helper below rescopes each one before
+    // its connect completes), so each lease is retired and the opening asks again; it must end, typed, after at most
+    // `per_user_host + 1` misfits, never spin.
+    let rig = Rig::new();
+    rig.world.asynchronous.store(true, Ordering::SeqCst);
+    let (_owner, handle) = rig.host(1);
+    let operation = registered_with(&handle, "op", 1, auth(1, "a"));
+    let mut wait = operation.open(exchange_spec()).unwrap().wait();
+    let foreign = AuthScope::new([9; 32]);
+    let bound = gwz_transport::pool::Config::default().per_user_host + 1;
+    let mut passes = 0;
+    while !wait.is_ready() {
+        assert!(
+            passes <= bound,
+            "the opening was still asking after {passes} misfits"
+        );
+        operation.instance_for_test().rescope_for_test(foreign);
+        rig.world.complete_connects();
+        rig.progress.run();
+        passes += 1;
+    }
+    assert!(matches!(
+        poll_once(&mut wait),
+        Poll::Ready(Err(OpenFailure::NoFittingConnection))
+    ));
+    assert_eq!(passes, bound + 1, "one misfit per completed connect");
+    assert_eq!(
+        rig.world.exchanges.load(Ordering::SeqCst),
+        0,
+        "nothing was started"
+    );
+    drop(wait);
+    now(operation.finish());
 }

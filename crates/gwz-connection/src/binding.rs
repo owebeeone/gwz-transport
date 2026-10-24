@@ -7,7 +7,7 @@
 //! link). After the Bind/Bound bootstrap the muxes carry registration and cancellation; stream data crosses the adapter's
 //! `ExchangeIo` until the ordered-stream seam of contract section 6.1 exists in gwz-transport.
 use crate::{
-    EndpointRoute, HostNamespace, OperationEnd, cell::Cell, instance::Instance,
+    AuthContext, EndpointRoute, HostNamespace, OperationEnd, cell::Cell, instance::Instance,
     operation::TerminalReason,
 };
 use gwz_transport::{
@@ -153,6 +153,8 @@ pub(crate) struct BindingShared {
     pub(crate) carrier: CarrierId,
     pub(crate) pair: Mutex<MuxPair>,
     pub(crate) instance: Arc<Instance>,
+    /// The operation's authentication context: the binding's, for as long as it lives, and never the instance's.
+    pub(crate) auth: AuthContext,
     pub(crate) cancelled: AtomicBool,
     /// Why the host cancelled it, when it did (0 none, 1 host closing, 2 domain closing).
     pub(crate) closing: AtomicUsize,

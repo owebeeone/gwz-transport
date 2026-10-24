@@ -41,9 +41,9 @@ pub use host::{
     HostLimits, HostOwner, HostPhase, HostSnapshot, build,
 };
 pub use operation::{
-    AdmissionError, AuthContext, CancelState, EndpointProfile, EndpointRoute, ExchangeEnd,
-    ExchangeSpec, GitService, InvalidInput, OpenError, OpenFailure, OperationEnd, OperationPolicy,
-    PreparedOperation, Registration, TerminalReason,
+    AdmissionError, AuthContext, AuthScope, CancelState, EndpointProfile, EndpointRoute,
+    ExchangeEnd, ExchangeSpec, GitService, InvalidInput, OpenError, OpenFailure, OperationEnd,
+    OperationPolicy, PreparedOperation, Registration, TerminalReason,
 };
 pub use ports::{
     Clock, Completion, ConnectCommand, DriverWork, EndpointAdapter, EndpointFactory, EndpointSpec,

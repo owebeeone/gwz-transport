@@ -3,7 +3,7 @@
 //! adapter completes at once by default; `asynchronous` makes its connects (and `hold_finish` its exchanges' ends)
 //! complete only when the test says, waking the waker the host gave it, as a real adapter's worker does.
 use crate::{
-    AuthContext, CleanupDomain, CleanupDomainOwner, Clock, Completion, ConnectCommand,
+    AuthContext, AuthScope, CleanupDomain, CleanupDomainOwner, Clock, Completion, ConnectCommand,
     DomainConfig, DriverWork, EndpointAdapter, EndpointFactory, EndpointProfile, EndpointRoute,
     EndpointSpec, ExchangeIo, ExchangeSpec, FactoryEnv, FactoryError, FactoryReason, GitService,
     HostConfig, HostHandle, HostLimits, HostNamespace, HostOwner, HostPorts, OperationPolicy,
@@ -236,6 +236,10 @@ pub(crate) struct FakeWorld {
     pub(crate) hold_reuse: AtomicBool,
     /// Every adapter's queue and the waker the host last gave it.
     queues: Mutex<Vec<Arc<Mutex<Queue>>>>,
+    /// Which operation's context each connect and exchange was given, by the provider's tag, in order.
+    pub(crate) contexts: Mutex<Vec<(&'static str, Option<String>)>>,
+    /// The validated inputs each adapter was made from, by their tag.
+    pub(crate) inputs: Mutex<Vec<Option<String>>>,
     pub(crate) gate: Arc<Gate>,
     pub(crate) safeties: Mutex<Vec<(Arc<dyn ProcessSafety>, SafetyState)>>,
     pub(crate) domains: Mutex<Vec<CleanupDomain>>,
@@ -261,6 +265,8 @@ impl FakeWorld {
             reuse_verdict: Mutex::new(Some(ReuseVerdict::Authorized)),
             hold_reuse: AtomicBool::new(false),
             queues: Mutex::new(Vec::new()),
+            contexts: Mutex::new(Vec::new()),
+            inputs: Mutex::new(Vec::new()),
             gate: Arc::new(Gate {
                 open: Mutex::new((false, Vec::new())),
             }),
@@ -350,10 +356,16 @@ pub(crate) struct FakeFactory(pub(crate) Arc<FakeWorld>);
 impl EndpointFactory for FakeFactory {
     fn create(
         &self,
-        _spec: &EndpointSpec,
+        spec: &EndpointSpec,
         env: &FactoryEnv<'_>,
     ) -> Result<Box<dyn EndpointAdapter>, FactoryError> {
         let world = &self.0;
+        world.inputs.lock().unwrap().push(
+            spec.profile
+                .inputs()
+                .and_then(|inputs| inputs.downcast_ref::<String>())
+                .cloned(),
+        );
         world
             .safeties
             .lock()
@@ -426,6 +438,11 @@ impl ExchangeIo for FakeIo {
 impl EndpointAdapter for FakeAdapter {
     fn connect(&mut self, command: ConnectCommand) {
         self.world.connects.fetch_add(1, Ordering::SeqCst);
+        self.world
+            .contexts
+            .lock()
+            .unwrap()
+            .push(("connect", command.auth.as_ref().and_then(tag_of)));
         let mut queue = self.queue.lock().unwrap();
         if self.world.asynchronous.load(Ordering::SeqCst) {
             queue
@@ -471,9 +488,15 @@ impl EndpointAdapter for FakeAdapter {
         &mut self,
         _connection: ConnectionId,
         spec: &ExchangeSpec,
+        auth: &AuthContext,
     ) -> io::Result<Box<dyn ExchangeIo>> {
         self.world.exchanges.fetch_add(1, Ordering::SeqCst);
         *self.world.last_spec.lock().unwrap() = Some((spec.service(), spec.path().into()));
+        self.world
+            .contexts
+            .lock()
+            .unwrap()
+            .push(("exchange", tag_of(auth)));
         Ok(Box::new(FakeIo {
             world: self.world.clone(),
             queue: self.queue.clone(),
@@ -527,6 +550,11 @@ impl Drop for FakeAdapter {
     fn drop(&mut self) {
         self.world.dropped.fetch_add(1, Ordering::SeqCst);
     }
+}
+
+/// The tag of a context `auth` made: what the adapter can see of whose operation it serves.
+fn tag_of(auth: &AuthContext) -> Option<String> {
+    auth.provider().downcast_ref::<String>().cloned()
 }
 
 /// A retainer the test steps. `refuse` makes it hand the work back.
@@ -660,11 +688,19 @@ pub(crate) fn spec(n: u8) -> EndpointSpec {
 }
 /// A valid frozen operation named `name` over the profile of kind `n`.
 pub(crate) fn prepared(name: &str, n: u8) -> PreparedOperation {
+    prepared_with(name, n, auth(0, "none"))
+}
+/// An authentication context of scope `scope` whose provider is the text `tag`.
+pub(crate) fn auth(scope: u8, tag: &str) -> AuthContext {
+    AuthContext::new(64, AuthScope::new([scope; 32]), Arc::new(tag.to_string()))
+}
+/// A valid frozen operation named `name` over the profile of kind `n`, with `auth` as its context.
+pub(crate) fn prepared_with(name: &str, n: u8, auth: AuthContext) -> PreparedOperation {
     PreparedOperation::new(
         name,
         EndpointRoute::ssh_and_https(),
         profile(n),
-        AuthContext::new(64, Arc::new(())),
+        auth,
         OperationPolicy::new(4, 32, 3).unwrap(),
     )
     .unwrap()
