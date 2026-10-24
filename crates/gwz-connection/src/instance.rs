@@ -6,26 +6,49 @@
 //! finished exchanges whose adapter has not yet confirmed a clean end (settled here, then released). It runs when a
 //! command arrives (a submission, a release, a cancellation) and on the host's driver (`pump.rs`) whenever the adapter
 //! wakes the waker it was given or a pool deadline passes; never because an application polls.
+//!
+//! An instance is one profile's (step 1.5): every operation it serves has an equal profile, and none of them leaves its
+//! authentication context here. A waiting opening lends its context to the connect the pool starts for it, by the tag
+//! on its pool request, and takes it back when it stops waiting. What stays is each connection's setup scope, a
+//! fixed-size value: a connection serves only an operation whose context has that scope (contract section 7). A lease
+//! of another scope is retired and the opening asks again, at most `per_user_host + 1` times: each pass retires one of
+//! the key's connections, so more passes than the key can hold mean nothing will fit, and the opening fails by name.
 use crate::{
-    Clock, Completion, ConnectCommand, EndpointAdapter, EndpointProfile, ExchangeEnd, ExchangeIo,
-    ExchangeSpec, OpenFailure,
+    AuthContext, AuthScope, Clock, Completion, ConnectCommand, EndpointAdapter, EndpointProfile,
+    ExchangeEnd, ExchangeIo, ExchangeSpec, OpenFailure,
     cell::{Cell, Slot},
     pump::Signal,
 };
-use gwz_transport::pool::{Action, Config, Error, LeaseId, PoolMachine, Request, RequestId};
+use gwz_transport::pool::{
+    Action, Config, ConnectionId, Error, LeaseId, PoolMachine, Request, RequestId,
+};
 use gwz_transport::protocol::Disposition;
 use std::{
+    collections::BTreeMap,
     sync::{Arc, Mutex, MutexGuard},
     task::{Context, Poll, Wake, Waker},
 };
 
-/// What an opening's slot receives: the started exchange and its lease, or why there is none.
-pub(crate) type Opened = Result<(Box<dyn ExchangeIo>, LeaseId), OpenFailure>;
+/// What an opening's slot receives: the started exchange, its lease and whether its connection had served an exchange
+/// before, or why there is none.
+pub(crate) type Opened = Result<(Box<dyn ExchangeIo>, LeaseId, bool), OpenFailure>;
 /// An opening whose request waits for a lease.
 struct Pending {
     request: RequestId,
+    /// The request as submitted (its tag included), to ask again after a lease of another scope.
+    template: Request,
     spec: ExchangeSpec,
+    /// The operation's context, lent to the connect the pool starts for this request and to the exchange.
+    auth: AuthContext,
+    /// Leases of another scope this opening was offered and retired.
+    misfits: usize,
     slot: Arc<Slot<Opened>>,
+}
+/// A connection the pool has started and not yet disposed of: the scope its setup used (none when its opener had gone)
+/// and whether an exchange has run on it.
+struct Setup {
+    scope: Option<AuthScope>,
+    served: bool,
 }
 /// A finished exchange waiting for its adapter to confirm how it ended.
 struct Settling {
@@ -38,6 +61,7 @@ pub(crate) struct InstanceState {
     pub(crate) pool: PoolMachine,
     openings: Vec<Pending>,
     settling: Vec<Settling>,
+    connections: BTreeMap<ConnectionId, Setup>,
 }
 /// Wakes every opening that waits on this instance, and the host's driver, when its adapter has something to report.
 struct Wakes {
@@ -81,6 +105,7 @@ impl Instance {
                 pool: PoolMachine::new(Config::default())?,
                 openings: Vec::new(),
                 settling: Vec::new(),
+                connections: BTreeMap::new(),
             }),
         }))
     }
@@ -122,16 +147,29 @@ impl Instance {
         loop {
             let mut progressed = actions(state);
             if let Some(adapter) = state.adapter.as_mut() {
+                let mut ended = Vec::new();
                 while let Poll::Ready(completion) = adapter.poll_completion(&mut cx) {
                     progressed = true;
                     // A stale or duplicate completion is refused by the pool and changes nothing.
                     let _ = match completion {
                         Completion::Connected { connection, result } => {
+                            if result.is_err() {
+                                ended.push(connection);
+                            }
                             state.pool.connected(connection, result)
                         }
-                        Completion::Closed { connection } => state.pool.closed(connection),
-                        Completion::IdleClosed { connection } => state.pool.idle_closed(connection),
+                        Completion::Closed { connection } => {
+                            ended.push(connection);
+                            state.pool.closed(connection)
+                        }
+                        Completion::IdleClosed { connection } => {
+                            ended.push(connection);
+                            state.pool.idle_closed(connection)
+                        }
                     };
+                }
+                for connection in ended {
+                    state.connections.remove(&connection);
                 }
             }
             progressed |= openings(state);
@@ -142,18 +180,24 @@ impl Instance {
         }
     }
     /// Queues an opening's request and pumps once, so that an exchange the pool can lease at once is started now.
+    /// `request` carries the opening's tag, by which a connect started for it finds `auth`.
     pub(crate) fn submit(
         &self,
         request: Request,
         spec: ExchangeSpec,
+        auth: AuthContext,
     ) -> Result<(RequestId, Arc<Slot<Opened>>), Error> {
         let slot = Slot::new();
         let request = {
             let mut state = self.lock();
+            let template = request.clone();
             let request = state.pool.request(request)?;
             state.openings.push(Pending {
                 request,
+                template,
                 spec,
+                auth,
+                misfits: 0,
                 slot: slot.clone(),
             });
             self.pump(&mut state);
@@ -186,15 +230,15 @@ impl Instance {
         }
         self.wake_waiters();
     }
-    /// An opening went before its exchange: its request leaves the pool, and an exchange already handed to it is
-    /// aborted and its lease discarded.
+    /// An opening went before its exchange: its request and its context leave the instance, and an exchange already
+    /// handed to it is aborted and its lease discarded.
     pub(crate) fn abandon(&self, request: RequestId, slot: &Slot<Opened>) {
         let handed = slot.abandon();
         {
             let mut state = self.lock();
             state.openings.retain(|pending| pending.request != request);
             state.pool.abandon(request);
-            if let Some(Ok((mut io, lease))) = handed {
+            if let Some(Ok((mut io, lease, _))) = handed {
                 io.abort();
                 let _ = state.pool.release(lease, Disposition::Discarded);
             }
@@ -229,12 +273,19 @@ impl Instance {
     }
 }
 
-/// The pool's actions, to the adapter. Whether there were any.
+/// The pool's actions, to the adapter. A connect is given the context of the opening whose request it is for, and its
+/// scope is recorded. Whether there were any.
 fn actions(state: &mut InstanceState) -> bool {
     let mut progressed = false;
     while let Some(action) = state.pool.next_action() {
         progressed = true;
-        let Some(adapter) = state.adapter.as_mut() else {
+        let InstanceState {
+            adapter,
+            openings,
+            connections,
+            ..
+        } = &mut *state;
+        let Some(adapter) = adapter.as_mut() else {
             continue;
         };
         match action {
@@ -242,12 +293,29 @@ fn actions(state: &mut InstanceState) -> bool {
                 connection,
                 key,
                 identity,
+                tag,
                 ..
-            } => adapter.connect(ConnectCommand {
-                connection,
-                key,
-                identity,
-            }),
+            } => {
+                let auth = tag.and_then(|tag| {
+                    openings
+                        .iter()
+                        .find(|pending| pending.template.tag.as_deref() == Some(tag.as_str()))
+                        .map(|pending| pending.auth.clone())
+                });
+                connections.insert(
+                    connection,
+                    Setup {
+                        scope: auth.as_ref().map(AuthContext::scope),
+                        served: false,
+                    },
+                );
+                adapter.connect(ConnectCommand {
+                    connection,
+                    key,
+                    identity,
+                    auth,
+                })
+            }
             Action::CancelConnect { connection, .. } | Action::AbortConnect { connection } => {
                 adapter.cancel_connect(connection)
             }
@@ -272,14 +340,50 @@ fn openings(state: &mut InstanceState) -> bool {
             }
             Err(error) => Err(OpenFailure::Pool(error)),
             Ok(lease) => {
+                let scope = state.openings[index].auth.scope();
+                let fits = match state.connections.get_mut(&lease.connection()) {
+                    Some(setup) if setup.scope == Some(scope) => {
+                        Some(std::mem::replace(&mut setup.served, true))
+                    }
+                    _ => None,
+                };
+                let Some(reused) = fits else {
+                    // Set up under another operation's context: never handed over. Retire it and ask again.
+                    progressed = true;
+                    let _ = state.pool.release(lease, Disposition::Discarded);
+                    let bound = state.pool.capacity().per_user_host + 1;
+                    let pending = &mut state.openings[index];
+                    pending.misfits += 1;
+                    let asked = if pending.misfits > bound {
+                        Err(OpenFailure::NoFittingConnection)
+                    } else {
+                        state
+                            .pool
+                            .request(pending.template.clone())
+                            .map_err(OpenFailure::Pool)
+                    };
+                    match asked {
+                        Ok(request) => {
+                            state.openings[index].request = request;
+                            index += 1;
+                            continue;
+                        }
+                        Err(failure) => {
+                            let pending = state.openings.remove(index);
+                            let _ = pending.slot.fill(Err(failure));
+                            continue;
+                        }
+                    }
+                };
+                let pending = &state.openings[index];
                 let started = match state.adapter.as_mut() {
                     Some(adapter) => {
-                        adapter.start_exchange(lease.connection(), &state.openings[index].spec)
+                        adapter.start_exchange(lease.connection(), &pending.spec, &pending.auth)
                     }
                     None => Err(std::io::Error::other("endpoint instance is closed")),
                 };
                 match started {
-                    Ok(io) => Ok((io, lease)),
+                    Ok(io) => Ok((io, lease, reused)),
                     Err(error) => {
                         let _ = state.pool.release(lease, Disposition::Discarded);
                         Err(OpenFailure::Io(error))
@@ -289,7 +393,7 @@ fn openings(state: &mut InstanceState) -> bool {
         };
         progressed = true;
         let pending = state.openings.remove(index);
-        if let Err(Ok((mut io, lease))) = pending.slot.fill(outcome) {
+        if let Err(Ok((mut io, lease, _))) = pending.slot.fill(outcome) {
             // The opening went while its exchange was being started.
             io.abort();
             let _ = state.pool.release(lease, Disposition::Discarded);
@@ -316,4 +420,18 @@ fn settle(state: &mut InstanceState, cx: &mut Context<'_>) -> bool {
         });
     }
     progressed
+}
+
+cfg_if::cfg_if! {
+    if #[cfg(test)] {
+        impl Instance {
+            /// Makes every connection the instance holds now one set up under `scope`, as if another operation's
+            /// context had set it up: what a test needs to offer an opening only connections that do not fit.
+            pub(crate) fn rescope_for_test(&self, scope: AuthScope) {
+                for setup in self.lock().connections.values_mut() {
+                    setup.scope = Some(scope);
+                }
+            }
+        }
+    }
 }

@@ -2,7 +2,8 @@
 //!
 //! `PreparedOperation` is what the composition builds at the caller's entry and hands to `admit`: an explicit route, a
 //! validated profile, an opaque bounded authentication context, the operation's policy. This module defines the types
-//! and their validation; capturing them (the environment, the home, the agent) is core's, in step 1.5.
+//! and their validation; capturing them (the environment, the home, the agent) is core's
+//! (`transport_host/endpoint_environment.rs`, step 1.5).
 use crate::{BindingId, CleanupStatus, FactoryError};
 use gwz_transport::{
     binding,
@@ -73,12 +74,20 @@ impl EndpointRoute {
     }
 }
 
-/// The nonsecret canonical bytes of an endpoint profile and their digest. Equality compares the bytes after the digest
-/// matches: a digest collision is not equality. It is never logged or serialized, and its `Debug` shows neither.
-#[derive(Clone, PartialEq, Eq)]
+/// The nonsecret canonical bytes of an endpoint profile and their digest, and the validated inputs an endpoint
+/// adapter is made from (contract sections 4.1 and 7). Equality compares the bytes after the digest matches: a digest
+/// collision is not equality, and the inputs are not compared (the canonical bytes are what makes two inputs one
+/// endpoint). It is never logged or serialized, and its `Debug` shows nothing of it.
+///
+/// What the canonical bytes hold is the composition's (core captures HOME, the agent, the trust and proxy settings
+/// and the timeouts, the reuse design's section 3); what they must not hold is the operation's: its capacity, its
+/// repositories, its helper environment, its account tokens and its identity selection, which travel in the
+/// [`AuthContext`] and the exchange.
+#[derive(Clone)]
 pub struct EndpointProfile {
     digest: [u8; 32],
     canonical: Vec<u8>,
+    inputs: Option<Arc<dyn Any + Send + Sync>>,
 }
 /// The longest canonical profile accepted.
 const MAX_PROFILE_BYTES: usize = 16 * 1024;
@@ -87,36 +96,89 @@ impl EndpointProfile {
         if canonical.is_empty() || canonical.len() > MAX_PROFILE_BYTES {
             return Err(InvalidInput::Profile);
         }
-        Ok(Self { digest, canonical })
+        Ok(Self {
+            digest,
+            canonical,
+            inputs: None,
+        })
+    }
+    /// A profile that also carries the validated, immutable inputs its endpoint factory makes the adapter from. The
+    /// host never looks inside them; the factory that knows their type does.
+    pub fn with_inputs(
+        canonical: Vec<u8>,
+        digest: [u8; 32],
+        inputs: Arc<dyn Any + Send + Sync>,
+    ) -> Result<Self, InvalidInput> {
+        let mut profile = Self::new(canonical, digest)?;
+        profile.inputs = Some(inputs);
+        Ok(profile)
     }
     pub fn digest(&self) -> &[u8; 32] {
         &self.digest
+    }
+    /// The validated inputs, when the composition supplied them.
+    pub fn inputs(&self) -> Option<&Arc<dyn Any + Send + Sync>> {
+        self.inputs.as_ref()
     }
     /// The same profile: digest first, then the bytes.
     pub fn same_as(&self, other: &Self) -> bool {
         self.digest == other.digest && self.canonical == other.canonical
     }
 }
+impl PartialEq for EndpointProfile {
+    fn eq(&self, other: &Self) -> bool {
+        self.same_as(other)
+    }
+}
+impl Eq for EndpointProfile {}
 impl fmt::Debug for EndpointProfile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("EndpointProfile(..)")
     }
 }
 
-/// An opaque, bounded capability captured on the original caller entry. The host never looks inside it: it counts its
-/// charge against the admission budget and passes it to the adapters.
+/// Which authentication context a connection was set up under, as a fixed-size value the provider derives from the
+/// context's secret-bearing view (core: a digest of the helper's executable and environment). Two contexts with equal
+/// scopes may share a connection; any other pair may not. It names no account and carries no secret, and its `Debug`
+/// shows nothing of it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct AuthScope([u8; 32]);
+impl AuthScope {
+    pub fn new(value: [u8; 32]) -> Self {
+        Self(value)
+    }
+}
+impl fmt::Debug for AuthScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("AuthScope(..)")
+    }
+}
+
+/// An opaque, bounded capability captured on the original caller entry: the operation's own view for its
+/// authentication (core: the helper's executable and environment, so the account tokens it reads). The host never
+/// looks inside it: it counts its charge against the admission budget, keeps it in the operation's binding (never in
+/// an endpoint instance or a profile) and hands it to the adapter with each connect and each exchange it starts for
+/// that operation. A connection serves only operations whose context has the scope of the one it was set up under.
 #[derive(Clone)]
 pub struct AuthContext {
     charge: usize,
+    scope: AuthScope,
     provider: Arc<dyn Any + Send + Sync>,
 }
 impl AuthContext {
     /// `charge` is the most the provider retains for as long as this context lives, in bytes.
-    pub fn new(charge: usize, provider: Arc<dyn Any + Send + Sync>) -> Self {
-        Self { charge, provider }
+    pub fn new(charge: usize, scope: AuthScope, provider: Arc<dyn Any + Send + Sync>) -> Self {
+        Self {
+            charge,
+            scope,
+            provider,
+        }
     }
     pub fn charge(&self) -> usize {
         self.charge
+    }
+    pub fn scope(&self) -> AuthScope {
+        self.scope
     }
     pub fn provider(&self) -> &Arc<dyn Any + Send + Sync> {
         &self.provider
@@ -321,6 +383,9 @@ pub enum OpenFailure {
     Closing(TerminalReason),
     Pool(gwz_transport::pool::Error),
     Io(std::io::Error),
+    /// Every connection the pool offered was set up under another operation's authentication context, and it offered
+    /// more of them than the key can hold, so none will fit: nothing was started for this opening.
+    NoFittingConnection,
 }
 
 /// What `OperationCancel::cancel` found.
