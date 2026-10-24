@@ -1,7 +1,9 @@
 //! The four ports of contract section 4.1, supplied together to `build`: `Clock`, `OwnerSeed`, `Progress` and
 //! `EndpointFactory`. None gives the library a socket, a file, a thread or a process; the composition implements them
 //! (core's adapters over today's endpoints in step 1.3, fakes in this crate's tests).
-use crate::{CleanupDomain, CleanupStatus, EndpointProfile, safety::SharedProcessSafety};
+use crate::{
+    CleanupDomain, CleanupStatus, EndpointProfile, ExchangeSpec, safety::SharedProcessSafety,
+};
 use gwz_transport::{
     pool::{ConnectionId, Identity, Key},
     protocol::{Disposition, Failure},
@@ -74,8 +76,8 @@ impl fmt::Display for ProgressUnavailable {
     }
 }
 impl std::error::Error for ProgressUnavailable {}
-/// Executes the host's bounded work (its close's disposal now, its driver and timers later). It has no network
-/// primitive.
+/// Executes the host's bounded work: its driver (`pump.rs`, one task per host, spawned when the first endpoint instance
+/// attaches) and its close's disposal. It has no network primitive.
 pub trait Progress: Send + Sync + 'static {
     /// Whether work can run now. `build` asks once.
     fn check(&self) -> Result<(), ProgressUnavailable>;
@@ -140,30 +142,43 @@ pub enum Completion {
     },
     /// The physical connection is disposed: the pool may free its capacity.
     Closed { connection: ConnectionId },
+    /// An idle connection was lost (the peer closed or reset it, or sent bytes no exchange asked for) and the adapter
+    /// has disposed of it: the pool forgets it without a close (contract section 8, idle liveness). If a lease won
+    /// the race, the lease keeps it and its exchange fails; that lease's release and close end it.
+    IdleClosed { connection: ConnectionId },
 }
 /// One exchange on a leased connection, in the adapter's own terms. Each call returns at once: a call that cannot
 /// proceed returns `WouldBlock`, never blocks the caller.
 pub trait ExchangeIo: Send {
     fn write(&mut self, data: &[u8]) -> io::Result<usize>;
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize>;
-    /// The exchange ended in order. `Reusable` asserts that the protocol is cleanly complete and the connection can
-    /// serve another exchange; anything unproven is `Discarded`.
-    fn finish(&mut self) -> Disposition;
+    /// The orderly end of the exchange. The first poll starts it; `Ready(Reusable)` asserts that the native protocol
+    /// confirmed complete request/response cleanup and the connection can serve another exchange, and anything
+    /// unproven is `Ready(Discarded)`. The host's driver polls it (not the application), so a `Pending` must wake
+    /// `cx` when it can go on.
+    fn poll_finish(&mut self, cx: &mut Context<'_>) -> Poll<Disposition>;
     /// The exchange ends abnormally; its connection is discarded.
     fn abort(&mut self);
 }
-/// One endpoint instance. Every method returns at once (the commands only start work, and the adapter does its I/O on
-/// its own threads or tasks, outside any library lock) and completions come back through `poll_completion`.
+/// One endpoint instance, at the Connector/Resource level: it makes and disposes of physical connections and runs one
+/// exchange at a time on each, and it owns no pool and no reuse policy (contract sections 4.1 and 8: the host's pool
+/// chooses what to connect, lease, keep idle and close). Every method returns at once (the commands only start work,
+/// and the adapter does its I/O on its own threads or tasks, outside any library lock) and completions come back
+/// through `poll_completion`, which the host's driver polls whenever the adapter wakes the waker it was given.
 /// Dropping an adapter must still release what it holds, as a last resort and without a guarantee of confirmation.
-/// Contract 4.1's `authorize_reuse` and `cancel_work` arrive with steps 1.6 and 1.3.
+/// Contract 4.1's `authorize_reuse` arrives with step 1.6; `cancel_work` is `cancel_connect` and `close` here.
 pub trait EndpointAdapter: Send {
     fn connect(&mut self, command: ConnectCommand);
     /// The connect is no longer wanted; its `Connected` completion still arrives.
     fn cancel_connect(&mut self, connection: ConnectionId);
     /// Dispose of `connection`; `Completion::Closed` confirms it.
     fn close(&mut self, connection: ConnectionId);
-    /// Starts an exchange on `connection`, which the caller leases.
-    fn start_exchange(&mut self, connection: ConnectionId) -> io::Result<Box<dyn ExchangeIo>>;
+    /// Starts the exchange `spec` names (its Git service and path) on `connection`, which the caller leases.
+    fn start_exchange(
+        &mut self,
+        connection: ConnectionId,
+        spec: &ExchangeSpec,
+    ) -> io::Result<Box<dyn ExchangeIo>>;
     /// The next completion, or `Pending` with the waker registered.
     fn poll_completion(&mut self, cx: &mut Context<'_>) -> Poll<Completion>;
     /// The first poll starts disposal; `Ready` means disposal is confirmed. Polling again after `Ready` is `Ready`.

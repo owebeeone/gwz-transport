@@ -188,15 +188,77 @@ impl PreparedOperation {
     }
 }
 
-/// What an exchange connects to: the pool's key and identity.
+/// The Git service of one exchange (contract section 9): a service's advertisement or its exchange, for upload-pack
+/// (fetch) and receive-pack (push). It is the crate's own type: the public API exports no gwz-transport Git `Open`, and
+/// it names nothing outside the Git smart protocol (no method, header or generic URL).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GitService {
+    UploadPackAdvertisement,
+    UploadPackExchange,
+    ReceivePackAdvertisement,
+    ReceivePackExchange,
+}
+impl GitService {
+    /// Whether the service writes to the remote repository (receive-pack).
+    pub fn is_receive_pack(self) -> bool {
+        matches!(
+            self,
+            Self::ReceivePackAdvertisement | Self::ReceivePackExchange
+        )
+    }
+    /// Whether this is the service's advertisement rather than its exchange.
+    pub fn is_advertisement(self) -> bool {
+        matches!(
+            self,
+            Self::UploadPackAdvertisement | Self::ReceivePackAdvertisement
+        )
+    }
+}
+/// The longest repository path an exchange accepts, in bytes (the SSH command's own bound).
+const MAX_PATH_BYTES: usize = 16 * 1024;
+
+/// What an exchange connects to and runs: the pool's key and identity, the Git service, and the repository path on
+/// the remote. The path is validated here, before any effect: non-empty, at most 16 KiB, no NUL, and not starting
+/// with `-` (so that no adapter can pass it to a remote command as an option).
 #[derive(Clone, Debug)]
 pub struct ExchangeSpec {
     pub(crate) key: Key,
     pub(crate) identity: Identity,
+    service: GitService,
+    path: String,
 }
 impl ExchangeSpec {
-    pub fn new(key: Key, identity: Identity) -> Self {
-        Self { key, identity }
+    pub fn git(
+        key: Key,
+        identity: Identity,
+        service: GitService,
+        path: &str,
+    ) -> Result<Self, InvalidInput> {
+        if path.is_empty()
+            || path.len() > MAX_PATH_BYTES
+            || path.contains('\0')
+            || path.starts_with('-')
+        {
+            return Err(InvalidInput::Spec);
+        }
+        Ok(Self {
+            key,
+            identity,
+            service,
+            path: path.into(),
+        })
+    }
+    pub fn key(&self) -> &Key {
+        &self.key
+    }
+    pub fn identity(&self) -> &Identity {
+        &self.identity
+    }
+    pub fn service(&self) -> GitService {
+        self.service
+    }
+    pub fn path(&self) -> &str {
+        &self.path
     }
 }
 

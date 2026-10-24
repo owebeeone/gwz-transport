@@ -15,7 +15,8 @@
 //!
 //! From step 1.2 a handle admits operations (`admit`, in `admission.rs`), and each registered operation owns a binding of
 //! its own (`binding.rs`, `exchange.rs`): the host keeps the endpoint instances and their pools (`instance.rs`) and
-//! leases connections to bindings.
+//! leases connections to bindings. From step 1.3b the owner also owns the host's driver (`pump.rs`), the task on the
+//! composition's `Progress` that advances the instances' pending work without any application call.
 //!
 //! What it is not. It is not a process-wide singleton and there is no ambient lookup: the composition builds the owner,
 //! keeps it, and hands handles out; nothing here is stored in a static or a thread local, and no identifier comes from
@@ -30,6 +31,7 @@ use crate::{
     instance::Instance,
     operation::{OperationEnd, Registration, TerminalReason},
     ports::{Clock, EndpointFactory, Progress},
+    pump::{self, Driver, Signal},
     safety::SharedProcessSafety,
 };
 use gwz_transport::{mux::Attachment, pool};
@@ -232,7 +234,9 @@ pub(crate) struct HostState {
 pub(crate) struct HostShared {
     pub(crate) namespace: HostNamespace,
     pub(crate) clock: Arc<dyn Clock>,
-    progress: Arc<dyn Progress>,
+    pub(crate) progress: Arc<dyn Progress>,
+    /// How the instances' adapters reach the host's driver, and how a seal stops it.
+    pub(crate) signal: Arc<Signal>,
     factory: Arc<dyn EndpointFactory>,
     domain: CleanupDomain,
     safety: SharedProcessSafety,
@@ -252,10 +256,12 @@ pub fn build(config: HostConfig, ports: HostPorts) -> Result<(HostOwner, HostHan
         .progress
         .check()
         .map_err(|_| BuildError::UnavailableProgress)?;
+    let signal = Signal::new();
     let shared = Arc::new(HostShared {
         namespace: ports.seed.namespace(),
         clock: ports.clock,
         progress: ports.progress,
+        signal: signal.clone(),
         factory: ports.factory,
         domain: config.domain,
         safety: config.safety,
@@ -281,6 +287,7 @@ pub fn build(config: HostConfig, ports: HostPorts) -> Result<(HostOwner, HostHan
     Ok((
         HostOwner {
             shared: Some(shared.clone()),
+            driver: Driver::new(signal),
         },
         HostHandle { backend: shared },
     ))
@@ -295,6 +302,8 @@ impl HostShared {
     /// claim (releasing its slot, once) and cancels every registered binding, so a registration either happened before
     /// this (and is counted as cancelled) or finds itself revoked.
     fn seal(self: &Arc<Self>, reason: TerminalReason) -> Cell<CleanupStatus> {
+        // The driver ends at its next pass, whatever sealed the host (its owner, its domain, a progress fault).
+        self.signal.stop();
         let (cell, instances, wakers) = {
             let mut state = self.lock();
             if let Some(cell) = &state.close {
@@ -329,16 +338,18 @@ impl HostShared {
         for waker in wakers {
             waker.wake();
         }
-        // The instances' pools stop (their connections are told to close) and their adapters are taken for disposal.
+        // The instances' pools stop (their connections are told to close), what is in flight on them ends with the
+        // reason, and their adapters are taken for disposal.
         let mut adapters = Vec::new();
         for instance in &instances {
             {
                 let mut state = instance.lock();
                 state.pool.shutdown();
                 instance.pump(&mut state);
-                if let Some(adapter) = state.adapter.take() {
-                    adapters.push(adapter);
-                }
+            }
+            instance.fail_in_flight(reason);
+            if let Some(adapter) = instance.lock().adapter.take() {
+                adapters.push(adapter);
             }
             instance.wake_waiters();
         }
@@ -376,8 +387,20 @@ impl HostShared {
             Err(refused) => (ticket, Some(refused.into_work())),
         }
     }
+    /// The host's progress failed (its executor refused or dropped the driver): the host is sealed with `HostFault`.
+    pub(crate) fn fault(self: &Arc<Self>) {
+        drop(self.seal(TerminalReason::HostFault));
+    }
+    /// The instances the driver drives.
+    pub(crate) fn instances(&self) -> Vec<Arc<Instance>> {
+        self.lock().instances.clone()
+    }
     /// The instance for `spec`'s profile: an existing one (equal profiles coalesce) or a new one the factory makes.
-    pub(crate) fn attach_profile(&self, spec: &EndpointSpec) -> Result<Arc<Instance>, AttachError> {
+    /// The first instance starts the host's driver.
+    pub(crate) fn attach_profile(
+        self: &Arc<Self>,
+        spec: &EndpointSpec,
+    ) -> Result<Arc<Instance>, AttachError> {
         let find = |state: &HostState| {
             state
                 .instances
@@ -403,9 +426,13 @@ impl HostShared {
             .factory
             .create(spec, &FactoryEnv::new(&self.domain, &self.safety))
             .and_then(|adapter| {
-                Instance::new(spec.profile.clone(), adapter, self.clock.clone()).map_err(|_| {
-                    FactoryError::new(FactoryReason::Unavailable, CleanupStatus::Complete)
-                })
+                Instance::new(
+                    spec.profile.clone(),
+                    adapter,
+                    self.clock.clone(),
+                    self.signal.clone(),
+                )
+                .map_err(|_| FactoryError::new(FactoryReason::Unavailable, CleanupStatus::Complete))
             });
         let mut state = self.lock();
         state.creating -= 1;
@@ -417,6 +444,9 @@ impl HostShared {
                     return Ok(existing);
                 }
                 state.instances.push(instance.clone());
+                drop(state);
+                // The executor is asked outside the host's lock; a refusal has faulted the host.
+                pump::ensure_running(self).map_err(|_| AttachError::Closing(HostClosing))?;
                 Ok(instance)
             }
             Ok(instance) => {
@@ -700,10 +730,14 @@ async fn close_job(host: Arc<HostShared>, slot: InstanceSlot, cell: Cell<Cleanup
 /// The only authority that ends the host. `Send`, not `Clone`.
 pub struct HostOwner {
     shared: Option<Arc<HostShared>>,
+    /// The stop authority over the host's driver task.
+    driver: Driver,
 }
 impl HostOwner {
     /// Seals the host now and returns the wait for its cleanup. The seal and the disposal do not depend on polling it.
+    /// The host's driver stops: in-flight openings end with `OpenFailure::Closing(HostClosing)`.
     pub fn close(mut self) -> HostClose {
+        self.driver.stop();
         let cell = match self.shared.take() {
             Some(shared) => shared.seal(TerminalReason::HostClosing),
             None => {
@@ -719,6 +753,7 @@ impl Drop for HostOwner {
     /// An owner that goes without `close` still seals the host: handles that outlive it must not keep open a host that
     /// nothing can end.
     fn drop(&mut self) {
+        self.driver.stop();
         if let Some(shared) = self.shared.take() {
             drop(shared.seal(TerminalReason::HostClosing));
         }
@@ -750,7 +785,7 @@ impl Future for HostClose {
 pub(crate) trait Backend: Send + Sync {
     fn snapshot(&self) -> HostSnapshot;
     fn check_open(&self) -> Result<(), HostClosing>;
-    fn attach_instance(&self, spec: EndpointSpec) -> Result<(), AttachError>;
+    fn attach_instance(self: Arc<Self>, spec: EndpointSpec) -> Result<(), AttachError>;
     fn admit(self: Arc<Self>, input: PreparedOperation) -> Result<Admission, AdmissionError>;
     fn carrier(&self) -> CarrierId;
     fn route(
@@ -799,7 +834,7 @@ impl Backend for HostShared {
             Err(HostClosing)
         }
     }
-    fn attach_instance(&self, spec: EndpointSpec) -> Result<(), AttachError> {
+    fn attach_instance(self: Arc<Self>, spec: EndpointSpec) -> Result<(), AttachError> {
         self.attach_profile(&spec).map(|_| ())
     }
     fn admit(self: Arc<Self>, input: PreparedOperation) -> Result<Admission, AdmissionError> {
@@ -839,7 +874,7 @@ impl HostHandle {
     }
     #[allow(dead_code, reason = "the tests attach instances directly")]
     pub(crate) fn attach_instance(&self, spec: EndpointSpec) -> Result<(), AttachError> {
-        self.backend.attach_instance(spec)
+        self.backend.clone().attach_instance(spec)
     }
     #[allow(dead_code, reason = "the carrier adapter routes frames through it")]
     pub(crate) fn carrier(&self) -> CarrierId {

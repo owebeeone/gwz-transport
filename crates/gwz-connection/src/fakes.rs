@@ -1,12 +1,15 @@
 //! Fakes for the ports of contract section 4.1: a manual clock, a stepped executor, a controllable endpoint factory,
-//! a stepped retainer and a counting process-safety gate. Nothing here touches a file, a socket or a thread.
+//! a stepped retainer and a counting process-safety gate. Nothing here touches a file, a socket or a thread. The fake
+//! adapter completes at once by default; `asynchronous` makes its connects (and `hold_finish` its exchanges' ends)
+//! complete only when the test says, waking the waker the host gave it, as a real adapter's worker does.
 use crate::{
     AuthContext, CleanupDomain, CleanupDomainOwner, Clock, Completion, ConnectCommand,
     DomainConfig, DriverWork, EndpointAdapter, EndpointFactory, EndpointProfile, EndpointRoute,
-    EndpointSpec, ExchangeIo, FactoryEnv, FactoryError, FactoryReason, HostConfig, HostHandle,
-    HostLimits, HostNamespace, HostOwner, HostPorts, OperationPolicy, OwnerSeed, PreparedOperation,
-    ProcessSafety, Progress, ProgressUnavailable, RetainedWork, RetentionPort, RetentionRefused,
-    SafetyHold, SafetyState, SafetyUnavailable, Sleep, Tick, cleanup_domain,
+    EndpointSpec, ExchangeIo, ExchangeSpec, FactoryEnv, FactoryError, FactoryReason, GitService,
+    HostConfig, HostHandle, HostLimits, HostNamespace, HostOwner, HostPorts, OperationPolicy,
+    OwnerSeed, PreparedOperation, ProcessSafety, Progress, ProgressUnavailable, RetainedWork,
+    RetentionPort, RetentionRefused, SafetyHold, SafetyState, SafetyUnavailable, Sleep, Tick,
+    cleanup_domain,
 };
 use gwz_transport::{
     pool::{ConnectionId, Identity, Key},
@@ -128,6 +131,15 @@ impl ManualProgress {
     pub(crate) fn spawned(&self) -> usize {
         self.spawned.load(Ordering::SeqCst)
     }
+    /// Tasks spawned and not yet finished.
+    pub(crate) fn pending(&self) -> usize {
+        self.tasks.lock().unwrap().len()
+    }
+    /// The executor goes away: every unfinished task is dropped unrun.
+    pub(crate) fn drop_all(&self) {
+        let tasks = std::mem::take(&mut *self.tasks.lock().unwrap());
+        drop(tasks);
+    }
     /// Polls every woken task until none is.
     pub(crate) fn run(&self) {
         loop {
@@ -209,6 +221,16 @@ pub(crate) struct FakeWorld {
     pub(crate) exchanges: AtomicUsize,
     /// The next exchange to finish reports that its connection cannot be reused.
     pub(crate) discard_next: AtomicBool,
+    /// Connects complete only on `complete_connects`, as a real worker's do.
+    pub(crate) asynchronous: AtomicBool,
+    /// Exchanges' ends are confirmed only on `confirm_finishes`.
+    pub(crate) hold_finish: AtomicBool,
+    pub(crate) confirmed: AtomicBool,
+    pub(crate) cancelled_connects: AtomicUsize,
+    /// The service and path of the last exchange started.
+    pub(crate) last_spec: Mutex<Option<(GitService, String)>>,
+    /// Every adapter's queue and the waker the host last gave it.
+    queues: Mutex<Vec<Arc<Mutex<Queue>>>>,
     pub(crate) gate: Arc<Gate>,
     pub(crate) safeties: Mutex<Vec<(Arc<dyn ProcessSafety>, SafetyState)>>,
     pub(crate) domains: Mutex<Vec<CleanupDomain>>,
@@ -225,6 +247,12 @@ impl FakeWorld {
             closes: AtomicUsize::new(0),
             exchanges: AtomicUsize::new(0),
             discard_next: AtomicBool::new(false),
+            asynchronous: AtomicBool::new(false),
+            hold_finish: AtomicBool::new(false),
+            confirmed: AtomicBool::new(false),
+            cancelled_connects: AtomicUsize::new(0),
+            last_spec: Mutex::new(None),
+            queues: Mutex::new(Vec::new()),
             gate: Arc::new(Gate {
                 open: Mutex::new((false, Vec::new())),
             }),
@@ -244,6 +272,54 @@ impl FakeWorld {
     pub(crate) fn closes(&self) -> usize {
         self.closes.load(Ordering::SeqCst)
     }
+    /// Every adapter's pending connects succeed now; the hosts' wakers are woken (no caller is polled).
+    pub(crate) fn complete_connects(&self) {
+        self.each_queue(|queue| {
+            for (connection, identity) in std::mem::take(&mut queue.connecting) {
+                queue.connected.push(connection);
+                queue.completions.push_back(Completion::Connected {
+                    connection,
+                    result: Ok(Some(identity)),
+                });
+            }
+        });
+    }
+    /// Every connection every adapter holds is lost while idle (the peer closed it), and disposed.
+    pub(crate) fn lose_connections(&self) {
+        self.each_queue(|queue| {
+            for connection in std::mem::take(&mut queue.connected) {
+                queue
+                    .completions
+                    .push_back(Completion::IdleClosed { connection });
+            }
+        });
+    }
+    /// The held exchanges' ends are confirmed; the hosts' wakers are woken.
+    pub(crate) fn confirm_finishes(&self) {
+        self.confirmed.store(true, Ordering::SeqCst);
+        self.each_queue(|_| {});
+    }
+    fn each_queue(&self, change: impl Fn(&mut Queue)) {
+        let queues = self.queues.lock().unwrap().clone();
+        for queue in queues {
+            let waker = {
+                let mut queue = queue.lock().unwrap();
+                change(&mut queue);
+                queue.waker.clone()
+            };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
+    }
+}
+/// One fake adapter's state that the test reaches through the world.
+#[derive(Default)]
+struct Queue {
+    completions: VecDeque<Completion>,
+    connecting: Vec<(ConnectionId, Identity)>,
+    connected: Vec<ConnectionId>,
+    waker: Option<Waker>,
 }
 pub(crate) struct FakeFactory(pub(crate) Arc<FakeWorld>);
 impl EndpointFactory for FakeFactory {
@@ -266,11 +342,13 @@ impl EndpointFactory for FakeFactory {
             ));
         }
         world.created.fetch_add(1, Ordering::SeqCst);
+        let queue = Arc::new(Mutex::new(Queue::default()));
+        world.queues.lock().unwrap().push(queue.clone());
         Ok(Box::new(FakeAdapter {
             world: world.clone(),
             stuck: world.stuck.load(Ordering::SeqCst),
             done: false,
-            completions: VecDeque::new(),
+            queue,
         }))
     }
 }
@@ -278,11 +356,12 @@ struct FakeAdapter {
     world: Arc<FakeWorld>,
     stuck: bool,
     done: bool,
-    completions: VecDeque<Completion>,
+    queue: Arc<Mutex<Queue>>,
 }
 /// A loopback exchange: what is written is what is read.
 struct FakeIo {
     world: Arc<FakeWorld>,
+    queue: Arc<Mutex<Queue>>,
     buffer: VecDeque<u8>,
 }
 impl ExchangeIo for FakeIo {
@@ -303,41 +382,87 @@ impl ExchangeIo for FakeIo {
         }
         Ok(n)
     }
-    fn finish(&mut self) -> Disposition {
-        if self.world.discard_next.swap(false, Ordering::SeqCst) {
+    fn poll_finish(&mut self, cx: &mut Context<'_>) -> Poll<Disposition> {
+        if self.world.hold_finish.load(Ordering::SeqCst)
+            && !self.world.confirmed.load(Ordering::SeqCst)
+        {
+            // The adapter's worker wakes the host's waker when it confirms; the fake keeps it in its queue.
+            self.queue.lock().unwrap().waker = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+        Poll::Ready(if self.world.discard_next.swap(false, Ordering::SeqCst) {
             Disposition::Discarded
         } else {
             Disposition::Reusable
-        }
+        })
     }
     fn abort(&mut self) {}
 }
 impl EndpointAdapter for FakeAdapter {
     fn connect(&mut self, command: ConnectCommand) {
         self.world.connects.fetch_add(1, Ordering::SeqCst);
-        self.completions.push_back(Completion::Connected {
+        let mut queue = self.queue.lock().unwrap();
+        if self.world.asynchronous.load(Ordering::SeqCst) {
+            queue
+                .connecting
+                .push((command.connection, command.identity));
+            return;
+        }
+        queue.connected.push(command.connection);
+        queue.completions.push_back(Completion::Connected {
             connection: command.connection,
             // The proof of the identity the connection was made for is what lets the pool reuse it.
             result: Ok(Some(command.identity)),
         });
     }
-    fn cancel_connect(&mut self, _connection: ConnectionId) {}
+    fn cancel_connect(&mut self, connection: ConnectionId) {
+        self.world.cancelled_connects.fetch_add(1, Ordering::SeqCst);
+        let mut queue = self.queue.lock().unwrap();
+        // The cancelled connect still reports, after its disposal.
+        if let Some(index) = queue
+            .connecting
+            .iter()
+            .position(|(id, _)| *id == connection)
+        {
+            queue.connecting.remove(index);
+            queue.completions.push_back(Completion::Connected {
+                connection,
+                result: Err(gwz_transport::protocol::Failure {
+                    code: gwz_transport::protocol::ErrorCode::Cancelled,
+                    ..Default::default()
+                }),
+            });
+        }
+    }
     fn close(&mut self, connection: ConnectionId) {
         self.world.closes.fetch_add(1, Ordering::SeqCst);
-        self.completions
+        let mut queue = self.queue.lock().unwrap();
+        queue.connected.retain(|id| *id != connection);
+        queue
+            .completions
             .push_back(Completion::Closed { connection });
     }
-    fn start_exchange(&mut self, _connection: ConnectionId) -> io::Result<Box<dyn ExchangeIo>> {
+    fn start_exchange(
+        &mut self,
+        _connection: ConnectionId,
+        spec: &ExchangeSpec,
+    ) -> io::Result<Box<dyn ExchangeIo>> {
         self.world.exchanges.fetch_add(1, Ordering::SeqCst);
+        *self.world.last_spec.lock().unwrap() = Some((spec.service(), spec.path().into()));
         Ok(Box::new(FakeIo {
             world: self.world.clone(),
+            queue: self.queue.clone(),
             buffer: VecDeque::new(),
         }))
     }
-    fn poll_completion(&mut self, _cx: &mut Context<'_>) -> Poll<Completion> {
-        match self.completions.pop_front() {
+    fn poll_completion(&mut self, cx: &mut Context<'_>) -> Poll<Completion> {
+        let mut queue = self.queue.lock().unwrap();
+        match queue.completions.pop_front() {
             Some(completion) => Poll::Ready(completion),
-            None => Poll::Pending,
+            None => {
+                queue.waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
         }
     }
     fn poll_dispose(&mut self, cx: &mut Context<'_>) -> Poll<()> {
@@ -505,8 +630,14 @@ pub(crate) fn prepared(name: &str, n: u8) -> PreparedOperation {
 pub(crate) fn ssh_key() -> Key {
     Key::ssh("git", "example.invalid", 22)
 }
-pub(crate) fn exchange_spec() -> crate::ExchangeSpec {
-    crate::ExchangeSpec::new(ssh_key(), Identity::Ambient)
+pub(crate) fn exchange_spec() -> ExchangeSpec {
+    ExchangeSpec::git(
+        ssh_key(),
+        Identity::Ambient,
+        GitService::UploadPackExchange,
+        "/srv/repo.git",
+    )
+    .unwrap()
 }
 /// Polls a future that must already be ready.
 pub(crate) fn now<F: Future>(future: F) -> F::Output {

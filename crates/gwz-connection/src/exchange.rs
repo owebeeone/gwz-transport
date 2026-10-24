@@ -8,9 +8,9 @@ use crate::{
     CancelState, ExchangeEnd, ExchangeIo, ExchangeSpec, OpenError, OpenFailure, OperationEnd,
     Registration,
     binding::{BindingShared, closing_reason},
-    cell::Cell,
+    cell::{Cell, Slot},
     host::HostShared,
-    instance::Instance,
+    instance::{Instance, Opened},
     operation::TerminalReason,
 };
 use gwz_transport::{
@@ -20,7 +20,6 @@ use gwz_transport::{
 use std::{
     fmt,
     future::Future,
-    io,
     pin::Pin,
     sync::{
         Arc, Weak,
@@ -253,27 +252,71 @@ pub struct Opening {
     spec: ExchangeSpec,
 }
 impl Opening {
-    /// Leases a connection (reusing an idle one the host holds for this profile) and starts the exchange. Dropping the
-    /// future cancels this opening only.
+    /// Submits the opening to the host: from here its lease, its connection and the start of its exchange are the
+    /// host's driver's to progress, whether or not the returned future is polled (contract section 6: progress is
+    /// independent of the application's calls). The future yields the exchange once the driver has started it.
+    /// Dropping the future cancels this opening only; an exchange already started for it is aborted and its
+    /// connection discarded.
     pub fn wait(self) -> OpenWait {
+        let binding = self.live.binding.clone();
+        let refused = closing_reason(binding.closing.load(Acquire))
+            .map(OpenFailure::Closing)
+            .or_else(|| {
+                binding
+                    .cancelled
+                    .load(Acquire)
+                    .then_some(OpenFailure::Cancelled)
+            })
+            .or_else(|| binding.sealed.load(Acquire).then_some(OpenFailure::Sealed));
+        let submitted = match refused {
+            Some(failure) => Err(failure),
+            None => binding
+                .instance
+                .submit(
+                    Request::new(
+                        self.spec.key.clone(),
+                        self.spec.identity.clone(),
+                        Owner::new(binding.session.clone(), binding.operation.clone()),
+                    ),
+                    self.spec,
+                )
+                .map_err(OpenFailure::Pool),
+        };
+        let (submitted, early) = match submitted {
+            Ok(submitted) => (Some(submitted), None),
+            Err(failure) => (None, Some(failure)),
+        };
         OpenWait {
             live: Some(self.live),
-            spec: self.spec,
-            request: None,
+            submitted,
+            early,
         }
     }
 }
 /// See [`Opening::wait`].
 pub struct OpenWait {
     live: Option<Live>,
-    spec: ExchangeSpec,
-    request: Option<RequestId>,
+    submitted: Option<(RequestId, Arc<Slot<Opened>>)>,
+    early: Option<OpenFailure>,
+}
+impl OpenWait {
+    /// Whether the host's driver has already started this opening's exchange (or ended it): the next poll is ready.
+    pub fn is_ready(&self) -> bool {
+        self.early.is_some()
+            || self
+                .submitted
+                .as_ref()
+                .is_some_and(|(_, slot)| slot.is_filled())
+    }
 }
 impl Future for OpenWait {
     type Output = Result<Exchange, OpenFailure>;
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
-        let Some(live) = &this.live else {
+        if let Some(failure) = this.early.take() {
+            return Poll::Ready(Err(failure));
+        }
+        let (Some(live), Some((_, slot))) = (&this.live, &this.submitted) else {
             return Poll::Ready(Err(OpenFailure::Cancelled));
         };
         let binding = live.binding.clone();
@@ -286,64 +329,36 @@ impl Future for OpenWait {
         if binding.sealed.load(Acquire) {
             return Poll::Ready(Err(OpenFailure::Sealed));
         }
-        let instance = binding.instance.clone();
-        instance.wait(cx.waker());
-        let mut state = instance.lock();
-        let request = match this.request {
-            Some(request) => request,
-            None => {
-                let request = Request::new(
-                    this.spec.key.clone(),
-                    this.spec.identity.clone(),
-                    Owner::new(binding.session.clone(), binding.operation.clone()),
-                );
-                match state.pool.request(request) {
-                    Ok(id) => id,
-                    Err(error) => return Poll::Ready(Err(OpenFailure::Pool(error))),
-                }
+        // A cancellation or a seal wakes the instance's waiters; the driver fills the slot.
+        binding.instance.wait(cx.waker());
+        match slot.poll_take(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(failure)) => {
+                this.submitted = None;
+                Poll::Ready(Err(failure))
             }
-        };
-        this.request = Some(request);
-        instance.pump(&mut state);
-        match state.pool.take(request) {
-            Ok(lease) => {
-                this.request = None;
-                let started = match state.adapter.as_mut() {
-                    Some(adapter) => adapter.start_exchange(lease.connection()),
-                    None => Err(io::Error::other("endpoint instance is closed")),
-                };
-                match started {
-                    Ok(io) => {
-                        drop(state);
-                        let live = this.live.take().expect("live checked above");
-                        Poll::Ready(Ok(Exchange {
-                            stream: MessageStream { io, binding },
-                            lease: Some(LeaseGuard {
-                                instance,
-                                lease: Some(lease),
-                            }),
-                            _live: Some(live),
-                        }))
-                    }
-                    Err(error) => {
-                        let _ = state.pool.release(lease, Disposition::Discarded);
-                        instance.pump(&mut state);
-                        Poll::Ready(Err(OpenFailure::Io(error)))
-                    }
-                }
-            }
-            Err(gwz_transport::pool::Error::WouldBlock) => Poll::Pending,
-            Err(error) => {
-                this.request = None;
-                Poll::Ready(Err(OpenFailure::Pool(error)))
+            Poll::Ready(Ok((io, lease))) => {
+                this.submitted = None;
+                let live = this.live.take().expect("live checked above");
+                Poll::Ready(Ok(Exchange {
+                    stream: MessageStream {
+                        io: Some(io),
+                        binding: binding.clone(),
+                    },
+                    lease: Some(LeaseGuard {
+                        instance: binding.instance.clone(),
+                        lease: Some(lease),
+                    }),
+                    _live: Some(live),
+                }))
             }
         }
     }
 }
 impl Drop for OpenWait {
     fn drop(&mut self) {
-        if let (Some(request), Some(live)) = (self.request.take(), &self.live) {
-            live.binding.instance.abandon(request);
+        if let (Some((request, slot)), Some(live)) = (self.submitted.take(), &self.live) {
+            live.binding.instance.abandon(request, &slot);
         }
     }
 }
@@ -373,28 +388,26 @@ impl Drop for LeaseGuard {
 pub enum StreamError {
     /// The operation was cancelled (or its host closed): the exchange is over.
     Cancelled,
-    Io(io::Error),
+    Io(std::io::Error),
 }
 /// One exchange's byte stream, over the adapter's own I/O. Reads and writes are serialized by `&mut`.
 pub struct MessageStream {
-    io: Box<dyn ExchangeIo>,
+    /// Taken only by the exchange's end, which consumes the exchange.
+    io: Option<Box<dyn ExchangeIo>>,
     binding: Arc<BindingShared>,
 }
 impl MessageStream {
     pub fn write(&mut self, data: &[u8]) -> Result<usize, StreamError> {
-        self.check()?;
-        self.io.write(data).map_err(StreamError::Io)
+        self.io()?.write(data).map_err(StreamError::Io)
     }
     pub fn read(&mut self, out: &mut [u8]) -> Result<usize, StreamError> {
-        self.check()?;
-        self.io.read(out).map_err(StreamError::Io)
+        self.io()?.read(out).map_err(StreamError::Io)
     }
-    fn check(&self) -> Result<(), StreamError> {
+    fn io(&mut self) -> Result<&mut Box<dyn ExchangeIo>, StreamError> {
         if self.binding.cancelled.load(Acquire) {
-            Err(StreamError::Cancelled)
-        } else {
-            Ok(())
+            return Err(StreamError::Cancelled);
         }
+        self.io.as_mut().ok_or(StreamError::Cancelled)
     }
 }
 
@@ -409,45 +422,50 @@ impl Exchange {
         &mut self.stream
     }
     /// Ends the exchange: its connection goes back to idle only if the adapter proves the protocol clean and the
-    /// operation was not cancelled. The lease is settled when this is built.
+    /// operation was not cancelled. The orderly end starts when this is built, and the host's driver settles the
+    /// lease when the adapter confirms it (`ExchangeIo::poll_finish`), whether or not the future is polled.
     pub fn finish(mut self) -> ExchangeFinish {
-        let disposition = if self.stream.binding.cancelled.load(Acquire) {
-            self.stream.io.abort();
-            Disposition::Discarded
-        } else {
-            self.stream.io.finish()
+        let (Some(mut io), Some(mut lease)) = (self.stream.io.take(), self.lease.take()) else {
+            return ExchangeFinish(Cell::ready(discarded()));
         };
-        if let Some(lease) = self.lease.take() {
-            lease.release(disposition);
+        if self.stream.binding.cancelled.load(Acquire) {
+            io.abort();
+            lease.release(Disposition::Discarded);
+            return ExchangeFinish(Cell::ready(discarded()));
         }
-        ExchangeFinish(Some(ExchangeEnd {
-            disposition,
-            cleanup: crate::CleanupStatus::Complete,
-        }))
+        let id = lease.lease.take().expect("a live lease");
+        ExchangeFinish(lease.instance.settle(io, id))
     }
     /// Ends the exchange abnormally: its connection is discarded.
     pub fn abort(mut self) {
-        self.stream.io.abort();
+        if let Some(mut io) = self.stream.io.take() {
+            io.abort();
+        }
         if let Some(lease) = self.lease.take() {
             lease.release(Disposition::Discarded);
         }
     }
 }
+fn discarded() -> ExchangeEnd {
+    ExchangeEnd {
+        disposition: Disposition::Discarded,
+        cleanup: crate::CleanupStatus::Complete,
+    }
+}
 impl Drop for Exchange {
     fn drop(&mut self) {
-        if self.lease.is_some() {
-            self.stream.io.abort();
+        if self.lease.is_some()
+            && let Some(io) = self.stream.io.as_mut()
+        {
+            io.abort();
         }
     }
 }
-/// The receipt of a finished exchange (already settled).
-pub struct ExchangeFinish(Option<ExchangeEnd>);
+/// The receipt of a finished exchange, set by the host's driver once the adapter confirmed the exchange's end.
+pub struct ExchangeFinish(Cell<ExchangeEnd>);
 impl Future for ExchangeFinish {
     type Output = ExchangeEnd;
-    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<ExchangeEnd> {
-        match self.0.take() {
-            Some(end) => Poll::Ready(end),
-            None => Poll::Pending,
-        }
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<ExchangeEnd> {
+        self.0.poll(cx)
     }
 }

@@ -10,9 +10,10 @@
 //! - [`host`]: `build`, `HostOwner`, `HostHandle` (sections 4 and 5).
 //! - `admission`, `exchange`: `admit`, `acquire`, `register`, and the `Operation`, `Opening` and `Exchange` an operation
 //!   owns (sections 4, 5 and 8); `binding`: the two mux sessions each operation owns (sections 6 and D6); `instance`:
-//!   an endpoint instance, its adapter and its pool.
+//!   an endpoint instance, its adapter and its pool; `pump`: the host's driver, the task on the composition's
+//!   `Progress` that advances every instance's pending work without application calls.
 //!
-//! Steps 1.1 and 1.2 of dev-docs/GwzTransportReleaseConvergencePlan.md.
+//! Steps 1.1, 1.2 and 1.3b of dev-docs/GwzTransportReleaseConvergencePlan.md.
 mod admission;
 mod binding;
 mod cell;
@@ -22,6 +23,7 @@ mod host;
 mod instance;
 mod operation;
 mod ports;
+mod pump;
 mod safety;
 
 pub use admission::{Acquire, Admission, AdmissionPermit};
@@ -40,7 +42,7 @@ pub use host::{
 };
 pub use operation::{
     AdmissionError, AuthContext, CancelState, EndpointProfile, EndpointRoute, ExchangeEnd,
-    ExchangeSpec, InvalidInput, OpenError, OpenFailure, OperationEnd, OperationPolicy,
+    ExchangeSpec, GitService, InvalidInput, OpenError, OpenFailure, OperationEnd, OperationPolicy,
     PreparedOperation, Registration, TerminalReason,
 };
 pub use ports::{
@@ -56,5 +58,6 @@ cfg_if::cfg_if! {
         mod fakes;
         mod host_tests;
         mod operation_tests;
+        mod pump_tests;
     }
 }
