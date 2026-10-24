@@ -2,7 +2,8 @@
 //! `EndpointFactory`. None gives the library a socket, a file, a thread or a process; the composition implements them
 //! (core's adapters over today's endpoints in step 1.3, fakes in this crate's tests).
 use crate::{
-    CleanupDomain, CleanupStatus, EndpointProfile, ExchangeSpec, safety::SharedProcessSafety,
+    BindingId, CleanupDomain, CleanupStatus, EndpointProfile, ExchangeSpec,
+    safety::SharedProcessSafety,
 };
 use gwz_transport::{
     pool::{ConnectionId, Identity, Key},
@@ -146,6 +147,35 @@ pub enum Completion {
     /// has disposed of it: the pool forgets it without a close (contract section 8, idle liveness). If a lease won
     /// the race, the lease keeps it and its exchange fails; that lease's release and close end it.
     IdleClosed { connection: ConnectionId },
+    /// The proof `EndpointAdapter::authorize_reuse` started for `connection` ended (contract section 7.1).
+    Reuse {
+        connection: ConnectionId,
+        verdict: ReuseVerdict,
+    },
+}
+/// Prove `connection`, an idle connection that another binding last used, for `binding` before the host leases it to
+/// `binding` (contract sections 4.1 and 7.1): an agent's fresh possession signature for the key the connection
+/// authenticated with, an explicit key's equality, a fresh trust check of its host key. While the proof runs the
+/// connection is `binding`'s lease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ReuseCommand {
+    pub connection: ConnectionId,
+    pub binding: BindingId,
+}
+/// How a reuse proof ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReuseVerdict {
+    /// The binding proved the connection's authority now: the lease serves it.
+    Authorized,
+    /// The proof failed (the key is gone, the signature does not verify, the host key is no longer trusted): the
+    /// connection is discarded, and the adapter reports matching idle connections it retires as `IdleClosed`. The
+    /// opening asks for a new connection.
+    Revoked,
+    /// Nothing this binding can prove (a password's connection, a key the adapter cannot check), or the proof could
+    /// not finish: the connection goes back to idle for the binding that used it, and the opening asks for a new one.
+    Unprovable,
 }
 /// One exchange on a leased connection, in the adapter's own terms. Each call returns at once: a call that cannot
 /// proceed returns `WouldBlock`, never blocks the caller.
@@ -166,7 +196,7 @@ pub trait ExchangeIo: Send {
 /// and the adapter does its I/O on its own threads or tasks, outside any library lock) and completions come back
 /// through `poll_completion`, which the host's driver polls whenever the adapter wakes the waker it was given.
 /// Dropping an adapter must still release what it holds, as a last resort and without a guarantee of confirmation.
-/// Contract 4.1's `authorize_reuse` arrives with step 1.6; `cancel_work` is `cancel_connect` and `close` here.
+/// `cancel_work` is `cancel_connect` and `close` here.
 pub trait EndpointAdapter: Send {
     fn connect(&mut self, command: ConnectCommand);
     /// The connect is no longer wanted; its `Connected` completion still arrives.
@@ -179,6 +209,13 @@ pub trait EndpointAdapter: Send {
         connection: ConnectionId,
         spec: &ExchangeSpec,
     ) -> io::Result<Box<dyn ExchangeIo>>;
+    /// Contract section 4.1's `authorize_reuse` (section 7.1; step 1.6): starts the proof `command` names and reports
+    /// it as `Completion::Reuse`, or returns `false` when it starts none, which the host takes as `Unprovable`. The
+    /// default starts none: an adapter that proves nothing never serves one binding's connection to another.
+    fn authorize_reuse(&mut self, command: ReuseCommand) -> bool {
+        let _ = command;
+        false
+    }
     /// The next completion, or `Pending` with the waker registered.
     fn poll_completion(&mut self, cx: &mut Context<'_>) -> Poll<Completion>;
     /// The first poll starts disposal; `Ready` means disposal is confirmed. Polling again after `Ready` is `Ready`.
