@@ -1,0 +1,18 @@
+[package]
+name = "gwz-connection"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "GPL-2.0-only"
+repository = "https://github.com/owebeeone/gwz-transport"
+description = "Connection owner for GWZ transport: ports, cleanup domain, host owner and handle"
+publish = false
+
+# Contract section 3: this crate coordinates injected ports and depends on no other GWZ crate yet
+# (gwz-transport arrives with the first pool or binding type that uses it, step 1.2). It never depends on
+# gwz-core or git2; the Cargo edge is what makes the first proof (contract section 13.1) free of both.
+[dependencies]
+cfg-if = "1"
+
+[lints.rust]
+unsafe_code = "forbid"

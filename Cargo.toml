@@ -12,6 +12,8 @@ publish = false
 
 [workspace]
 resolver = "2"
+# The connection owner (contract section 3). The root package keeps its no-dependency charter.
+members = ["crates/gwz-connection"]
 
 [dependencies]
 
