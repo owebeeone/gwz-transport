@@ -1,10 +1,10 @@
 //! The host's owner and handle against fakes only (step 1.1 of dev-docs/GwzTransportReleaseConvergencePlan.md;
 //! contract sections 4, 4.1, 5, 10, 11 and 13.1): no file, socket, thread or helper is involved.
-use crate::fakes::{FakeSafety, Rig, poll_once};
+use crate::fakes::{FakeSafety, Rig, poll_once, spec};
 use crate::{
     AttachError, BuildError, CleanupDomain, CleanupDomainOwner, CleanupStatus, CleanupTicket,
-    ConfigReason, DomainClose, EndpointSpec, HostClose, HostClosing, HostHandle, HostLimits,
-    HostOwner, HostPhase, TicketStatus,
+    ConfigReason, DomainClose, HostClose, HostClosing, HostHandle, HostLimits, HostOwner,
+    HostPhase, TicketStatus,
 };
 use std::{
     sync::{Arc, atomic::Ordering},
@@ -188,7 +188,7 @@ fn a_handle_that_outlives_the_owner_fails_with_a_named_error_and_does_not_wait()
     assert!(matches!(poll_once(&mut close), Poll::Ready(_)));
     assert_eq!(survivor.check_open(), Err(HostClosing));
     assert!(matches!(
-        survivor.attach_instance(EndpointSpec::new([1; 32])),
+        survivor.attach_instance(spec(1)),
         Err(AttachError::Closing(HostClosing))
     ));
     assert!(HostClosing.to_string().contains("closing or closed"));
@@ -317,14 +317,14 @@ fn the_instance_bound_and_a_factory_failure_are_reported_with_their_cleanup() {
     rig.attach(&handle);
     rig.attach(&handle);
     assert!(matches!(
-        handle.attach_instance(EndpointSpec::new([2; 32])),
+        handle.attach_instance(spec(2)),
         Err(AttachError::InstanceLimit)
     ));
     assert_eq!(rig.world.created.load(Ordering::SeqCst), 2);
     let rig = Rig::new();
     let (_owner, handle) = rig.host(1);
     rig.world.fail_next.store(true, Ordering::SeqCst);
-    match handle.attach_instance(EndpointSpec::new([3; 32])) {
+    match handle.attach_instance(spec(3)) {
         Err(AttachError::Factory(error)) => {
             assert!(matches!(error.cleanup(), CleanupStatus::Complete))
         }

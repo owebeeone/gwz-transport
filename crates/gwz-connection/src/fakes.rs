@@ -1,14 +1,21 @@
 //! Fakes for the ports of contract section 4.1: a manual clock, a stepped executor, a controllable endpoint factory,
 //! a stepped retainer and a counting process-safety gate. Nothing here touches a file, a socket or a thread.
 use crate::{
-    CleanupDomain, CleanupDomainOwner, Clock, DomainConfig, DriverWork, EndpointAdapter,
-    EndpointFactory, EndpointSpec, FactoryEnv, FactoryError, FactoryReason, HostConfig, HostHandle,
-    HostLimits, HostNamespace, HostOwner, HostPorts, OwnerSeed, ProcessSafety, Progress,
-    ProgressUnavailable, RetainedWork, RetentionPort, RetentionRefused, SafetyHold, SafetyState,
-    SafetyUnavailable, Sleep, Tick, cleanup_domain,
+    AuthContext, CleanupDomain, CleanupDomainOwner, Clock, Completion, ConnectCommand,
+    DomainConfig, DriverWork, EndpointAdapter, EndpointFactory, EndpointProfile, EndpointRoute,
+    EndpointSpec, ExchangeIo, FactoryEnv, FactoryError, FactoryReason, HostConfig, HostHandle,
+    HostLimits, HostNamespace, HostOwner, HostPorts, OperationPolicy, OwnerSeed, PreparedOperation,
+    ProcessSafety, Progress, ProgressUnavailable, RetainedWork, RetentionPort, RetentionRefused,
+    SafetyHold, SafetyState, SafetyUnavailable, Sleep, Tick, cleanup_domain,
+};
+use gwz_transport::{
+    pool::{ConnectionId, Identity, Key},
+    protocol::Disposition,
 };
 use std::{
+    collections::VecDeque,
     future::Future,
+    io,
     pin::Pin,
     sync::{
         Arc, Mutex,
@@ -197,6 +204,11 @@ pub(crate) struct FakeWorld {
     pub(crate) dropped: AtomicUsize,
     pub(crate) stuck: AtomicBool,
     pub(crate) fail_next: AtomicBool,
+    pub(crate) connects: AtomicUsize,
+    pub(crate) closes: AtomicUsize,
+    pub(crate) exchanges: AtomicUsize,
+    /// The next exchange to finish reports that its connection cannot be reused.
+    pub(crate) discard_next: AtomicBool,
     pub(crate) gate: Arc<Gate>,
     pub(crate) safeties: Mutex<Vec<(Arc<dyn ProcessSafety>, SafetyState)>>,
     pub(crate) domains: Mutex<Vec<CleanupDomain>>,
@@ -209,6 +221,10 @@ impl FakeWorld {
             dropped: AtomicUsize::new(0),
             stuck: AtomicBool::new(false),
             fail_next: AtomicBool::new(false),
+            connects: AtomicUsize::new(0),
+            closes: AtomicUsize::new(0),
+            exchanges: AtomicUsize::new(0),
+            discard_next: AtomicBool::new(false),
             gate: Arc::new(Gate {
                 open: Mutex::new((false, Vec::new())),
             }),
@@ -221,6 +237,12 @@ impl FakeWorld {
     }
     pub(crate) fn dropped(&self) -> usize {
         self.dropped.load(Ordering::SeqCst)
+    }
+    pub(crate) fn connects(&self) -> usize {
+        self.connects.load(Ordering::SeqCst)
+    }
+    pub(crate) fn closes(&self) -> usize {
+        self.closes.load(Ordering::SeqCst)
     }
 }
 pub(crate) struct FakeFactory(pub(crate) Arc<FakeWorld>);
@@ -248,6 +270,7 @@ impl EndpointFactory for FakeFactory {
             world: world.clone(),
             stuck: world.stuck.load(Ordering::SeqCst),
             done: false,
+            completions: VecDeque::new(),
         }))
     }
 }
@@ -255,8 +278,68 @@ struct FakeAdapter {
     world: Arc<FakeWorld>,
     stuck: bool,
     done: bool,
+    completions: VecDeque<Completion>,
+}
+/// A loopback exchange: what is written is what is read.
+struct FakeIo {
+    world: Arc<FakeWorld>,
+    buffer: VecDeque<u8>,
+}
+impl ExchangeIo for FakeIo {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        self.buffer.extend(data);
+        Ok(data.len())
+    }
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let mut n = 0;
+        while n < out.len() {
+            match self.buffer.pop_front() {
+                Some(byte) => {
+                    out[n] = byte;
+                    n += 1;
+                }
+                None => break,
+            }
+        }
+        Ok(n)
+    }
+    fn finish(&mut self) -> Disposition {
+        if self.world.discard_next.swap(false, Ordering::SeqCst) {
+            Disposition::Discarded
+        } else {
+            Disposition::Reusable
+        }
+    }
+    fn abort(&mut self) {}
 }
 impl EndpointAdapter for FakeAdapter {
+    fn connect(&mut self, command: ConnectCommand) {
+        self.world.connects.fetch_add(1, Ordering::SeqCst);
+        self.completions.push_back(Completion::Connected {
+            connection: command.connection,
+            // The proof of the identity the connection was made for is what lets the pool reuse it.
+            result: Ok(Some(command.identity)),
+        });
+    }
+    fn cancel_connect(&mut self, _connection: ConnectionId) {}
+    fn close(&mut self, connection: ConnectionId) {
+        self.world.closes.fetch_add(1, Ordering::SeqCst);
+        self.completions
+            .push_back(Completion::Closed { connection });
+    }
+    fn start_exchange(&mut self, _connection: ConnectionId) -> io::Result<Box<dyn ExchangeIo>> {
+        self.world.exchanges.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(FakeIo {
+            world: self.world.clone(),
+            buffer: VecDeque::new(),
+        }))
+    }
+    fn poll_completion(&mut self, _cx: &mut Context<'_>) -> Poll<Completion> {
+        match self.completions.pop_front() {
+            Some(completion) => Poll::Ready(completion),
+            None => Poll::Pending,
+        }
+    }
     fn poll_dispose(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         if self.done {
             return Poll::Ready(());
@@ -355,6 +438,7 @@ pub(crate) struct Rig {
     pub(crate) safety: Arc<FakeSafety>,
     pub(crate) domain: CleanupDomain,
     pub(crate) domain_owner: Option<CleanupDomainOwner>,
+    profiles: AtomicUsize,
 }
 impl Rig {
     pub(crate) fn new() -> Self {
@@ -372,6 +456,7 @@ impl Rig {
             safety,
             domain,
             domain_owner: Some(domain_owner),
+            profiles: AtomicUsize::new(0),
         }
     }
     pub(crate) fn ports(&self, seed: u128) -> HostPorts {
@@ -392,8 +477,45 @@ impl Rig {
     pub(crate) fn host(&self, seed: u128) -> (HostOwner, HostHandle) {
         crate::build(self.config(HostLimits::default()), self.ports(seed)).unwrap()
     }
-    /// One more instance on `handle`, made through the factory.
+    /// One more instance on `handle`, made through the factory (each call a profile of its own).
     pub(crate) fn attach(&self, handle: &HostHandle) {
-        handle.attach_instance(EndpointSpec::new([7; 32])).unwrap();
+        let n = self.profiles.fetch_add(1, Ordering::SeqCst) as u8 + 100;
+        handle.attach_instance(spec(n)).unwrap();
+    }
+}
+
+/// The profile of kind `n`: equal for equal `n`, different otherwise.
+pub(crate) fn profile(n: u8) -> EndpointProfile {
+    EndpointProfile::new(vec![n; 8], [n; 32]).unwrap()
+}
+pub(crate) fn spec(n: u8) -> EndpointSpec {
+    EndpointSpec::new(profile(n))
+}
+/// A valid frozen operation named `name` over the profile of kind `n`.
+pub(crate) fn prepared(name: &str, n: u8) -> PreparedOperation {
+    PreparedOperation::new(
+        name,
+        EndpointRoute::ssh_and_https(),
+        profile(n),
+        AuthContext::new(64, Arc::new(())),
+        OperationPolicy::new(4, 32, 3).unwrap(),
+    )
+    .unwrap()
+}
+pub(crate) fn ssh_key() -> Key {
+    Key::ssh("git", "example.invalid", 22)
+}
+pub(crate) fn exchange_spec() -> crate::ExchangeSpec {
+    crate::ExchangeSpec::new(ssh_key(), Identity::Ambient)
+}
+/// Polls a future that must already be ready.
+pub(crate) fn now<F: Future>(future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    match future
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    {
+        Poll::Ready(value) => value,
+        Poll::Pending => panic!("the future was not ready"),
     }
 }

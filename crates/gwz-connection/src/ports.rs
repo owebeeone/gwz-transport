@@ -1,10 +1,15 @@
 //! The four ports of contract section 4.1, supplied together to `build`: `Clock`, `OwnerSeed`, `Progress` and
 //! `EndpointFactory`. None gives the library a socket, a file, a thread or a process; the composition implements them
 //! (core's adapters over today's endpoints in step 1.3, fakes in this crate's tests).
-use crate::{CleanupDomain, CleanupStatus, safety::SharedProcessSafety};
+use crate::{CleanupDomain, CleanupStatus, EndpointProfile, safety::SharedProcessSafety};
+use gwz_transport::{
+    pool::{ConnectionId, Identity, Key},
+    protocol::{Disposition, Failure},
+};
 use std::{
     fmt,
     future::Future,
+    io,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -42,7 +47,7 @@ pub trait Clock: Send + Sync + 'static {
 }
 
 /// The nonsecret namespace of one host instance. Identifiers a host mints are unique within it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HostNamespace(u128);
 impl HostNamespace {
     pub fn new(value: u128) -> Self {
@@ -78,16 +83,16 @@ pub trait Progress: Send + Sync + 'static {
     fn spawn(&self, work: DriverWork) -> Result<(), ProgressUnavailable>;
 }
 
-/// The validated, immutable inputs an endpoint adapter is made from. Step 1.5 gives it the profile of contract
-/// section 7; step 1.1 fixes only its digest, which is what coalesces equal profiles.
+/// The validated, immutable inputs an endpoint adapter is made from: the operation's profile (contract section 7), which
+/// is also what coalesces equal endpoints onto one instance.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct EndpointSpec {
-    pub profile_digest: [u8; 32],
+    pub profile: EndpointProfile,
 }
 impl EndpointSpec {
-    pub fn new(profile_digest: [u8; 32]) -> Self {
-        Self { profile_digest }
+    pub fn new(profile: EndpointProfile) -> Self {
+        Self { profile }
     }
 }
 /// What a factory is given besides the spec: the domain that owns its cleanup budgets and the process's one gate.
@@ -115,12 +120,54 @@ pub trait EndpointFactory: Send + Sync + 'static {
         env: &FactoryEnv<'_>,
     ) -> Result<Box<dyn EndpointAdapter>, FactoryError>;
 }
-/// One endpoint instance. Step 1.1 fixes its disposal, which close needs; step 1.2 adds `connect`,
-/// `authorize_reuse`, `start_exchange`, `cancel_work` and `poll_completion` over typed commands (contract 4.1).
+/// Start connecting `connection`, which the instance's pool named: the adapter reports the result with
+/// `Completion::Connected`, and never starts it twice.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct ConnectCommand {
+    pub connection: ConnectionId,
+    pub key: Key,
+    pub identity: Identity,
+}
+/// What an adapter reports about work it was given. Connection identifiers are the pool's and are never reused.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Completion {
+    /// The connect ended. `Err` means the adapter holds nothing for it.
+    Connected {
+        connection: ConnectionId,
+        result: Result<Option<Identity>, Failure>,
+    },
+    /// The physical connection is disposed: the pool may free its capacity.
+    Closed { connection: ConnectionId },
+}
+/// One exchange on a leased connection, in the adapter's own terms. Each call returns at once: a call that cannot
+/// proceed returns `WouldBlock`, never blocks the caller.
+pub trait ExchangeIo: Send {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize>;
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize>;
+    /// The exchange ended in order. `Reusable` asserts that the protocol is cleanly complete and the connection can
+    /// serve another exchange; anything unproven is `Discarded`.
+    fn finish(&mut self) -> Disposition;
+    /// The exchange ends abnormally; its connection is discarded.
+    fn abort(&mut self);
+}
+/// One endpoint instance. Every method returns at once (the commands only start work, and the adapter does its I/O on
+/// its own threads or tasks, outside any library lock) and completions come back through `poll_completion`.
 /// Dropping an adapter must still release what it holds, as a last resort and without a guarantee of confirmation.
+/// Contract 4.1's `authorize_reuse` and `cancel_work` arrive with steps 1.6 and 1.3.
 pub trait EndpointAdapter: Send {
+    fn connect(&mut self, command: ConnectCommand);
+    /// The connect is no longer wanted; its `Connected` completion still arrives.
+    fn cancel_connect(&mut self, connection: ConnectionId);
+    /// Dispose of `connection`; `Completion::Closed` confirms it.
+    fn close(&mut self, connection: ConnectionId);
+    /// Starts an exchange on `connection`, which the caller leases.
+    fn start_exchange(&mut self, connection: ConnectionId) -> io::Result<Box<dyn ExchangeIo>>;
+    /// The next completion, or `Pending` with the waker registered.
+    fn poll_completion(&mut self, cx: &mut Context<'_>) -> Poll<Completion>;
     /// The first poll starts disposal; `Ready` means disposal is confirmed. Polling again after `Ready` is `Ready`.
-    /// It does its I/O outside any library lock and wakes the waker it was last polled with.
+    /// It wakes the waker it was last polled with.
     fn poll_dispose(&mut self, cx: &mut Context<'_>) -> Poll<()>;
 }
 

@@ -1,32 +1,52 @@
 //! The GWZ connection owner: ports, a cleanup domain, and a host with one owner and many handles.
 //!
 //! This crate coordinates injected ports and implements no socket, file, native authentication, helper spawn or
-//! executor of its own (contract section 3). It depends on no other GWZ crate and never on gwz-core or git2, so the
-//! first proof (contract section 13.1) is a build that cannot reach either.
+//! executor of its own (contract section 3). It depends on gwz-transport (whose mux and pool state machines do no I/O)
+//! and never on gwz-core or git2, so the first proof (contract section 13.1) is a build that cannot reach either.
 //!
 //! - [`ports`]: the four ports of contract section 4.1 (`Clock`, `OwnerSeed`, `Progress`, `EndpointFactory`).
 //! - [`safety`]: the process-safety gate the composition supplies (section 7.3).
 //! - [`domain`]: `cleanup_domain`, the retained-cleanup authority that outlives hosts (section 4.1).
 //! - [`host`]: `build`, `HostOwner`, `HostHandle` (sections 4 and 5).
+//! - `admission`, `exchange`: `admit`, `acquire`, `register`, and the `Operation`, `Opening` and `Exchange` an operation
+//!   owns (sections 4, 5 and 8); `binding`: the two mux sessions each operation owns (sections 6 and D6); `instance`:
+//!   an endpoint instance, its adapter and its pool.
 //!
-//! Step 1.1 of dev-docs/GwzTransportReleaseConvergencePlan.md. Admission, operations and exchanges are step 1.2's.
+//! Steps 1.1 and 1.2 of dev-docs/GwzTransportReleaseConvergencePlan.md.
+mod admission;
+mod binding;
 mod cell;
 mod domain;
+mod exchange;
 mod host;
+mod instance;
+mod operation;
 mod ports;
 mod safety;
 
+pub use admission::{Acquire, Admission, AdmissionPermit};
+pub use binding::{BindingId, CarrierId, Direction, Discard, Routed};
 pub use domain::{
     CleanupDomain, CleanupDomainOwner, CleanupStatus, CleanupTicket, DomainClose, DomainConfig,
     RetainedWork, RetentionPort, RetentionRefused, TicketStatus, WaitUntil, cleanup_domain,
+};
+pub use exchange::{
+    Exchange, ExchangeFinish, MessageStream, OpenWait, Opening, Operation, OperationCancel,
+    OperationFinish, StreamError,
 };
 pub use host::{
     AttachError, BuildError, ConfigReason, HostClose, HostClosing, HostConfig, HostHandle,
     HostLimits, HostOwner, HostPhase, HostSnapshot, build,
 };
+pub use operation::{
+    AdmissionError, AuthContext, CancelState, EndpointProfile, EndpointRoute, ExchangeEnd,
+    ExchangeSpec, InvalidInput, OpenError, OpenFailure, OperationEnd, OperationPolicy,
+    PreparedOperation, Registration, TerminalReason,
+};
 pub use ports::{
-    Clock, DriverWork, EndpointAdapter, EndpointFactory, EndpointSpec, FactoryEnv, FactoryError,
-    FactoryReason, HostNamespace, HostPorts, OwnerSeed, Progress, ProgressUnavailable, Sleep, Tick,
+    Clock, Completion, ConnectCommand, DriverWork, EndpointAdapter, EndpointFactory, EndpointSpec,
+    ExchangeIo, FactoryEnv, FactoryError, FactoryReason, HostNamespace, HostPorts, OwnerSeed,
+    Progress, ProgressUnavailable, Sleep, Tick,
 };
 pub use safety::{ProcessSafety, SafetyHold, SafetyState, SafetyUnavailable, SharedProcessSafety};
 
@@ -35,5 +55,6 @@ cfg_if::cfg_if! {
         mod domain_tests;
         mod fakes;
         mod host_tests;
+        mod operation_tests;
     }
 }
