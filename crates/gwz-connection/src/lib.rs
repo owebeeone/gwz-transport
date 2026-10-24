@@ -48,7 +48,7 @@ pub use operation::{
 pub use ports::{
     Clock, Completion, ConnectCommand, DriverWork, EndpointAdapter, EndpointFactory, EndpointSpec,
     ExchangeIo, FactoryEnv, FactoryError, FactoryReason, HostNamespace, HostPorts, OwnerSeed,
-    Progress, ProgressUnavailable, Sleep, Tick,
+    Progress, ProgressUnavailable, ReuseCommand, ReuseVerdict, Sleep, Tick,
 };
 pub use safety::{ProcessSafety, SafetyHold, SafetyState, SafetyUnavailable, SharedProcessSafety};
 
@@ -59,5 +59,6 @@ cfg_if::cfg_if! {
         mod host_tests;
         mod operation_tests;
         mod pump_tests;
+        mod reuse_tests;
     }
 }

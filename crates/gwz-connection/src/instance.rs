@@ -17,9 +17,15 @@
 //! a connection of its own under the opening's own tag and so its own scope, within the allocation deadline it was given
 //! at submit. A conforming opening therefore misfits at most once; more than `per_user_host + 1` misfits can only mean
 //! a broken scope record, and the opening then fails by name (`OpenFailure::NoFittingConnection`).
+//!
+//! A fitting lease of an idle connection that another binding last used then waits for the adapter's reuse proof for
+//! the leasing binding (`EndpointAdapter::authorize_reuse`; contract section 7.1; step 1.6) before its exchange starts:
+//! scope fit first, then the cross-binding proof. The last lessee is metadata kept here with the connection's setup
+//! scope, apart from the pool's owner, which an idle entry does not have (contract section 8).
 use crate::{
-    AuthContext, AuthScope, Clock, Completion, ConnectCommand, EndpointAdapter, EndpointProfile,
-    ExchangeEnd, ExchangeIo, ExchangeSpec, OpenFailure,
+    AuthContext, AuthScope, BindingId, Clock, Completion, ConnectCommand, EndpointAdapter,
+    EndpointProfile, ExchangeEnd, ExchangeIo, ExchangeSpec, OpenFailure, ReuseCommand,
+    ReuseVerdict,
     cell::{Cell, Slot},
     pump::Signal,
 };
@@ -40,8 +46,10 @@ pub(crate) type Opened = Result<(Box<dyn ExchangeIo>, LeaseId, bool), OpenFailur
 /// An opening whose request waits for a lease.
 struct Pending {
     request: RequestId,
-    /// The request as submitted (its tag included), to ask again after a lease of another scope.
+    /// The request as submitted (its tag included), to ask again after a lease of another scope, or, fresh, after a
+    /// lease another binding last used could not serve it.
     template: Request,
+    binding: BindingId,
     spec: ExchangeSpec,
     /// The operation's context, lent to the connect the pool starts for this request and to the exchange.
     auth: AuthContext,
@@ -58,6 +66,13 @@ struct Setup {
     /// An HTTPS connection, the scheme the scope partitions.
     https: bool,
     served: bool,
+    /// The binding that last leased it, once one has.
+    lessee: Option<BindingId>,
+}
+/// An opening holding a fitting lease whose reuse proof for its binding is running.
+struct Authorizing {
+    pending: Pending,
+    lease: LeaseId,
 }
 /// A finished exchange waiting for its adapter to confirm how it ended.
 struct Settling {
@@ -69,6 +84,7 @@ pub(crate) struct InstanceState {
     pub(crate) adapter: Option<Box<dyn EndpointAdapter>>,
     pub(crate) pool: PoolMachine,
     openings: Vec<Pending>,
+    authorizing: Vec<Authorizing>,
     settling: Vec<Settling>,
     connections: BTreeMap<ConnectionId, Setup>,
     /// Leases of another scope the instance has offered and refused, over its life (an observation, never a limit).
@@ -119,6 +135,7 @@ impl Instance {
                 adapter: Some(adapter),
                 pool: PoolMachine::new(config)?,
                 openings: Vec::new(),
+                authorizing: Vec::new(),
                 settling: Vec::new(),
                 connections: BTreeMap::new(),
                 misfits: 0,
@@ -162,6 +179,7 @@ impl Instance {
         let mut cx = Context::from_waker(&waker);
         loop {
             let mut progressed = actions(state);
+            let mut verdicts = Vec::new();
             if let Some(adapter) = state.adapter.as_mut() {
                 let mut ended = Vec::new();
                 while let Poll::Ready(completion) = adapter.poll_completion(&mut cx) {
@@ -182,11 +200,21 @@ impl Instance {
                             ended.push(connection);
                             state.pool.idle_closed(connection)
                         }
+                        Completion::Reuse {
+                            connection,
+                            verdict,
+                        } => {
+                            verdicts.push((connection, verdict));
+                            Ok(())
+                        }
                     };
                 }
                 for connection in ended {
                     state.connections.remove(&connection);
                 }
+            }
+            for (connection, verdict) in verdicts {
+                reused(state, connection, verdict);
             }
             progressed |= openings(state);
             progressed |= settle(state, &mut cx);
@@ -200,6 +228,7 @@ impl Instance {
     pub(crate) fn submit(
         &self,
         request: Request,
+        binding: BindingId,
         spec: ExchangeSpec,
         auth: AuthContext,
     ) -> Result<Arc<Slot<Opened>>, Error> {
@@ -217,6 +246,7 @@ impl Instance {
             state.openings.push(Pending {
                 request,
                 template,
+                binding,
                 spec,
                 auth,
                 misfits: 0,
@@ -259,6 +289,7 @@ impl Instance {
         let handed = slot.abandon();
         {
             let mut state = self.lock();
+            // The opening is found by its slot: its request is the one it asked with last.
             if let Some(index) = state
                 .openings
                 .iter()
@@ -266,6 +297,17 @@ impl Instance {
             {
                 let pending = state.openings.remove(index);
                 state.pool.abandon(pending.request);
+            }
+            // A lease whose reuse proof is running is still clean: it goes back to idle, and the proof's late end finds
+            // nothing to serve.
+            let mut index = 0;
+            while index < state.authorizing.len() {
+                if Arc::ptr_eq(&state.authorizing[index].pending.slot, slot) {
+                    let item = state.authorizing.remove(index);
+                    let _ = state.pool.release(item.lease, Disposition::Reusable);
+                } else {
+                    index += 1;
+                }
             }
             if let Some(Ok((mut io, lease, _))) = handed {
                 io.abort();
@@ -281,7 +323,11 @@ impl Instance {
     pub(crate) fn fail_in_flight(&self, reason: crate::operation::TerminalReason) {
         let (openings, settling) = {
             let mut state = self.lock();
-            let openings = std::mem::take(&mut state.openings);
+            let mut openings = std::mem::take(&mut state.openings);
+            for item in std::mem::take(&mut state.authorizing) {
+                let _ = state.pool.release(item.lease, Disposition::Discarded);
+                openings.push(item.pending);
+            }
             let settling = std::mem::take(&mut state.settling);
             for item in &settling {
                 let _ = state.pool.release(item.lease, Disposition::Discarded);
@@ -337,6 +383,7 @@ fn actions(state: &mut InstanceState) -> bool {
                         scope: auth.as_ref().map(AuthContext::scope),
                         https: key.scheme == Scheme::Https,
                         served: false,
+                        lessee: None,
                     },
                 );
                 adapter.connect(ConnectCommand {
@@ -371,13 +418,10 @@ fn openings(state: &mut InstanceState) -> bool {
             Err(error) => Err(OpenFailure::Pool(error)),
             Ok(lease) => {
                 let scope = state.openings[index].auth.scope();
-                let fits = match state.connections.get_mut(&lease.connection()) {
-                    Some(setup) if !setup.https || setup.scope == Some(scope) => {
-                        Some(std::mem::replace(&mut setup.served, true))
-                    }
-                    _ => None,
-                };
-                let Some(reused) = fits else {
+                let setup = state.connections.get(&lease.connection());
+                // The scope partitions HTTPS keys only; SSH reuse is authorized by the proof below (step 1.6).
+                let fits = setup.is_some_and(|setup| !setup.https || setup.scope == Some(scope));
+                if !fits {
                     // Set up under another operation's context: never handed over. It goes back untouched, for its own
                     // scope, and the opening asks once more for a connection of its own, by its original deadline.
                     progressed = true;
@@ -408,32 +452,109 @@ fn openings(state: &mut InstanceState) -> bool {
                             continue;
                         }
                     }
-                };
-                let pending = &state.openings[index];
-                let started = match state.adapter.as_mut() {
-                    Some(adapter) => {
-                        adapter.start_exchange(lease.connection(), &pending.spec, &pending.auth)
-                    }
-                    None => Err(std::io::Error::other("endpoint instance is closed")),
-                };
-                match started {
-                    Ok(io) => Ok((io, lease, reused)),
-                    Err(error) => {
-                        let _ = state.pool.release(lease, Disposition::Discarded);
-                        Err(OpenFailure::Io(error))
-                    }
                 }
+                // A fitting lease another binding last used serves this one only after this binding's proof.
+                let last = setup.and_then(|setup| setup.lessee);
+                progressed = true;
+                let pending = state.openings.remove(index);
+                if last.is_some_and(|last| last != pending.binding) {
+                    let command = ReuseCommand {
+                        connection: lease.connection(),
+                        binding: pending.binding,
+                    };
+                    let started = state
+                        .adapter
+                        .as_mut()
+                        .is_some_and(|adapter| adapter.authorize_reuse(command));
+                    if started {
+                        state.authorizing.push(Authorizing { pending, lease });
+                    } else {
+                        let _ = state.pool.release(lease, Disposition::Reusable);
+                        ask_again(state, pending);
+                    }
+                    continue;
+                }
+                serve(state, pending, lease);
+                continue;
             }
         };
         progressed = true;
         let pending = state.openings.remove(index);
-        if let Err(Ok((mut io, lease, _))) = pending.slot.fill(outcome) {
-            // The opening went while its exchange was being started.
-            io.abort();
-            let _ = state.pool.release(lease, Disposition::Discarded);
-        }
+        let _ = pending.slot.fill(outcome);
     }
     progressed
+}
+
+/// Starts `pending`'s exchange on `lease`, with the operation's own context, and hands it to the opening's slot; the
+/// lease's binding becomes its connection's last lessee.
+fn serve(state: &mut InstanceState, pending: Pending, lease: LeaseId) {
+    let connection = lease.connection();
+    let reused = state
+        .connections
+        .get_mut(&connection)
+        .is_some_and(|setup| std::mem::replace(&mut setup.served, true));
+    let started = match state.adapter.as_mut() {
+        Some(adapter) => adapter.start_exchange(connection, &pending.spec, &pending.auth),
+        None => Err(std::io::Error::other("endpoint instance is closed")),
+    };
+    let outcome = match started {
+        Ok(io) => {
+            if let Some(setup) = state.connections.get_mut(&connection) {
+                setup.lessee = Some(pending.binding);
+            }
+            Ok((io, lease, reused))
+        }
+        Err(error) => {
+            let _ = state.pool.release(lease, Disposition::Discarded);
+            Err(OpenFailure::Io(error))
+        }
+    };
+    if let Err(Ok((mut io, lease, _))) = pending.slot.fill(outcome) {
+        // The opening went while its exchange was being started.
+        io.abort();
+        let _ = state.pool.release(lease, Disposition::Discarded);
+    }
+}
+
+/// `pending`'s lease could not serve it: it asks the pool again, for a new connection (a fresh request takes no idle
+/// one), within its own allocation.
+fn ask_again(state: &mut InstanceState, mut pending: Pending) {
+    let mut asked = pending.template.clone();
+    asked.fresh = true;
+    match state.pool.request(asked) {
+        Ok(request) => {
+            pending.request = request;
+            state.openings.push(pending);
+        }
+        Err(error) => {
+            let _ = pending.slot.fill(Err(OpenFailure::Pool(error)));
+        }
+    }
+}
+
+/// The reuse proof for `connection` ended with `verdict` (contract section 7.1): an authorized lease serves its
+/// opening; a revoked one is discarded and an unprovable one goes back to idle, and the opening asks again. A proof
+/// whose opening went (its lease already back to idle) changes nothing.
+fn reused(state: &mut InstanceState, connection: ConnectionId, verdict: ReuseVerdict) {
+    let Some(index) = state
+        .authorizing
+        .iter()
+        .position(|item| item.lease.connection() == connection)
+    else {
+        return;
+    };
+    let Authorizing { pending, lease } = state.authorizing.remove(index);
+    match verdict {
+        ReuseVerdict::Authorized => serve(state, pending, lease),
+        ReuseVerdict::Revoked => {
+            let _ = state.pool.release(lease, Disposition::Discarded);
+            ask_again(state, pending);
+        }
+        ReuseVerdict::Unprovable => {
+            let _ = state.pool.release(lease, Disposition::Reusable);
+            ask_again(state, pending);
+        }
+    }
 }
 
 /// Finished exchanges whose adapter now says how they ended: their leases go back to the pool with that disposition.

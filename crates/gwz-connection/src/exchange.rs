@@ -299,7 +299,7 @@ impl Opening {
                 request.tag = Some(self.tag);
                 binding
                     .instance
-                    .submit(request, self.spec, binding.auth.clone())
+                    .submit(request, binding.id, self.spec, binding.auth.clone())
                     .map_err(OpenFailure::Pool)
             }
         };

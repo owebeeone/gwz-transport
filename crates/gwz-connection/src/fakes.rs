@@ -8,8 +8,8 @@ use crate::{
     EndpointSpec, ExchangeIo, ExchangeSpec, FactoryEnv, FactoryError, FactoryReason, GitService,
     HostConfig, HostHandle, HostLimits, HostNamespace, HostOwner, HostPorts, OperationPolicy,
     OwnerSeed, PreparedOperation, ProcessSafety, Progress, ProgressUnavailable, RetainedWork,
-    RetentionPort, RetentionRefused, SafetyHold, SafetyState, SafetyUnavailable, Sleep, Tick,
-    cleanup_domain,
+    RetentionPort, RetentionRefused, ReuseCommand, ReuseVerdict, SafetyHold, SafetyState,
+    SafetyUnavailable, Sleep, Tick, cleanup_domain,
 };
 use gwz_transport::{
     pool::{ConnectionId, Identity, Key},
@@ -229,6 +229,11 @@ pub(crate) struct FakeWorld {
     pub(crate) cancelled_connects: AtomicUsize,
     /// The service and path of the last exchange started.
     pub(crate) last_spec: Mutex<Option<(GitService, String)>>,
+    /// Every reuse proof the host asked for, and how the next ones end: `None` starts none (the port's default),
+    /// and `hold_reuse` keeps them running until `end_reuse`.
+    pub(crate) reuses: Mutex<Vec<ReuseCommand>>,
+    pub(crate) reuse_verdict: Mutex<Option<ReuseVerdict>>,
+    pub(crate) hold_reuse: AtomicBool,
     /// Every adapter's queue and the waker the host last gave it.
     queues: Mutex<Vec<Arc<Mutex<Queue>>>>,
     /// Which operation's context each connect and exchange was given, by the provider's tag, in order.
@@ -256,6 +261,9 @@ impl FakeWorld {
             confirmed: AtomicBool::new(false),
             cancelled_connects: AtomicUsize::new(0),
             last_spec: Mutex::new(None),
+            reuses: Mutex::new(Vec::new()),
+            reuse_verdict: Mutex::new(Some(ReuseVerdict::Authorized)),
+            hold_reuse: AtomicBool::new(false),
             queues: Mutex::new(Vec::new()),
             contexts: Mutex::new(Vec::new()),
             inputs: Mutex::new(Vec::new()),
@@ -289,6 +297,23 @@ impl FakeWorld {
                 });
             }
         });
+    }
+    /// The held reuse proofs end with `verdict`; the hosts' wakers are woken.
+    pub(crate) fn end_reuse(&self, verdict: ReuseVerdict) {
+        let held: Vec<_> = self.reuses.lock().unwrap().clone();
+        self.each_queue(|queue| {
+            for command in &held {
+                if queue.connected.contains(&command.connection) {
+                    queue.completions.push_back(Completion::Reuse {
+                        connection: command.connection,
+                        verdict,
+                    });
+                }
+            }
+        });
+    }
+    pub(crate) fn reuses(&self) -> Vec<ReuseCommand> {
+        self.reuses.lock().unwrap().clone()
     }
     /// Every connection every adapter holds is lost while idle (the peer closed it), and disposed.
     pub(crate) fn lose_connections(&self) {
@@ -477,6 +502,23 @@ impl EndpointAdapter for FakeAdapter {
             queue: self.queue.clone(),
             buffer: VecDeque::new(),
         }))
+    }
+    fn authorize_reuse(&mut self, command: ReuseCommand) -> bool {
+        let Some(verdict) = *self.world.reuse_verdict.lock().unwrap() else {
+            return false;
+        };
+        self.world.reuses.lock().unwrap().push(command);
+        if !self.world.hold_reuse.load(Ordering::SeqCst) {
+            self.queue
+                .lock()
+                .unwrap()
+                .completions
+                .push_back(Completion::Reuse {
+                    connection: command.connection,
+                    verdict,
+                });
+        }
+        true
     }
     fn poll_completion(&mut self, cx: &mut Context<'_>) -> Poll<Completion> {
         let mut queue = self.queue.lock().unwrap();
