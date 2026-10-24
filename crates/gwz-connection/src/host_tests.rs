@@ -1,6 +1,8 @@
 //! The host's owner and handle against fakes only (step 1.1 of dev-docs/GwzTransportReleaseConvergencePlan.md;
 //! contract sections 4, 4.1, 5, 10, 11 and 13.1): no file, socket, thread or helper is involved.
-use crate::fakes::{FakeSafety, Rig, auth, exchange_spec, now, poll_once, prepared_with, spec};
+use crate::fakes::{
+    FakeSafety, Rig, auth, exchange_spec, https_spec, now, poll_once, prepared_with, spec,
+};
 use crate::{
     AttachError, AuthContext, AuthScope, BuildError, CleanupDomain, CleanupDomainOwner,
     CleanupStatus, CleanupTicket, ConfigReason, DomainClose, EndpointProfile, EndpointRoute,
@@ -378,14 +380,28 @@ fn registered_with(handle: &HostHandle, name: &str, profile: u8, auth: AuthConte
     .register()
 }
 
-/// One operation with one exchange, finished cleanly: whether its exchange reused a connection.
-fn one_exchange(handle: &HostHandle, name: &str, profile: u8, auth: AuthContext) -> bool {
+/// One operation with one `spec` exchange, finished cleanly: whether its exchange reused a connection.
+fn one_exchange_on(
+    handle: &HostHandle,
+    name: &str,
+    profile: u8,
+    auth: AuthContext,
+    spec: crate::ExchangeSpec,
+) -> bool {
     let operation = registered_with(handle, name, profile, auth);
-    let exchange = now(operation.open(exchange_spec()).unwrap().wait()).unwrap();
+    let exchange = now(operation.open(spec).unwrap().wait()).unwrap();
     let reused = exchange.reused();
     assert_eq!(now(exchange.finish()).disposition, Disposition::Reusable);
     now(operation.finish());
     reused
+}
+/// One operation with one SSH exchange.
+fn one_exchange(handle: &HostHandle, name: &str, profile: u8, auth: AuthContext) -> bool {
+    one_exchange_on(handle, name, profile, auth, exchange_spec())
+}
+/// One operation with one HTTPS exchange: the scheme the authentication scope partitions.
+fn one_https(handle: &HostHandle, name: &str, profile: u8, auth: AuthContext) -> bool {
+    one_exchange_on(handle, name, profile, auth, https_spec())
 }
 
 #[test]
@@ -411,21 +427,34 @@ fn a_changed_profile_is_served_by_another_instance_and_reuse_resumes_when_it_cha
 }
 
 #[test]
-fn a_changed_auth_context_on_an_equal_profile_reuses_nothing_and_reuse_resumes_under_the_new_one() {
+fn a_changed_auth_context_on_an_equal_profile_reuses_nothing_and_keeps_the_old_contexts_connection()
+{
+    // HTTPS (the scope partitions HTTPS only, the lane owner's ruling on C-P3-2). The other context's idle connection
+    // is offered first (the pool knows no scope), given back untouched and kept; the new context opens its own.
     let rig = Rig::new();
     let (_owner, handle) = rig.host(1);
-    assert!(!one_exchange(&handle, "op-1", 1, auth(1, "a")));
+    assert!(!one_https(&handle, "op-1", 1, auth(1, "a")));
+    rig.clock.advance(30_000);
     assert!(
-        !one_exchange(&handle, "op-2", 1, auth(2, "b")),
+        !one_https(&handle, "op-2", 1, auth(2, "b")),
         "a connection set up under another context is never leased"
     );
     // Equal profiles share the instance: the context is not a profile field (contract section 7).
     assert_eq!(handle.snapshot().endpoint_instances, 1);
     assert_eq!(rig.world.connects(), 2);
-    // The other context's idle connection was retired, not handed over.
-    assert_eq!(rig.world.closes(), 1);
-    assert!(one_exchange(&handle, "op-3", 1, auth(2, "b")));
-    assert_eq!(rig.world.connects(), 2);
+    assert_eq!(
+        rig.world.closes(),
+        0,
+        "the other context's idle connection is kept, not retired"
+    );
+    // REPORTED GAP (remediation round 1, not a requirement): while the old context's idle connection lives, the pool
+    // offers it first (lowest id), the `Reusable` give-back restarts its idle clock, and the new context opens a fresh
+    // connection instead of reusing its own. R4's "then reuse resumes" needs scope in the pool's idle eligibility.
+    rig.clock.advance(31_000);
+    assert!(!one_https(&handle, "op-3", 1, auth(2, "b")));
+    assert_eq!(rig.world.connects(), 3);
+    // The old context still reuses its own connection.
+    assert!(one_https(&handle, "op-4", 1, auth(1, "a")));
 }
 
 #[test]
@@ -527,7 +556,7 @@ fn an_opening_that_no_connection_ever_fits_fails_by_name_within_its_bound() {
     rig.world.asynchronous.store(true, Ordering::SeqCst);
     let (_owner, handle) = rig.host(1);
     let operation = registered_with(&handle, "op", 1, auth(1, "a"));
-    let mut wait = operation.open(exchange_spec()).unwrap().wait();
+    let mut wait = operation.open(https_spec()).unwrap().wait();
     let foreign = AuthScope::new([9; 32]);
     let bound = gwz_transport::pool::Config::default().per_user_host + 1;
     let mut passes = 0;
@@ -552,5 +581,200 @@ fn an_opening_that_no_connection_ever_fits_fails_by_name_within_its_bound() {
         "nothing was started"
     );
     drop(wait);
+    now(operation.finish());
+}
+
+// Step 1.5 remediation round 1 (dev-docs/GwzConnectionApiContract-Step1.5-RemPlan.md).
+
+/// The scope-a exchanges that fill the pool's per-user-host bound on the HTTPS key, all leased.
+fn saturate(handle: &HostHandle) -> (Operation, Vec<crate::Exchange>) {
+    let operation = registered_with(handle, "op-a", 1, auth(1, "a"));
+    let bound = gwz_transport::pool::Config::default().per_user_host;
+    let exchanges = (0..bound)
+        .map(|_| now(operation.open(https_spec()).unwrap().wait()).unwrap())
+        .collect();
+    (operation, exchanges)
+}
+
+#[test]
+fn a_misfit_keeps_the_other_scopes_connection_and_opens_its_own() {
+    // C-P2-1 = S-P2-1, closure row 1: A, B (other scope), A.
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    assert!(!one_https(&handle, "op-a1", 1, auth(1, "a")));
+    assert!(!one_https(&handle, "op-b", 1, auth(2, "b")));
+    assert_eq!(rig.world.connects(), 2, "B opened its own connection");
+    assert_eq!(
+        rig.world.closes(),
+        0,
+        "A's idle connection was released untouched, never retired"
+    );
+    assert_eq!(handle.snapshot().connections.idle, 2);
+    assert!(
+        one_https(&handle, "op-a2", 1, auth(1, "a")),
+        "A's own connection still serves it"
+    );
+}
+
+#[test]
+fn a_misfit_opening_times_out_at_its_original_allocation_deadline() {
+    // C-P2-1 = S-P2-1, closure row 2: the resubmission keeps the deadline the opening was given at submit.
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    let (operation_a, mut exchanges) = saturate(&handle);
+    rig.world.asynchronous.store(true, Ordering::SeqCst);
+    let operation_b = registered_with(&handle, "op-b", 1, auth(2, "b"));
+    let mut wait = operation_b.open(https_spec()).unwrap().wait();
+    assert!(!wait.is_ready(), "the pool is full: B waits");
+    // At 20 s an A exchange ends: B is offered its connection, misfits, and asks once more for a fresh one.
+    rig.clock.advance(20_000);
+    rig.progress.run();
+    now(exchanges.pop().unwrap().finish());
+    rig.progress.run();
+    assert_eq!(operation_b.instance_for_test().misfits_for_test(), 1);
+    assert!(!wait.is_ready());
+    let allocation = gwz_transport::pool::Config::default().allocation_timeout_ms;
+    rig.clock.advance(allocation - 20_000 - 1);
+    rig.progress.run();
+    assert!(!wait.is_ready(), "still within the original deadline");
+    rig.clock.advance(1);
+    rig.progress.run();
+    assert!(wait.is_ready(), "the misfit did not extend the deadline");
+    assert!(matches!(
+        poll_once(&mut wait),
+        Poll::Ready(Err(OpenFailure::Pool(_)))
+    ));
+    drop(wait);
+    rig.world.asynchronous.store(false, Ordering::SeqCst);
+    drop(exchanges);
+    now(operation_b.finish());
+    now(operation_a.finish());
+}
+
+#[test]
+fn under_saturated_load_of_one_scope_another_scope_is_served_after_at_most_one_misfit() {
+    // C-P2-1 = S-P2-1, closure rows 3 and 4: Code's sequence (a scope-a opening queues behind B, then a scope-a exchange
+    // ends) for more than `per_user_host + 1` cycles never fails B with NoFittingConnection; when the load ends B is
+    // served on a connection of its own, after at most one misfit.
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    let (operation_a, mut exchanges) = saturate(&handle);
+    let operation_b = registered_with(&handle, "op-b", 1, auth(2, "b"));
+    let mut wait = operation_b.open(https_spec()).unwrap().wait();
+    let cycles = gwz_transport::pool::Config::default().per_user_host + 2;
+    let mut queued = Vec::new();
+    for _ in 0..cycles {
+        queued.push(operation_a.open(https_spec()).unwrap().wait());
+        now(exchanges.remove(0).finish());
+        rig.progress.run();
+        assert!(
+            !matches!(
+                poll_once(&mut wait),
+                Poll::Ready(Err(OpenFailure::NoFittingConnection))
+            ),
+            "B failed NoFittingConnection under legal load"
+        );
+        // The scope-a waiters are served from the connections their scope set up.
+        for opening in &mut queued {
+            if opening.is_ready()
+                && let Poll::Ready(Ok(exchange)) = poll_once(opening)
+            {
+                exchanges.push(exchange);
+            }
+        }
+        queued.retain(|opening| !opening.is_ready());
+    }
+    // The load ends: the next connection that comes free makes room for B's own.
+    now(exchanges.remove(0).finish());
+    rig.progress.run();
+    let Poll::Ready(Ok(exchange)) = poll_once(&mut wait) else {
+        panic!("B was not served once the load ended");
+    };
+    assert!(
+        !exchange.reused(),
+        "B's exchange runs on a connection B set up"
+    );
+    assert!(operation_b.instance_for_test().misfits_for_test() <= 1);
+    now(exchange.finish());
+    drop(queued);
+    drop(exchanges);
+    now(operation_b.finish());
+    now(operation_a.finish());
+}
+
+#[test]
+fn dropping_an_opening_after_a_misfit_leaves_no_request_context_or_exchange() {
+    // C-P2-2: the dropped opening is found by its slot, and its current request is the one abandoned.
+    let rig = Rig::new();
+    rig.world.asynchronous.store(true, Ordering::SeqCst);
+    let (_owner, handle) = rig.host(1);
+    let provider = Arc::new(String::from("a"));
+    let operation = registered_with(
+        &handle,
+        "op",
+        1,
+        AuthContext::new(64, AuthScope::new([1; 32]), provider.clone()),
+    );
+    let mut wait = operation.open(https_spec()).unwrap().wait();
+    assert!(poll_once(&mut wait).is_pending());
+    let instance = operation.instance_for_test();
+    instance.rescope_for_test(AuthScope::new([9; 32]));
+    rig.world.complete_connects();
+    rig.progress.run();
+    assert_eq!(instance.misfits_for_test(), 1);
+    drop(wait);
+    assert_eq!(
+        Arc::strong_count(&provider),
+        2,
+        "only the binding holds the context"
+    );
+    assert_eq!(instance.outstanding_for_test(), 0, "no live pool request");
+    rig.world.complete_connects();
+    rig.progress.run();
+    assert_eq!(
+        rig.world.exchanges.load(Ordering::SeqCst),
+        0,
+        "nothing started after the drop"
+    );
+    let end = now(operation.finish());
+    assert_eq!(end.exchanges_opened, 1);
+    assert_eq!(Arc::strong_count(&provider), 1);
+}
+
+#[test]
+fn ssh_connections_are_not_partitioned_by_the_auth_context() {
+    // C-P3-2, the lane owner's ruling: the scope applies to HTTPS keys only; SSH reuse authorization is step 1.6's.
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    assert!(!one_exchange(&handle, "op-a", 1, auth(1, "a")));
+    assert!(
+        one_exchange(&handle, "op-b", 1, auth(2, "b")),
+        "a changed GH_TOKEN on SSH reuses"
+    );
+    assert_eq!(rig.world.connects(), 1);
+}
+
+#[test]
+fn an_adapter_holds_the_connect_context_only_until_the_connect_completes() {
+    // S-P3-2: the fake adapter's conformance to `ConnectCommand.auth`'s retention rule.
+    let rig = Rig::new();
+    rig.world.asynchronous.store(true, Ordering::SeqCst);
+    let (_owner, handle) = rig.host(1);
+    let provider = Arc::new(String::from("a"));
+    let operation = registered_with(
+        &handle,
+        "op",
+        1,
+        AuthContext::new(64, AuthScope::new([1; 32]), provider.clone()),
+    );
+    let wait = operation.open(https_spec()).unwrap().wait();
+    rig.world.complete_connects();
+    rig.progress.run();
+    assert!(wait.is_ready());
+    // The test's and the binding's: neither the adapter nor the instance kept one.
+    assert_eq!(Arc::strong_count(&provider), 2);
+    rig.world.asynchronous.store(false, Ordering::SeqCst);
+    let exchange = now(wait).unwrap();
+    now(exchange.finish());
     now(operation.finish());
 }

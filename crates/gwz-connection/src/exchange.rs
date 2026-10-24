@@ -17,7 +17,7 @@ use crate::{
     operation::TerminalReason,
 };
 use gwz_transport::{
-    pool::{LeaseId, Owner, Request, RequestId},
+    pool::{LeaseId, Owner, Request},
     protocol::{Disposition, Effect},
 };
 use std::{
@@ -317,17 +317,13 @@ impl Opening {
 /// See [`Opening::wait`].
 pub struct OpenWait {
     live: Option<Live>,
-    submitted: Option<(RequestId, Arc<Slot<Opened>>)>,
+    submitted: Option<Arc<Slot<Opened>>>,
     early: Option<OpenFailure>,
 }
 impl OpenWait {
     /// Whether the host's driver has already started this opening's exchange (or ended it): the next poll is ready.
     pub fn is_ready(&self) -> bool {
-        self.early.is_some()
-            || self
-                .submitted
-                .as_ref()
-                .is_some_and(|(_, slot)| slot.is_filled())
+        self.early.is_some() || self.submitted.as_ref().is_some_and(|slot| slot.is_filled())
     }
 }
 impl Future for OpenWait {
@@ -337,7 +333,7 @@ impl Future for OpenWait {
         if let Some(failure) = this.early.take() {
             return Poll::Ready(Err(failure));
         }
-        let (Some(live), Some((_, slot))) = (&this.live, &this.submitted) else {
+        let (Some(live), Some(slot)) = (&this.live, &this.submitted) else {
             return Poll::Ready(Err(OpenFailure::Cancelled));
         };
         let binding = live.binding.clone();
@@ -379,8 +375,8 @@ impl Future for OpenWait {
 }
 impl Drop for OpenWait {
     fn drop(&mut self) {
-        if let (Some((request, slot)), Some(live)) = (self.submitted.take(), &self.live) {
-            live.binding.instance.abandon(request, &slot);
+        if let (Some(slot), Some(live)) = (self.submitted.take(), &self.live) {
+            live.binding.instance.abandon(&slot);
         }
     }
 }

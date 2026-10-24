@@ -10,9 +10,13 @@
 //! An instance is one profile's (step 1.5): every operation it serves has an equal profile, and none of them leaves its
 //! authentication context here. A waiting opening lends its context to the connect the pool starts for it, by the tag
 //! on its pool request, and takes it back when it stops waiting. What stays is each connection's setup scope, a
-//! fixed-size value: a connection serves only an operation whose context has that scope (contract section 7). A lease
-//! of another scope is retired and the opening asks again, at most `per_user_host + 1` times: each pass retires one of
-//! the key's connections, so more passes than the key can hold mean nothing will fit, and the opening fails by name.
+//! fixed-size value: on an HTTPS key a connection serves only an operation whose context has that scope (contract
+//! sections 7 and 7.2; SSH connections are not partitioned by it, their reuse authorization being step 1.6's possession
+//! proof). The pool knows no scope, so it may offer a waiting opening an idle connection of another scope: the lease is
+//! given back untouched (`Reusable`, never retired), and the opening asks once more with a `fresh` request, which opens
+//! a connection of its own under the opening's own tag and so its own scope, within the allocation deadline it was given
+//! at submit. A conforming opening therefore misfits at most once; more than `per_user_host + 1` misfits can only mean
+//! a broken scope record, and the opening then fails by name (`OpenFailure::NoFittingConnection`).
 use crate::{
     AuthContext, AuthScope, Clock, Completion, ConnectCommand, EndpointAdapter, EndpointProfile,
     ExchangeEnd, ExchangeIo, ExchangeSpec, OpenFailure,
@@ -23,6 +27,7 @@ use gwz_transport::pool::{
     Action, Config, ConnectionId, Error, LeaseId, PoolMachine, Request, RequestId,
 };
 use gwz_transport::protocol::Disposition;
+use gwz_transport::protocol::Scheme;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex, MutexGuard},
@@ -40,14 +45,18 @@ struct Pending {
     spec: ExchangeSpec,
     /// The operation's context, lent to the connect the pool starts for this request and to the exchange.
     auth: AuthContext,
-    /// Leases of another scope this opening was offered and retired.
+    /// Leases of another scope this opening was offered and gave back.
     misfits: usize,
+    /// The opening's absolute allocation deadline on the pool's clock, fixed at submit: a resubmission never extends it.
+    deadline: u64,
     slot: Arc<Slot<Opened>>,
 }
 /// A connection the pool has started and not yet disposed of: the scope its setup used (none when its opener had gone)
 /// and whether an exchange has run on it.
 struct Setup {
     scope: Option<AuthScope>,
+    /// An HTTPS connection, the scheme the scope partitions.
+    https: bool,
     served: bool,
 }
 /// A finished exchange waiting for its adapter to confirm how it ended.
@@ -62,6 +71,8 @@ pub(crate) struct InstanceState {
     openings: Vec<Pending>,
     settling: Vec<Settling>,
     connections: BTreeMap<ConnectionId, Setup>,
+    /// Leases of another scope the instance has offered and refused, over its life (an observation, never a limit).
+    misfits: u64,
 }
 /// Wakes every opening that waits on this instance, and the host's driver, when its adapter has something to report.
 struct Wakes {
@@ -83,6 +94,8 @@ impl Wake for Wakes {
 pub(crate) struct Instance {
     pub(crate) profile: EndpointProfile,
     clock: Arc<dyn Clock>,
+    /// The pool's allocation bound, from which an opening's deadline is fixed at submit.
+    allocation_ms: u64,
     wakes: Arc<Wakes>,
     state: Mutex<InstanceState>,
 }
@@ -93,19 +106,22 @@ impl Instance {
         clock: Arc<dyn Clock>,
         driver: Arc<Signal>,
     ) -> Result<Arc<Self>, Error> {
+        let config = Config::default();
         Ok(Arc::new(Self {
             profile,
             clock,
+            allocation_ms: config.allocation_timeout_ms,
             wakes: Arc::new(Wakes {
                 waiters: Mutex::new(Vec::new()),
                 driver,
             }),
             state: Mutex::new(InstanceState {
                 adapter: Some(adapter),
-                pool: PoolMachine::new(Config::default())?,
+                pool: PoolMachine::new(config)?,
                 openings: Vec::new(),
                 settling: Vec::new(),
                 connections: BTreeMap::new(),
+                misfits: 0,
             }),
         }))
     }
@@ -186,10 +202,16 @@ impl Instance {
         request: Request,
         spec: ExchangeSpec,
         auth: AuthContext,
-    ) -> Result<(RequestId, Arc<Slot<Opened>>), Error> {
+    ) -> Result<Arc<Slot<Opened>>, Error> {
         let slot = Slot::new();
-        let request = {
+        {
             let mut state = self.lock();
+            // The pool's clock is brought to now first, so the deadline recorded here is the one the pool gives the
+            // request, and an idle connection whose time is up is not offered to it.
+            let now = self.clock.now().get();
+            state.pool.advance(now);
+            let deadline =
+                now.saturating_add(request.allocation_timeout_ms.unwrap_or(self.allocation_ms));
             let template = request.clone();
             let request = state.pool.request(request)?;
             state.openings.push(Pending {
@@ -198,13 +220,13 @@ impl Instance {
                 spec,
                 auth,
                 misfits: 0,
+                deadline,
                 slot: slot.clone(),
             });
             self.pump(&mut state);
-            request
-        };
+        }
         self.wake_waiters();
-        Ok((request, slot))
+        Ok(slot)
     }
     /// Hands a finished exchange to the pump, which releases its lease once the adapter confirms how it ended.
     pub(crate) fn settle(&self, io: Box<dyn ExchangeIo>, lease: LeaseId) -> Cell<ExchangeEnd> {
@@ -232,12 +254,19 @@ impl Instance {
     }
     /// An opening went before its exchange: its request and its context leave the instance, and an exchange already
     /// handed to it is aborted and its lease discarded.
-    pub(crate) fn abandon(&self, request: RequestId, slot: &Slot<Opened>) {
+    /// The opening is found by its slot, so the request abandoned is its current one (a misfit resubmits it).
+    pub(crate) fn abandon(&self, slot: &Arc<Slot<Opened>>) {
         let handed = slot.abandon();
         {
             let mut state = self.lock();
-            state.openings.retain(|pending| pending.request != request);
-            state.pool.abandon(request);
+            if let Some(index) = state
+                .openings
+                .iter()
+                .position(|pending| Arc::ptr_eq(&pending.slot, slot))
+            {
+                let pending = state.openings.remove(index);
+                state.pool.abandon(pending.request);
+            }
             if let Some(Ok((mut io, lease, _))) = handed {
                 io.abort();
                 let _ = state.pool.release(lease, Disposition::Discarded);
@@ -306,6 +335,7 @@ fn actions(state: &mut InstanceState) -> bool {
                     connection,
                     Setup {
                         scope: auth.as_ref().map(AuthContext::scope),
+                        https: key.scheme == Scheme::Https,
                         served: false,
                     },
                 );
@@ -342,24 +372,28 @@ fn openings(state: &mut InstanceState) -> bool {
             Ok(lease) => {
                 let scope = state.openings[index].auth.scope();
                 let fits = match state.connections.get_mut(&lease.connection()) {
-                    Some(setup) if setup.scope == Some(scope) => {
+                    Some(setup) if !setup.https || setup.scope == Some(scope) => {
                         Some(std::mem::replace(&mut setup.served, true))
                     }
                     _ => None,
                 };
                 let Some(reused) = fits else {
-                    // Set up under another operation's context: never handed over. Retire it and ask again.
+                    // Set up under another operation's context: never handed over. It goes back untouched, for its own
+                    // scope, and the opening asks once more for a connection of its own, by its original deadline.
                     progressed = true;
-                    let _ = state.pool.release(lease, Disposition::Discarded);
+                    state.misfits += 1;
+                    let _ = state.pool.release(lease, Disposition::Reusable);
                     let bound = state.pool.capacity().per_user_host + 1;
                     let pending = &mut state.openings[index];
                     pending.misfits += 1;
                     let asked = if pending.misfits > bound {
                         Err(OpenFailure::NoFittingConnection)
                     } else {
+                        let mut fresh = pending.template.clone();
+                        fresh.fresh = true;
                         state
                             .pool
-                            .request(pending.template.clone())
+                            .request_until(fresh, Some(pending.deadline))
                             .map_err(OpenFailure::Pool)
                     };
                     match asked {
@@ -431,6 +465,14 @@ cfg_if::cfg_if! {
                 for setup in self.lock().connections.values_mut() {
                     setup.scope = Some(scope);
                 }
+            }
+            /// Leases of another scope this instance has refused.
+            pub(crate) fn misfits_for_test(&self) -> u64 {
+                self.lock().misfits
+            }
+            /// Pool requests that are still live.
+            pub(crate) fn outstanding_for_test(&self) -> usize {
+                self.lock().pool.outstanding_requests()
             }
         }
     }

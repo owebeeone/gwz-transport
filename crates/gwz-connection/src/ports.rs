@@ -133,7 +133,10 @@ pub struct ConnectCommand {
     pub key: Key,
     pub identity: Identity,
     /// The context of the operation the connection is opened for, which its setup authenticates with; `None` when
-    /// that operation stopped waiting before the connect began, and the setup then has no context to use.
+    /// that operation stopped waiting before the connect began, and the setup then has no context to use. Retention
+    /// rule (contract section 7): the adapter drops it when the connect completes or is cancelled, keeps nothing of it
+    /// on the connection, and never uses it for a later exchange, which gets its own operation's context from
+    /// `start_exchange`.
     pub auth: Option<AuthContext>,
 }
 /// What an adapter reports about work it was given. Connection identifiers are the pool's and are never reused.

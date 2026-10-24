@@ -675,6 +675,16 @@ pub(crate) fn exchange_spec() -> ExchangeSpec {
     )
     .unwrap()
 }
+/// An HTTPS exchange: the scheme whose connections the authentication scope partitions.
+pub(crate) fn https_spec() -> ExchangeSpec {
+    ExchangeSpec::git(
+        Key::https("example.invalid", 443),
+        Identity::Https,
+        GitService::UploadPackExchange,
+        "/srv/repo.git",
+    )
+    .unwrap()
+}
 /// Polls a future that must already be ready.
 pub(crate) fn now<F: Future>(future: F) -> F::Output {
     let mut future = std::pin::pin!(future);

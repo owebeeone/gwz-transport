@@ -89,8 +89,9 @@ pub struct EndpointProfile {
     canonical: Vec<u8>,
     inputs: Option<Arc<dyn Any + Send + Sync>>,
 }
-/// The longest canonical profile accepted.
-const MAX_PROFILE_BYTES: usize = 16 * 1024;
+/// The longest canonical profile accepted: 64 KiB (16 KiB before step 1.5's remediation). A composition's encoding must
+/// fit any capture its grammars accept (core holds the sum of its field maxima under this bound statically).
+pub const MAX_PROFILE_BYTES: usize = 64 * 1024;
 impl EndpointProfile {
     pub fn new(canonical: Vec<u8>, digest: [u8; 32]) -> Result<Self, InvalidInput> {
         if canonical.is_empty() || canonical.len() > MAX_PROFILE_BYTES {
@@ -383,8 +384,9 @@ pub enum OpenFailure {
     Closing(TerminalReason),
     Pool(gwz_transport::pool::Error),
     Io(std::io::Error),
-    /// Every connection the pool offered was set up under another operation's authentication context, and it offered
-    /// more of them than the key can hold, so none will fit: nothing was started for this opening.
+    /// The opening was offered more connections set up under another authentication context than its key can hold. A
+    /// conforming opening misfits at most once (its fresh resubmission opens a connection under its own context), so
+    /// this names a broken scope record, never load: nothing was started for this opening.
     NoFittingConnection,
 }
 
