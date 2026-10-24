@@ -131,6 +131,9 @@ pub trait EndpointFactory: Send + Sync + 'static {
 pub struct ConnectCommand {
     pub connection: ConnectionId,
     pub key: Key,
+    /// The pool identity of the connection. On an HTTPS key it is `Identity::HttpsScoped` of an instance-local token
+    /// for the opener's authentication scope (step 1.5): the adapter treats it as opaque and reports it back as its
+    /// `Completion::Connected` proof, or reports `None`; any other proof fails the connect.
     pub identity: Identity,
     /// The context of the operation the connection is opened for, which its setup authenticates with; `None` when
     /// that operation stopped waiting before the connect began, and the setup then has no context to use. Retention

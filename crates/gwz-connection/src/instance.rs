@@ -12,11 +12,19 @@
 //! on its pool request, and takes it back when it stops waiting. What stays is each connection's setup scope, a
 //! fixed-size value: on an HTTPS key a connection serves only an operation whose context has that scope (contract
 //! sections 7 and 7.2; SSH connections are not partitioned by it, their reuse authorization being step 1.6's possession
-//! proof). The pool knows no scope, so it may offer a waiting opening an idle connection of another scope: the lease is
-//! given back untouched (`Reusable`, never retired), and the opening asks once more with a `fresh` request, which opens
-//! a connection of its own under the opening's own tag and so its own scope, within the allocation deadline it was given
-//! at submit. A conforming opening therefore misfits at most once; more than `per_user_host + 1` misfits can only mean
-//! a broken scope record, and the opening then fails by name (`OpenFailure::NoFittingConnection`).
+//! proof). An HTTPS request goes to the pool with a scope-derived identity (`Identity::HttpsScoped` of an instance-local
+//! token, `scope-N`, never the scope's bytes), so the pool's idle match offers an opening only its own scope's idle
+//! connections, and reuse resumes under a changed context while the old context's connections are still idle. The scope
+//! check at lease stays as the guard: a lease that does not fit (its setup scope unknown or other) is given back
+//! untouched (`Reusable`, never retired), and the opening asks once more with a `fresh` request, which opens a
+//! connection of its own under the opening's own tag and so its own scope. More than `per_user_host + 1` misfits can only
+//! mean a broken scope record, and the opening then fails by name (`OpenFailure::NoFittingConnection`). No resubmission,
+//! after a misfit or after a failed reuse proof, extends the allocation deadline the opening was given at submit.
+//!
+//! Recorded limitation (lane owner's decision, step 1.5 remediation round 1): when one scope keeps the key's
+//! `per_user_host` connections busy and its openings keep arriving, every connection that comes free goes to the next
+//! waiter of that scope, so an opening of another scope waits for room: it is served when the load relents, or it ends
+//! at its original deadline with `AllocationTimeout`, never `NoFittingConnection`.
 //!
 //! A fitting lease of an idle connection that another binding last used then waits for the adapter's reuse proof for
 //! the leasing binding (`EndpointAdapter::authorize_reuse`; contract section 7.1; step 1.6) before its exchange starts:
@@ -30,7 +38,7 @@ use crate::{
     pump::Signal,
 };
 use gwz_transport::pool::{
-    Action, Config, ConnectionId, Error, LeaseId, PoolMachine, Request, RequestId,
+    Action, Config, ConnectionId, Error, Identity, LeaseId, PoolMachine, Request, RequestId,
 };
 use gwz_transport::protocol::Disposition;
 use gwz_transport::protocol::Scheme;
@@ -89,6 +97,56 @@ pub(crate) struct InstanceState {
     connections: BTreeMap<ConnectionId, Setup>,
     /// Leases of another scope the instance has offered and refused, over its life (an observation, never a limit).
     misfits: u64,
+    /// The pool identity token of each scope a live connection or opening uses (`scope-N`, `N` never reused), so the
+    /// pool can match HTTPS idle connections by scope without holding the scope's bytes.
+    scope_tokens: Vec<(AuthScope, u64)>,
+    next_token: u64,
+}
+impl InstanceState {
+    /// The pool identity of a request for `key` and `identity` from an operation whose context has `scope`: HTTPS
+    /// requests are scoped, everything else is unchanged.
+    fn pool_identity(
+        &mut self,
+        key: &gwz_transport::pool::Key,
+        identity: Identity,
+        scope: AuthScope,
+    ) -> Identity {
+        if key.scheme != Scheme::Https || identity != Identity::Https {
+            return identity;
+        }
+        let token = match self.scope_tokens.iter().find(|(known, _)| *known == scope) {
+            Some((_, token)) => *token,
+            None => {
+                let token = self.next_token;
+                self.next_token += 1;
+                self.scope_tokens.push((scope, token));
+                token
+            }
+        };
+        Identity::HttpsScoped(format!("scope-{token}"))
+    }
+    /// Forgets the tokens of scopes no live connection or opening uses. A forgotten scope gets a new token if it comes
+    /// back, and a token is never given twice, so an orphaned connection's token matches nothing.
+    fn prune_scope_tokens(&mut self) {
+        let InstanceState {
+            scope_tokens,
+            connections,
+            openings,
+            authorizing,
+            ..
+        } = self;
+        scope_tokens.retain(|(scope, _)| {
+            connections
+                .values()
+                .any(|setup| setup.scope == Some(*scope))
+                || openings
+                    .iter()
+                    .any(|pending| pending.auth.scope() == *scope)
+                || authorizing
+                    .iter()
+                    .any(|item| item.pending.auth.scope() == *scope)
+        });
+    }
 }
 /// Wakes every opening that waits on this instance, and the host's driver, when its adapter has something to report.
 struct Wakes {
@@ -139,6 +197,8 @@ impl Instance {
                 settling: Vec::new(),
                 connections: BTreeMap::new(),
                 misfits: 0,
+                scope_tokens: Vec::new(),
+                next_token: 0,
             }),
         }))
     }
@@ -222,6 +282,7 @@ impl Instance {
                 break;
             }
         }
+        state.prune_scope_tokens();
     }
     /// Queues an opening's request and pumps once, so that an exchange the pool can lease at once is started now.
     /// `request` carries the opening's tag, by which a connect started for it finds `auth`.
@@ -241,6 +302,9 @@ impl Instance {
             state.pool.advance(now);
             let deadline =
                 now.saturating_add(request.allocation_timeout_ms.unwrap_or(self.allocation_ms));
+            let mut request = request;
+            request.identity =
+                state.pool_identity(&request.key, request.identity.clone(), auth.scope());
             let template = request.clone();
             let request = state.pool.request(request)?;
             state.openings.push(Pending {
@@ -521,7 +585,8 @@ fn serve(state: &mut InstanceState, pending: Pending, lease: LeaseId) {
 fn ask_again(state: &mut InstanceState, mut pending: Pending) {
     let mut asked = pending.template.clone();
     asked.fresh = true;
-    match state.pool.request(asked) {
+    // Within the deadline the opening was given at submit, never a new one.
+    match state.pool.request_until(asked, Some(pending.deadline)) {
         Ok(request) => {
             pending.request = request;
             state.openings.push(pending);

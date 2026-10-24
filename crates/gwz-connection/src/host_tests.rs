@@ -427,10 +427,9 @@ fn a_changed_profile_is_served_by_another_instance_and_reuse_resumes_when_it_cha
 }
 
 #[test]
-fn a_changed_auth_context_on_an_equal_profile_reuses_nothing_and_keeps_the_old_contexts_connection()
-{
-    // HTTPS (the scope partitions HTTPS only, the lane owner's ruling on C-P3-2). The other context's idle connection
-    // is offered first (the pool knows no scope), given back untouched and kept; the new context opens its own.
+fn a_changed_auth_context_on_an_equal_profile_reuses_nothing_and_reuse_resumes_under_the_new_one() {
+    // HTTPS (the scope partitions HTTPS only, the lane owner's ruling on C-P3-2): the pool's idle match compares a
+    // scope-derived identity, so an operation is offered its own scope's idle connection, never another's.
     let rig = Rig::new();
     let (_owner, handle) = rig.host(1);
     assert!(!one_https(&handle, "op-1", 1, auth(1, "a")));
@@ -447,14 +446,28 @@ fn a_changed_auth_context_on_an_equal_profile_reuses_nothing_and_keeps_the_old_c
         0,
         "the other context's idle connection is kept, not retired"
     );
-    // REPORTED GAP (remediation round 1, not a requirement): while the old context's idle connection lives, the pool
-    // offers it first (lowest id), the `Reusable` give-back restarts its idle clock, and the new context opens a fresh
-    // connection instead of reusing its own. R4's "then reuse resumes" needs scope in the pool's idle eligibility.
-    rig.clock.advance(31_000);
-    assert!(!one_https(&handle, "op-3", 1, auth(2, "b")));
-    assert_eq!(rig.world.connects(), 3);
-    // The old context still reuses its own connection.
+    // B's second operation reuses B's connection while A's older idle connection still exists.
+    assert_eq!(handle.snapshot().connections.idle, 2);
+    assert!(one_https(&handle, "op-3", 1, auth(2, "b")));
+    assert_eq!(rig.world.connects(), 2);
+    assert_eq!(handle.snapshot().connections.idle, 2);
+    // And A still reuses its own.
     assert!(one_https(&handle, "op-4", 1, auth(1, "a")));
+    assert_eq!(rig.world.connects(), 2);
+    assert_eq!(
+        operation_misfits(&handle, &rig),
+        0,
+        "the pool offered no other scope's connection"
+    );
+}
+
+/// Leases of another scope the instance of profile 1 has refused, read through a fresh operation on it.
+fn operation_misfits(handle: &HostHandle, rig: &Rig) -> u64 {
+    let _ = rig;
+    let probe = registered_with(handle, "probe", 1, auth(1, "a"));
+    let misfits = probe.instance_for_test().misfits_for_test();
+    now(probe.finish());
+    misfits
 }
 
 #[test]
@@ -618,21 +631,24 @@ fn a_misfit_keeps_the_other_scopes_connection_and_opens_its_own() {
 
 #[test]
 fn a_misfit_opening_times_out_at_its_original_allocation_deadline() {
-    // C-P2-1 = S-P2-1, closure row 2: the resubmission keeps the deadline the opening was given at submit.
+    // C-P2-1 = S-P2-1, closure row 2: a misfit at 20 s (the connection B's request opened is found set up under another
+    // scope) resubmits fresh, and the resubmission keeps the deadline B was given at submit.
     let rig = Rig::new();
-    let (_owner, handle) = rig.host(1);
-    let (operation_a, mut exchanges) = saturate(&handle);
     rig.world.asynchronous.store(true, Ordering::SeqCst);
+    let (_owner, handle) = rig.host(1);
     let operation_b = registered_with(&handle, "op-b", 1, auth(2, "b"));
     let mut wait = operation_b.open(https_spec()).unwrap().wait();
-    assert!(!wait.is_ready(), "the pool is full: B waits");
-    // At 20 s an A exchange ends: B is offered its connection, misfits, and asks once more for a fresh one.
-    rig.clock.advance(20_000);
-    rig.progress.run();
-    now(exchanges.pop().unwrap().finish());
-    rig.progress.run();
-    assert_eq!(operation_b.instance_for_test().misfits_for_test(), 1);
     assert!(!wait.is_ready());
+    rig.clock.advance(20_000);
+    let instance = operation_b.instance_for_test();
+    instance.rescope_for_test(AuthScope::new([9; 32]));
+    rig.world.complete_connects();
+    rig.progress.run();
+    assert_eq!(instance.misfits_for_test(), 1);
+    assert!(!wait.is_ready());
+    // The misfit lease went back untouched, for its own scope: idle, not retired.
+    assert_eq!(rig.world.closes(), 0);
+    assert_eq!(handle.snapshot().connections.idle, 1);
     let allocation = gwz_transport::pool::Config::default().allocation_timeout_ms;
     rig.clock.advance(allocation - 20_000 - 1);
     rig.progress.run();
@@ -646,9 +662,44 @@ fn a_misfit_opening_times_out_at_its_original_allocation_deadline() {
     ));
     drop(wait);
     rig.world.asynchronous.store(false, Ordering::SeqCst);
-    drop(exchanges);
     now(operation_b.finish());
-    now(operation_a.finish());
+}
+
+#[test]
+fn a_failed_reuse_proof_resubmits_under_the_original_deadline() {
+    // Step 1.6's ask-again after an unprovable proof keeps the opening's original allocation deadline too.
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    assert!(!one_exchange(&handle, "op-a", 1, auth(1, "a")));
+    rig.world.hold_reuse.store(true, Ordering::SeqCst);
+    let operation_b = registered_with(&handle, "op-b", 1, auth(1, "a"));
+    let mut wait = operation_b.open(exchange_spec()).unwrap().wait();
+    assert_eq!(rig.world.reuses().len(), 1, "B waits for its proof");
+    rig.clock.advance(20_000);
+    rig.world.asynchronous.store(true, Ordering::SeqCst);
+    rig.world.end_reuse(crate::ReuseVerdict::Unprovable);
+    rig.progress.run();
+    assert!(
+        !wait.is_ready(),
+        "B asked again for a connection of its own"
+    );
+    let allocation = gwz_transport::pool::Config::default().allocation_timeout_ms;
+    rig.clock.advance(allocation - 20_000 - 1);
+    rig.progress.run();
+    assert!(!wait.is_ready(), "still within the original deadline");
+    rig.clock.advance(1);
+    rig.progress.run();
+    assert!(
+        wait.is_ready(),
+        "the resubmission did not extend the deadline"
+    );
+    assert!(matches!(
+        poll_once(&mut wait),
+        Poll::Ready(Err(OpenFailure::Pool(_)))
+    ));
+    drop(wait);
+    rig.world.asynchronous.store(false, Ordering::SeqCst);
+    now(operation_b.finish());
 }
 
 #[test]
