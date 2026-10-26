@@ -132,7 +132,7 @@ impl Future for Acquire {
             pair: Mutex::new(pair),
             instance,
             auth: input.auth,
-            cancelled: AtomicBool::new(false),
+            cancelled: Arc::new(AtomicBool::new(false)),
             closing: AtomicUsize::new(0),
             sealed: AtomicBool::new(false),
             retired: AtomicBool::new(false),

@@ -347,3 +347,252 @@ fn p1_6_n_p3_1_a_revoked_proof_asks_fresh_before_the_siblings_idle_closed_arrive
     now(exchange.finish());
     now(b.finish());
 }
+
+// Phase 1 integration fix-up, round 1 (dev-docs/GwzPhase1Integration-RemPlan.md): Code P2-1 = State P2-1. An opening that
+// holds a lease and waits for its proof is governed by its binding's cancellation and by its own deadline.
+
+#[test]
+fn p1_int_rem_cancelling_the_binding_during_a_held_proof_ends_the_opening_and_spares_the_lease() {
+    // A leaves `c` idle; B leases it and B's proof is held; B's operation is cancelled. The opening ends Cancelled at
+    // once, the proof is cancelled, `c` is idle and open (it is A's, not B's), and a late verdict starts nothing.
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    idle_after_a(&rig, &handle);
+    rig.world.hold_reuse.store(true, Ordering::SeqCst);
+    let b = registered(&handle, "op-b");
+    let mut wait = b.open(exchange_spec()).unwrap().wait();
+    let proof = rig.world.reuses()[0];
+    assert!(!wait.is_ready());
+    assert_eq!(handle.snapshot().connections.leased, 1);
+    assert_eq!(b.cancel_handle().cancel(), crate::CancelState::Cancelled);
+    assert!(wait.is_ready(), "the opening ended at once");
+    assert!(matches!(
+        crate::fakes::poll_once(&mut wait),
+        std::task::Poll::Ready(Err(crate::OpenFailure::Cancelled))
+    ));
+    assert_eq!(rig.world.cancelled_reuses(), vec![proof.proof]);
+    assert_eq!(
+        rig.world.closes(),
+        0,
+        "A's healthy connection is not closed"
+    );
+    assert_eq!(handle.snapshot().connections.idle, 1);
+    assert_eq!(handle.snapshot().connections.leased, 0);
+    // The late verdict serves nothing and asks for nothing.
+    rig.world.end_reuse_of(proof, ReuseVerdict::Revoked);
+    rig.progress.run();
+    assert_eq!(
+        rig.world.connects(),
+        1,
+        "no connection for a cancelled operation"
+    );
+    assert_eq!(rig.world.exchanges.load(Ordering::SeqCst), 1);
+    assert_eq!(handle.snapshot().connections.idle, 1);
+    drop(wait);
+    now(b.finish());
+}
+
+#[test]
+fn p1_int_rem_the_openings_deadline_during_a_held_proof_ends_it_with_an_allocation_timeout() {
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    idle_after_a(&rig, &handle);
+    rig.world.hold_reuse.store(true, Ordering::SeqCst);
+    let b = registered(&handle, "op-b");
+    let mut wait = b.open(exchange_spec()).unwrap().wait();
+    let proof = rig.world.reuses()[0];
+    let allocation = gwz_transport::pool::Config::default().allocation_timeout_ms;
+    rig.clock.advance(allocation - 1);
+    rig.progress.run();
+    assert!(!wait.is_ready(), "still within the deadline");
+    rig.clock.advance(1);
+    rig.progress.run();
+    assert!(wait.is_ready(), "the proof did not extend the deadline");
+    assert!(matches!(
+        crate::fakes::poll_once(&mut wait),
+        std::task::Poll::Ready(Err(crate::OpenFailure::Pool(
+            gwz_transport::pool::Error::AllocationTimeout
+        )))
+    ));
+    assert_eq!(rig.world.cancelled_reuses(), vec![proof.proof]);
+    assert_eq!(rig.world.closes(), 0);
+    assert_eq!(
+        handle.snapshot().connections.idle,
+        1,
+        "the lease is back in idle"
+    );
+    assert_eq!(handle.snapshot().connections.leased, 0);
+    rig.world.end_reuse_of(proof, ReuseVerdict::Authorized);
+    rig.progress.run();
+    assert_eq!(
+        rig.world.exchanges.load(Ordering::SeqCst),
+        1,
+        "the late verdict started nothing"
+    );
+    drop(wait);
+    now(b.finish());
+}
+
+#[test]
+fn p1_int_rem_the_drivers_next_deadline_includes_a_held_proofs_opening() {
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    idle_after_a(&rig, &handle);
+    rig.world.hold_reuse.store(true, Ordering::SeqCst);
+    let b = registered(&handle, "op-b");
+    let instance = b.instance_for_test();
+    let submitted = {
+        use crate::Clock;
+        rig.clock.now().get()
+    };
+    let wait = b.open(exchange_spec()).unwrap().wait();
+    let allocation = gwz_transport::pool::Config::default().allocation_timeout_ms;
+    assert_eq!(
+        instance.next_deadline(),
+        Some(submitted + allocation),
+        "the driver wakes at the opening's deadline"
+    );
+    drop(wait);
+    now(b.finish());
+}
+
+#[test]
+fn p1_int_rem_the_proof_command_carries_what_is_left_of_the_openings_deadline() {
+    // Two idle connections of A's. B's first proof ends unprovable after 10 s; its second ask (the other connection)
+    // carries the rest of the opening's deadline, not a new allocation.
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    let a = registered(&handle, "op-a");
+    let first = now(a.open(exchange_spec()).unwrap().wait()).unwrap();
+    let second = now(a.open(exchange_spec()).unwrap().wait()).unwrap();
+    now(first.finish());
+    now(second.finish());
+    now(a.finish());
+    assert_eq!(handle.snapshot().connections.idle, 2);
+    rig.world.hold_reuse.store(true, Ordering::SeqCst);
+    let allocation = gwz_transport::pool::Config::default().allocation_timeout_ms;
+    let b = registered(&handle, "op-b");
+    let wait = b.open(exchange_spec()).unwrap().wait();
+    let proofs = rig.world.reuses();
+    assert_eq!(proofs.len(), 1);
+    assert_eq!(proofs[0].remaining_ms, allocation);
+    rig.clock.advance(10_000);
+    rig.world.end_reuse_of(proofs[0], ReuseVerdict::Unprovable);
+    rig.progress.run();
+    let proofs = rig.world.reuses();
+    assert_eq!(proofs.len(), 2, "B asked for the other connection");
+    assert_ne!(proofs[1].connection, proofs[0].connection);
+    assert_eq!(proofs[1].remaining_ms, allocation - 10_000);
+    drop(wait);
+    now(b.finish());
+}
+
+#[test]
+fn p1_int_rem_a_retry_is_refused_for_a_cancelled_binding() {
+    // A binding the host marked cancelled without the sweep (a rejected frame sets only the flag): the late verdict
+    // that would make the opening ask again ends it Cancelled instead, and no connection is opened for it.
+    for verdict in [ReuseVerdict::Unprovable, ReuseVerdict::Revoked] {
+        let rig = Rig::new();
+        let (_owner, handle) = rig.host(1);
+        idle_after_a(&rig, &handle);
+        rig.world.hold_reuse.store(true, Ordering::SeqCst);
+        let b = registered(&handle, "op-b");
+        let mut wait = b.open(exchange_spec()).unwrap().wait();
+        let proof = rig.world.reuses()[0];
+        b.mark_cancelled_for_test();
+        rig.world.end_reuse_of(proof, verdict);
+        rig.progress.run();
+        assert!(wait.is_ready(), "{verdict:?}: the opening ended");
+        assert!(matches!(
+            crate::fakes::poll_once(&mut wait),
+            std::task::Poll::Ready(Err(crate::OpenFailure::Cancelled))
+        ));
+        assert_eq!(rig.world.connects(), 1, "{verdict:?}: no new connection");
+        assert_eq!(
+            b.instance_for_test().outstanding_for_test(),
+            0,
+            "{verdict:?}"
+        );
+        drop(wait);
+        now(b.finish());
+    }
+}
+
+#[test]
+fn p1_int_rem_a_lease_the_adapter_finds_retired_at_start_asks_again_for_a_new_connection() {
+    // Code P3-2 = State P3-2: the connection was retired (a failed proof of its key) after the host leased it for the
+    // same binding that used it. The adapter's start says so (`NotConnected`); the open is served on a new connection
+    // as the no-setup-record path does, not failed with an I/O error.
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    let a = registered(&handle, "op-a");
+    now(now(a.open(exchange_spec()).unwrap().wait())
+        .unwrap()
+        .finish());
+    rig.world.start_lost.store(true, Ordering::SeqCst);
+    let exchange = now(a.open(exchange_spec()).unwrap().wait()).unwrap();
+    assert!(!exchange.reused(), "a new connection served it");
+    assert_eq!(rig.world.connects(), 2);
+    assert_eq!(rig.world.closes(), 1, "the lost lease is discarded");
+    assert_eq!(a.instance_for_test().misfits_for_test(), 0);
+    now(exchange.finish());
+    now(a.finish());
+}
+
+#[test]
+fn p1_int_rem_a_rejected_frame_during_a_held_proof_cancels_the_binding_as_cancel_does() {
+    // The lane owner's addition to Code P2-1 = State P2-1: a frame the binding's mux refuses cancels that binding through
+    // the same path as `OperationCancel::cancel`. Its opening ends Cancelled at once, the proof is cancelled, the lease
+    // (another binding's, still clean) is idle and open, and a late verdict serves nothing.
+    use gwz_transport::protocol::{Envelope, MessageKind};
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    idle_after_a(&rig, &handle);
+    rig.world.hold_reuse.store(true, Ordering::SeqCst);
+    let b = registered(&handle, "op-b");
+    let mut wait = b.open(exchange_spec()).unwrap().wait();
+    let proof = rig.world.reuses()[0];
+    assert!(!wait.is_ready());
+    let frame = (
+        "x".to_string(),
+        Envelope {
+            version: 2,
+            session_id: b.binding_session(),
+            stream_id: 5,
+            kind: MessageKind::Data,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        handle.route(
+            handle.carrier(),
+            binding(&b),
+            crate::Direction::ToEndpoint,
+            &frame
+        ),
+        crate::Routed::Discarded(crate::Discard::Rejected)
+    );
+    assert!(wait.is_ready(), "the opening ended at once");
+    assert!(matches!(
+        crate::fakes::poll_once(&mut wait),
+        std::task::Poll::Ready(Err(crate::OpenFailure::Cancelled))
+    ));
+    assert_eq!(rig.world.cancelled_reuses(), vec![proof.proof]);
+    assert_eq!(
+        rig.world.closes(),
+        0,
+        "A's healthy connection is not closed"
+    );
+    assert_eq!(handle.snapshot().connections.idle, 1);
+    assert_eq!(handle.snapshot().connections.leased, 0);
+    rig.world.end_reuse_of(proof, ReuseVerdict::Authorized);
+    rig.progress.run();
+    assert_eq!(
+        rig.world.exchanges.load(Ordering::SeqCst),
+        1,
+        "the late verdict started nothing"
+    );
+    assert_eq!(rig.world.connects(), 1);
+    drop(wait);
+    now(b.finish());
+}

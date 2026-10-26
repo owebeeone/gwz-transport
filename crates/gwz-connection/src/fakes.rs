@@ -236,6 +236,8 @@ pub(crate) struct FakeWorld {
     pub(crate) hold_reuse: AtomicBool,
     /// Every proof the host cancelled, in order.
     pub(crate) cancelled_reuses: Mutex<Vec<ProofId>>,
+    /// The next exchange start finds its connection retired (the adapter's `NotConnected`).
+    pub(crate) start_lost: AtomicBool,
     /// Every adapter's queue and the waker the host last gave it.
     queues: Mutex<Vec<Arc<Mutex<Queue>>>>,
     /// Which operation's context each connect and exchange was given, by the provider's tag, in order.
@@ -267,6 +269,7 @@ impl FakeWorld {
             reuse_verdict: Mutex::new(Some(ReuseVerdict::Authorized)),
             hold_reuse: AtomicBool::new(false),
             cancelled_reuses: Mutex::new(Vec::new()),
+            start_lost: AtomicBool::new(false),
             queues: Mutex::new(Vec::new()),
             contexts: Mutex::new(Vec::new()),
             inputs: Mutex::new(Vec::new()),
@@ -520,6 +523,9 @@ impl EndpointAdapter for FakeAdapter {
         spec: &ExchangeSpec,
         auth: &AuthContext,
     ) -> io::Result<Box<dyn ExchangeIo>> {
+        if self.world.start_lost.swap(false, Ordering::SeqCst) {
+            return Err(io::ErrorKind::NotConnected.into());
+        }
         self.world.exchanges.fetch_add(1, Ordering::SeqCst);
         *self.world.last_spec.lock().unwrap() = Some((spec.service(), spec.path().into()));
         self.world

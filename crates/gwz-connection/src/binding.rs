@@ -26,6 +26,16 @@ pub struct BindingId {
     pub(crate) host: HostNamespace,
     pub(crate) serial: u64,
 }
+impl BindingId {
+    /// The namespace of the host that issued it.
+    pub fn host(self) -> HostNamespace {
+        self.host
+    }
+    /// The serial that host never issues twice: with the namespace, a key by which an adapter keeps state per binding.
+    pub fn serial(self) -> u64 {
+        self.serial
+    }
+}
 
 /// A carrier connection, as a host knows it. The in-process link is one per host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,7 +165,8 @@ pub(crate) struct BindingShared {
     pub(crate) instance: Arc<Instance>,
     /// The operation's authentication context: the binding's, for as long as it lives, and never the instance's.
     pub(crate) auth: AuthContext,
-    pub(crate) cancelled: AtomicBool,
+    /// Shared with the binding's pending openings, so that an opening that asks the pool again can see the cancellation.
+    pub(crate) cancelled: Arc<AtomicBool>,
     /// Why the host cancelled it, when it did (0 none, 1 host closing, 2 domain closing).
     pub(crate) closing: AtomicUsize,
     pub(crate) sealed: AtomicBool,

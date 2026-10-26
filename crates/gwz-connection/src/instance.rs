@@ -33,7 +33,11 @@
 //! host-minted `ProofId`: only the completion that names it ends it, and a proof whose opening went or whose host
 //! sealed is cancelled (`cancel_reuse`). A lease no proof authorized goes back to idle unused (`release_unused`, which
 //! keeps its idle time), and the opening asks again with it excluded, so a binding's own idle connection is not
-//! shadowed by another binding's that it cannot prove.
+//! shadowed by another binding's that it cannot prove. An opening that waits for its proof is governed by its binding's
+//! cancellation (`cancel_authorizing`: the proof is cancelled, the lease goes back to idle and the opening ends
+//! `Cancelled`, before the pool cancels the binding's owner and closes what it leases) and by its own allocation
+//! deadline (`AllocationTimeout`, which the driver wakes for); the command tells the adapter how much of the deadline
+//! is left. A binding that was cancelled asks the pool for nothing more.
 use crate::{
     AuthContext, AuthScope, BindingId, Clock, Completion, ConnectCommand, EndpointAdapter,
     EndpointProfile, ExchangeEnd, ExchangeIo, ExchangeSpec, OpenFailure, ProofId, ReuseCommand,
@@ -49,7 +53,10 @@ use gwz_transport::protocol::Disposition;
 use gwz_transport::protocol::Scheme;
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering::Acquire},
+    },
     task::{Context, Poll, Wake, Waker},
 };
 
@@ -73,6 +80,8 @@ struct Pending {
     excluded: Vec<ConnectionId>,
     /// The opening's absolute allocation deadline on the pool's clock, fixed at submit: a resubmission never extends it.
     deadline: u64,
+    /// The binding's cancelled flag: an opening that asks the pool again for a cancelled binding ends Cancelled instead.
+    cancelled: Arc<AtomicBool>,
     slot: Arc<Slot<Opened>>,
 }
 /// A connection the pool has started and not yet disposed of: the scope its setup used (none when its opener had gone)
@@ -233,8 +242,18 @@ impl Instance {
         }
     }
     /// The pool's next deadline on the host's clock, which the driver sleeps until.
+    /// It includes the deadline of each opening that waits for its proof, which the pool no longer holds a request for.
     pub(crate) fn next_deadline(&self) -> Option<u64> {
-        self.lock().pool.next_deadline()
+        let state = self.lock();
+        let proofs = state
+            .authorizing
+            .iter()
+            .map(|item| item.pending.deadline)
+            .min();
+        match (state.pool.next_deadline(), proofs) {
+            (Some(pool), Some(proofs)) => Some(pool.min(proofs)),
+            (pool, proofs) => pool.or(proofs),
+        }
     }
     /// One pass of the driver: everything the adapter reported, the pool's actions and the in-flight work.
     pub(crate) fn drive(&self) {
@@ -287,10 +306,12 @@ impl Instance {
                     state.connections.remove(&connection);
                 }
             }
+            // An opening's deadline passes whatever its proof is doing, and a verdict after it serves nothing.
+            progressed |= expire_authorizing(state, self.clock.now().get());
             for (connection, proof, verdict) in verdicts {
                 reused(state, connection, proof, verdict);
             }
-            progressed |= openings(state);
+            progressed |= openings(state, self.clock.now().get());
             progressed |= settle(state, &mut cx);
             if !progressed {
                 break;
@@ -306,6 +327,7 @@ impl Instance {
         binding: BindingId,
         spec: ExchangeSpec,
         auth: AuthContext,
+        cancelled: Arc<AtomicBool>,
     ) -> Result<Arc<Slot<Opened>>, Error> {
         let slot = Slot::new();
         {
@@ -330,6 +352,7 @@ impl Instance {
                 misfits: 0,
                 excluded: Vec::new(),
                 deadline,
+                cancelled,
                 slot: slot.clone(),
             });
             self.pump(&mut state);
@@ -490,7 +513,7 @@ fn actions(state: &mut InstanceState) -> bool {
 }
 
 /// Leases for the openings whose request the pool can now serve: the exchange is started and handed to its slot.
-fn openings(state: &mut InstanceState) -> bool {
+fn openings(state: &mut InstanceState, now: u64) -> bool {
     let mut progressed = false;
     let mut index = 0;
     while index < state.openings.len() {
@@ -510,16 +533,8 @@ fn openings(state: &mut InstanceState) -> bool {
                     // release ends it, and the opening asks again, not as a misfit, within its own deadline.
                     progressed = true;
                     let _ = state.pool.release(lease, Disposition::Discarded);
-                    let bound = state.pool.capacity().per_user_host + 1;
-                    let pending = &mut state.openings[index];
-                    pending.misfits += 1;
-                    if pending.misfits > bound {
-                        let pending = state.openings.remove(index);
-                        let _ = pending.slot.fill(Err(OpenFailure::NoFittingConnection));
-                        continue;
-                    }
                     let pending = state.openings.remove(index);
-                    ask_again(state, pending, None);
+                    lost_lease(state, pending);
                     continue;
                 }
                 // The scope partitions HTTPS keys only; SSH reuse is authorized by the proof below (step 1.6).
@@ -568,6 +583,7 @@ fn openings(state: &mut InstanceState) -> bool {
                         connection: lease.connection(),
                         binding: pending.binding,
                         proof,
+                        remaining_ms: pending.deadline.saturating_sub(now),
                     };
                     let started = state
                         .adapter
@@ -618,6 +634,12 @@ fn serve(state: &mut InstanceState, pending: Pending, lease: LeaseId) {
             }
             Ok((io, lease, reused))
         }
+        // The adapter retired the connection after the pool leased it (a failed proof of its key retired it): a lost
+        // lease, as the pool's own `IdleClosed` race makes one, not an I/O failure of the opening.
+        Err(error) if error.kind() == std::io::ErrorKind::NotConnected => {
+            let _ = state.pool.release(lease, Disposition::Discarded);
+            return lost_lease(state, pending);
+        }
         Err(error) => {
             let _ = state.pool.release(lease, Disposition::Discarded);
             Err(OpenFailure::Io(error))
@@ -630,11 +652,27 @@ fn serve(state: &mut InstanceState, pending: Pending, lease: LeaseId) {
     }
 }
 
+/// `pending` held a lease of a connection that is gone (the adapter disposed of it, or retired it, before the exchange
+/// began): the lease is discarded by the caller and the opening asks again, not as a misfit, within its own deadline.
+/// More than `per_user_host + 1` of them can only mean a broken adapter, and the opening then fails by name.
+fn lost_lease(state: &mut InstanceState, mut pending: Pending) {
+    pending.misfits += 1;
+    let bound = state.pool.capacity().per_user_host + 1;
+    if pending.misfits > bound {
+        let _ = pending.slot.fill(Err(OpenFailure::NoFittingConnection));
+        return;
+    }
+    ask_again(state, pending, None);
+}
+
 /// `pending`'s lease of `bounced` could not serve it: it asks the pool again, with every connection that could not serve
 /// it excluded, so that its own binding's idle connection, or a new one, is offered next (step 1.6 remediation, S-P2-2),
 /// within its own allocation. Past the pool's exclusion bound it asks fresh, for a new connection. A connection already
 /// disposed of (`None`) is excluded by nothing: the pool no longer offers it.
 fn ask_again(state: &mut InstanceState, mut pending: Pending, bounced: Option<ConnectionId>) {
+    if refused_for_cancelled(&pending) {
+        return;
+    }
     if let Some(bounced) = bounced
         && !pending.excluded.contains(&bounced)
     {
@@ -658,8 +696,22 @@ fn ask_again(state: &mut InstanceState, mut pending: Pending, bounced: Option<Co
     }
 }
 
+/// A binding that was cancelled asks the pool for nothing more (the pool keeps no record that its owner was cancelled, so
+/// a new request would open a connection, and spend an agent signature, for an operation the user stopped): the opening
+/// ends `Cancelled`. Whether it was.
+fn refused_for_cancelled(pending: &Pending) -> bool {
+    let cancelled = pending.cancelled.load(Acquire);
+    if cancelled {
+        let _ = pending.slot.fill(Err(OpenFailure::Cancelled));
+    }
+    cancelled
+}
+
 /// `pending` asks the pool again for a new connection, with no exclusion, within the deadline it was given at submit.
 fn ask_fresh(state: &mut InstanceState, mut pending: Pending) {
+    if refused_for_cancelled(&pending) {
+        return;
+    }
     pending.excluded.clear();
     let mut asked = pending.template.clone();
     asked.fresh = true;
@@ -673,6 +725,50 @@ fn ask_fresh(state: &mut InstanceState, mut pending: Pending) {
             let _ = pending.slot.fill(Err(OpenFailure::Pool(error)));
         }
     }
+}
+
+/// Ends `item`, an opening whose lease waits for its proof, without serving it: the proof is cancelled, the lease goes back
+/// to idle unused (it is another binding's connection, still clean, and keeps the idle time it had) and the opening
+/// fails with `failure`. A verdict that comes later names a proof the host no longer waits for and changes nothing.
+fn end_authorizing(state: &mut InstanceState, item: Authorizing, failure: OpenFailure) {
+    if let Some(adapter) = state.adapter.as_mut() {
+        adapter.cancel_reuse(item.proof);
+    }
+    let _ = state.pool.release_unused(item.lease);
+    let _ = item.pending.slot.fill(Err(failure));
+}
+
+/// The binding was cancelled: each of its openings that waits for a proof ends `Cancelled` now (contract section 7.1: a
+/// cancelled proof returns a still-clean leased connection to idle before the binding is cancelled, and section 8: a
+/// cancellation affects its binding only, not another binding's idle connections). Called before the pool cancels the
+/// binding's owner, which closes what the owner leases.
+pub(crate) fn cancel_authorizing(state: &mut InstanceState, binding: BindingId) {
+    let mut index = 0;
+    while index < state.authorizing.len() {
+        if state.authorizing[index].pending.binding == binding {
+            let item = state.authorizing.remove(index);
+            end_authorizing(state, item, OpenFailure::Cancelled);
+        } else {
+            index += 1;
+        }
+    }
+}
+
+/// Each opening that waits for a proof past its allocation deadline ends `AllocationTimeout`: a proof never extends the
+/// deadline (contract section 7.1). Whether any did.
+fn expire_authorizing(state: &mut InstanceState, now: u64) -> bool {
+    let mut progressed = false;
+    let mut index = 0;
+    while index < state.authorizing.len() {
+        if state.authorizing[index].pending.deadline <= now {
+            let item = state.authorizing.remove(index);
+            end_authorizing(state, item, OpenFailure::Pool(Error::AllocationTimeout));
+            progressed = true;
+        } else {
+            index += 1;
+        }
+    }
+    progressed
 }
 
 /// The reuse proof `proof` for `connection` ended with `verdict` (contract section 7.1): an authorized lease serves its

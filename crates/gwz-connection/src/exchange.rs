@@ -13,7 +13,7 @@ use crate::{
     binding::{BindingShared, closing_reason},
     cell::{Cell, Slot},
     host::HostShared,
-    instance::{Instance, Opened},
+    instance::{Instance, Opened, cancel_authorizing},
     operation::TerminalReason,
 };
 use gwz_transport::{
@@ -172,6 +172,14 @@ cfg_if::cfg_if! {
                     Kind::Terminal(_) => panic!("a terminal operation has no instance"),
                 }
             }
+            /// Sets the binding's cancelled flag as a rejected frame does (`host.rs` `route`), without the sweep that
+            /// `cancel_binding` makes: what a row needs to show that a retry is refused for a cancelled binding.
+            pub(crate) fn mark_cancelled_for_test(&self) {
+                match &self.kind {
+                    Kind::Live(binding) => binding.cancelled.store(true, Release),
+                    Kind::Terminal(_) => panic!("a terminal operation has no binding"),
+                }
+            }
         }
     }
 }
@@ -198,12 +206,15 @@ impl fmt::Debug for Operation {
 
 /// Marks the binding cancelled and has its pool cancel what it owns: pending requests fail and its leased connections
 /// are closed. Other bindings' connections are untouched.
-fn cancel_binding(binding: &Arc<BindingShared>) -> bool {
+pub(crate) fn cancel_binding(binding: &Arc<BindingShared>) -> bool {
     if binding.cancelled.swap(true, AcqRel) {
         return false;
     }
     {
         let mut state = binding.instance.lock();
+        // An opening that holds a lease for its proof goes first: the lease is another binding's idle connection, still
+        // clean, and the pool's cancellation would close it (contract section 7.1).
+        cancel_authorizing(&mut state, binding.id);
         state.pool.cancel_operation(&Owner::new(
             binding.session.clone(),
             binding.operation.clone(),
@@ -299,7 +310,13 @@ impl Opening {
                 request.tag = Some(self.tag);
                 binding
                     .instance
-                    .submit(request, binding.id, self.spec, binding.auth.clone())
+                    .submit(
+                        request,
+                        binding.id,
+                        self.spec,
+                        binding.auth.clone(),
+                        binding.cancelled.clone(),
+                    )
                     .map_err(OpenFailure::Pool)
             }
         };

@@ -181,6 +181,11 @@ pub struct ReuseCommand {
     pub binding: BindingId,
     /// The proof's identity, which its `Completion::Reuse` and any `cancel_reuse` name.
     pub proof: ProofId,
+    /// How long the opening this proof serves still has, in milliseconds, when the command is issued: its allocation
+    /// deadline less now. The adapter runs the proof under the earlier of this and its own bound, so a proof never
+    /// outlasts the opening (contract section 7.1: a request's deadline is never extended). It is a span, not a
+    /// point, because an adapter's clock is not the host's.
+    pub remaining_ms: u64,
 }
 /// How a reuse proof ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,7 +229,8 @@ pub trait EndpointAdapter: Send {
     fn close(&mut self, connection: ConnectionId);
     /// Starts the exchange `spec` names (its Git service and path) on `connection`, which the caller leases, for the
     /// operation whose context is `auth`: what it authenticates with is that context's, never another operation's or
-    /// the instance's.
+    /// the instance's. `ErrorKind::NotConnected` says the connection is gone (the adapter disposed of or retired it
+    /// after the pool leased it): the host discards the lease and the opening asks again, within its deadline.
     fn start_exchange(
         &mut self,
         connection: ConnectionId,
@@ -238,8 +244,8 @@ pub trait EndpointAdapter: Send {
         let _ = command;
         false
     }
-    /// The host no longer waits for `proof` (contract section 4.1's `cancel_work`): its opening went, or the host
-    /// sealed. The adapter stops it if it can; a completion it still reports serves nothing.
+    /// The host no longer waits for `proof` (contract section 4.1's `cancel_work`): its opening went, its binding was
+    /// cancelled, its opening's deadline passed, or the host sealed. The adapter stops it if it can; a completion it still reports serves nothing.
     fn cancel_reuse(&mut self, proof: ProofId) {
         let _ = proof;
     }

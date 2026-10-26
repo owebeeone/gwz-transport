@@ -673,8 +673,10 @@ impl HostShared {
         match delivered {
             Ok(()) => Routed::Delivered,
             Err(_) => {
-                // The binding's own frame was invalid: it, and only it, is cancelled.
-                entry.cancelled.store(true, Ordering::Release);
+                // The binding's own frame was invalid: it, and only it, is cancelled, as `OperationCancel::cancel` cancels
+                // it (its openings that wait for a proof end, then its pool owner is cancelled). No host or pool lock
+                // is held here.
+                crate::exchange::cancel_binding(&entry);
                 Routed::Discarded(Discard::Rejected)
             }
         }
