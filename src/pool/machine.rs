@@ -26,6 +26,10 @@ pub(super) struct Entry {
     pub reusable: bool,
     pub owner: Option<Owner>,
     pub state: State,
+    /// When the connection last became idle on a real release, kept while it is
+    /// leased from idle so that a lease given back unused
+    /// (`release_unused`) restores it instead of restarting the idle clock.
+    pub idle_since: Option<u64>,
 }
 pub(super) enum State {
     Opening {

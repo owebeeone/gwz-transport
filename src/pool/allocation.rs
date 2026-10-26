@@ -23,8 +23,9 @@ impl PoolMachine {
                 (matches!(entry.state, State::Idle { .. })
                     && entry.key == request.key
                     && entry.reusable
-                    && entry.identity == request.identity)
-                    .then_some(*connection)
+                    && entry.identity == request.identity
+                    && !request.exclude.contains(connection))
+                .then_some(*connection)
             });
             if let Some(connection) = idle {
                 match self.lease_id(connection) {
@@ -32,6 +33,9 @@ impl PoolMachine {
                         let pending = self.requests.get_mut(id).expect("waiting request");
                         let entry = self.entries.get_mut(&connection).expect("idle entry");
                         entry.owner = Some(pending.request.owner.clone());
+                        if let State::Idle { since } = entry.state {
+                            entry.idle_since = Some(since);
+                        }
                         entry.state = State::Leased {
                             lease,
                             request: Some(*id),
@@ -129,6 +133,7 @@ impl PoolMachine {
                 identity: request.identity.clone(),
                 reusable: false,
                 owner: Some(request.owner.clone()),
+                idle_since: None,
                 state: State::Opening {
                     request: Some(id),
                     clock: None,

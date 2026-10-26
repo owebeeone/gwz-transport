@@ -348,6 +348,13 @@ impl Lease {
         self.shared
             .change(|state| state.machine.release(token, disposition))
     }
+    /// [`PoolMachine::release_unused`]: the lease served no exchange, and its
+    /// connection keeps the idle time it had.
+    pub fn release_unused(mut self) -> Result<(), Error> {
+        let token = self.token.take().ok_or(Error::Stale)?;
+        self.shared
+            .change(|state| state.machine.release_unused(token))
+    }
 }
 impl Drop for Lease {
     fn drop(&mut self) {

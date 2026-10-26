@@ -7,9 +7,9 @@ use crate::{
     DomainConfig, DriverWork, EndpointAdapter, EndpointFactory, EndpointProfile, EndpointRoute,
     EndpointSpec, ExchangeIo, ExchangeSpec, FactoryEnv, FactoryError, FactoryReason, GitService,
     HostConfig, HostHandle, HostLimits, HostNamespace, HostOwner, HostPorts, OperationPolicy,
-    OwnerSeed, PreparedOperation, ProcessSafety, Progress, ProgressUnavailable, RetainedWork,
-    RetentionPort, RetentionRefused, ReuseCommand, ReuseVerdict, SafetyHold, SafetyState,
-    SafetyUnavailable, Sleep, Tick, cleanup_domain,
+    OwnerSeed, PreparedOperation, ProcessSafety, Progress, ProgressUnavailable, ProofId,
+    RetainedWork, RetentionPort, RetentionRefused, ReuseCommand, ReuseVerdict, SafetyHold,
+    SafetyState, SafetyUnavailable, Sleep, Tick, cleanup_domain,
 };
 use gwz_transport::{
     pool::{ConnectionId, Identity, Key},
@@ -234,6 +234,8 @@ pub(crate) struct FakeWorld {
     pub(crate) reuses: Mutex<Vec<ReuseCommand>>,
     pub(crate) reuse_verdict: Mutex<Option<ReuseVerdict>>,
     pub(crate) hold_reuse: AtomicBool,
+    /// Every proof the host cancelled, in order.
+    pub(crate) cancelled_reuses: Mutex<Vec<ProofId>>,
     /// Every adapter's queue and the waker the host last gave it.
     queues: Mutex<Vec<Arc<Mutex<Queue>>>>,
     /// Which operation's context each connect and exchange was given, by the provider's tag, in order.
@@ -264,6 +266,7 @@ impl FakeWorld {
             reuses: Mutex::new(Vec::new()),
             reuse_verdict: Mutex::new(Some(ReuseVerdict::Authorized)),
             hold_reuse: AtomicBool::new(false),
+            cancelled_reuses: Mutex::new(Vec::new()),
             queues: Mutex::new(Vec::new()),
             contexts: Mutex::new(Vec::new()),
             inputs: Mutex::new(Vec::new()),
@@ -298,19 +301,27 @@ impl FakeWorld {
             }
         });
     }
-    /// The held reuse proofs end with `verdict`; the hosts' wakers are woken.
+    /// Every held reuse proof ends with `verdict`; the hosts' wakers are woken.
     pub(crate) fn end_reuse(&self, verdict: ReuseVerdict) {
         let held: Vec<_> = self.reuses.lock().unwrap().clone();
+        for command in held {
+            self.end_reuse_of(command, verdict);
+        }
+    }
+    /// The held proof `command` alone ends with `verdict`, as an adapter's worker reports one proof.
+    pub(crate) fn end_reuse_of(&self, command: ReuseCommand, verdict: ReuseVerdict) {
         self.each_queue(|queue| {
-            for command in &held {
-                if queue.connected.contains(&command.connection) {
-                    queue.completions.push_back(Completion::Reuse {
-                        connection: command.connection,
-                        verdict,
-                    });
-                }
+            if queue.connected.contains(&command.connection) {
+                queue.completions.push_back(Completion::Reuse {
+                    connection: command.connection,
+                    proof: command.proof,
+                    verdict,
+                });
             }
         });
+    }
+    pub(crate) fn cancelled_reuses(&self) -> Vec<ProofId> {
+        self.cancelled_reuses.lock().unwrap().clone()
     }
     pub(crate) fn reuses(&self) -> Vec<ReuseCommand> {
         self.reuses.lock().unwrap().clone()
@@ -515,10 +526,14 @@ impl EndpointAdapter for FakeAdapter {
                 .completions
                 .push_back(Completion::Reuse {
                     connection: command.connection,
+                    proof: command.proof,
                     verdict,
                 });
         }
         true
+    }
+    fn cancel_reuse(&mut self, proof: ProofId) {
+        self.world.cancelled_reuses.lock().unwrap().push(proof);
     }
     fn poll_completion(&mut self, cx: &mut Context<'_>) -> Poll<Completion> {
         let mut queue = self.queue.lock().unwrap();

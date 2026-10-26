@@ -125,3 +125,157 @@ fn p1_6_an_opening_dropped_during_its_proof_gives_the_connection_back_to_idle() 
     assert_eq!(rig.world.exchanges.load(Ordering::SeqCst), 1);
     now(b.finish());
 }
+
+// Step 1.6 remediation round 1 (dev-docs/GwzConnectionApiContract-Step1.6-RemPlan.md).
+
+#[test]
+fn p1_6_rem_a_late_verdict_of_a_dropped_openings_proof_serves_no_other_binding() {
+    // C-P2-1 = S-P2-1: B's proof is held and B's opening is dropped; C then leases the same connection and waits for
+    // its own proof. B's late verdict serves nothing; C's own verdict decides C.
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    idle_after_a(&rig, &handle);
+    rig.world.hold_reuse.store(true, Ordering::SeqCst);
+    let b = registered(&handle, "op-b");
+    let wait_b = b.open(exchange_spec()).unwrap().wait();
+    let proof_b = rig.world.reuses()[0];
+    drop(wait_b);
+    assert_eq!(
+        rig.world.cancelled_reuses(),
+        vec![proof_b.proof],
+        "the dropped opening's proof is cancelled"
+    );
+    let c = registered(&handle, "op-c");
+    let mut wait_c = c.open(exchange_spec()).unwrap().wait();
+    let proof_c = rig.world.reuses()[1];
+    assert_eq!(proof_c.binding, binding(&c));
+    assert_eq!(proof_c.connection, proof_b.connection);
+    assert_ne!(proof_c.proof, proof_b.proof);
+    rig.world.end_reuse_of(proof_b, ReuseVerdict::Authorized);
+    rig.progress.run();
+    assert!(!wait_c.is_ready(), "B's verdict served C");
+    assert_eq!(rig.world.exchanges.load(Ordering::SeqCst), 1);
+    rig.world.hold_reuse.store(false, Ordering::SeqCst);
+    rig.world.end_reuse_of(proof_c, ReuseVerdict::Revoked);
+    rig.progress.run();
+    let exchange = now(&mut wait_c).unwrap();
+    assert!(
+        !exchange.reused(),
+        "C's own Revoked gave C a new connection"
+    );
+    assert_eq!(rig.world.connects(), 2);
+    now(exchange.finish());
+    now(b.finish());
+    now(c.finish());
+}
+
+#[test]
+fn p1_6_rem_a_binding_reuses_its_own_idle_connection_beside_one_it_cannot_prove() {
+    // S-P2-2: A's connection is one B cannot prove (the port's default starts no proof). B's first open is bounced off
+    // it to a connection of its own; B's second open is offered A's first again, and then B's own.
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    idle_after_a(&rig, &handle);
+    *rig.world.reuse_verdict.lock().unwrap() = None;
+    let b = registered(&handle, "op-b");
+    let first = now(b.open(exchange_spec()).unwrap().wait()).unwrap();
+    assert!(!first.reused());
+    now(first.finish());
+    let second = now(b.open(exchange_spec()).unwrap().wait()).unwrap();
+    assert!(second.reused(), "B's second open reuses B's own connection");
+    assert_eq!(
+        rig.world.connects(),
+        2,
+        "one connect for B, not one per open"
+    );
+    assert_eq!(rig.world.closes(), 0, "A's connection is kept for A");
+    now(second.finish());
+    now(b.finish());
+}
+
+#[test]
+fn p1_6_rem_a_bounced_connection_expires_from_its_last_real_release() {
+    // S-P2-2: bouncing A's connection off B's opens never restarts its idle clock.
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    idle_after_a(&rig, &handle);
+    *rig.world.reuse_verdict.lock().unwrap() = None;
+    let idle_ms = gwz_transport::pool::Config::default().idle_timeout_ms;
+    rig.clock.advance(idle_ms / 2);
+    let b = registered(&handle, "op-b");
+    now(now(b.open(exchange_spec()).unwrap().wait())
+        .unwrap()
+        .finish());
+    assert_eq!(handle.snapshot().connections.idle, 2);
+    rig.clock.advance(idle_ms / 2);
+    rig.progress.run();
+    assert_eq!(
+        rig.world.closes(),
+        1,
+        "A's connection expired 60 s after A released it"
+    );
+    assert_eq!(
+        handle.snapshot().connections.idle,
+        1,
+        "B's own connection is still idle"
+    );
+    now(b.finish());
+}
+
+#[test]
+fn p1_6_rem_a_misfit_lease_another_binding_last_used_is_given_back_with_no_proof() {
+    // C-P3-4 (scope fit first): an HTTPS lease that does not fit the opening's scope is handled by 1.5's rule before
+    // any cross-binding proof is asked for.
+    use crate::fakes::{auth, https_spec, prepared_with};
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    let register = |name: &str| {
+        now(handle
+            .admit(prepared_with(name, 1, auth(1, "a")))
+            .unwrap()
+            .acquire())
+        .unwrap()
+        .register()
+    };
+    let a = register("op-a");
+    now(now(a.open(https_spec()).unwrap().wait()).unwrap().finish());
+    now(a.finish());
+    let b = register("op-b");
+    b.instance_for_test()
+        .rescope_for_test(crate::AuthScope::new([9; 32]));
+    let exchange = now(b.open(https_spec()).unwrap().wait()).unwrap();
+    assert!(!exchange.reused());
+    assert!(
+        rig.world.reuses().is_empty(),
+        "no proof is asked for a lease that does not fit"
+    );
+    now(exchange.finish());
+    now(b.finish());
+}
+
+#[test]
+fn p1_6_rem_sealing_the_host_during_a_proof_closes_the_opening_and_ignores_the_late_verdict() {
+    // C-P3-4: the host is sealed while B's proof is held.
+    let rig = Rig::new();
+    let (owner, handle) = rig.host(1);
+    idle_after_a(&rig, &handle);
+    rig.world.hold_reuse.store(true, Ordering::SeqCst);
+    let b = registered(&handle, "op-b");
+    let mut wait = b.open(exchange_spec()).unwrap().wait();
+    let proof = rig.world.reuses()[0];
+    let close = owner.close();
+    assert!(matches!(
+        crate::fakes::poll_once(&mut wait),
+        std::task::Poll::Ready(Err(crate::OpenFailure::Closing(_)))
+    ));
+    assert_eq!(rig.world.cancelled_reuses(), vec![proof.proof]);
+    rig.world.end_reuse_of(proof, ReuseVerdict::Authorized);
+    rig.progress.run();
+    assert_eq!(
+        rig.world.exchanges.load(Ordering::SeqCst),
+        1,
+        "the late verdict started nothing"
+    );
+    drop(close);
+    drop(wait);
+}

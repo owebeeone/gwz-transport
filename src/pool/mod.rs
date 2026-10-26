@@ -226,7 +226,14 @@ pub struct Request {
     /// connection this request opens (and nowhere else): it names the member
     /// the connection serves. The pool decides nothing by it.
     pub tag: Option<String>,
+    /// Idle connections this request is never leased: those its host has
+    /// already found unable to serve it (a reuse it could not authorize), so
+    /// another compatible idle connection, or a new one, is offered instead.
+    /// At most [`MAX_EXCLUDED`]; the pool decides nothing else by them.
+    pub exclude: Vec<ConnectionId>,
 }
+/// How many idle connections one request may exclude.
+pub const MAX_EXCLUDED: usize = 64;
 impl Request {
     pub fn new(key: Key, identity: Identity, owner: Owner) -> Self {
         Self {
@@ -238,6 +245,7 @@ impl Request {
             interaction_timeout_ms: None,
             fresh: false,
             tag: None,
+            exclude: Vec::new(),
         }
     }
     fn valid(&self, config: &Config) -> bool {
@@ -251,6 +259,7 @@ impl Request {
             && self
                 .interaction_timeout_ms
                 .is_none_or(|v| v > 0 && v <= config.interaction_timeout_ms)
+            && self.exclude.len() <= MAX_EXCLUDED
     }
 }
 fn network_timeout_valid(value: Option<u64>, configured: u64) -> bool {

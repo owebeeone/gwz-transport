@@ -157,12 +157,19 @@ pub enum Completion {
     /// has disposed of it: the pool forgets it without a close (contract section 8, idle liveness). If a lease won
     /// the race, the lease keeps it and its exchange fails; that lease's release and close end it.
     IdleClosed { connection: ConnectionId },
-    /// The proof `EndpointAdapter::authorize_reuse` started for `connection` ended (contract section 7.1).
+    /// The proof `EndpointAdapter::authorize_reuse` started for `connection` ended (contract section 7.1). `proof` is
+    /// the command's: a completion whose proof the host no longer waits for (its opening went, or the host sealed)
+    /// serves nothing, whichever lease now holds the connection.
     Reuse {
         connection: ConnectionId,
+        proof: ProofId,
         verdict: ReuseVerdict,
     },
 }
+/// One reuse proof, as the host minted it for one `authorize_reuse` call: never reused within an instance's life
+/// (contract section 4.1: a completion names the work generation it belongs to).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProofId(pub(crate) u64);
 /// Prove `connection`, an idle connection that another binding last used, for `binding` before the host leases it to
 /// `binding` (contract sections 4.1 and 7.1): an agent's fresh possession signature for the key the connection
 /// authenticated with, an explicit key's equality, a fresh trust check of its host key. While the proof runs the
@@ -172,6 +179,8 @@ pub enum Completion {
 pub struct ReuseCommand {
     pub connection: ConnectionId,
     pub binding: BindingId,
+    /// The proof's identity, which its `Completion::Reuse` and any `cancel_reuse` name.
+    pub proof: ProofId,
 }
 /// How a reuse proof ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -228,6 +237,11 @@ pub trait EndpointAdapter: Send {
     fn authorize_reuse(&mut self, command: ReuseCommand) -> bool {
         let _ = command;
         false
+    }
+    /// The host no longer waits for `proof` (contract section 4.1's `cancel_work`): its opening went, or the host
+    /// sealed. The adapter stops it if it can; a completion it still reports serves nothing.
+    fn cancel_reuse(&mut self, proof: ProofId) {
+        let _ = proof;
     }
     /// The next completion, or `Pending` with the waker registered.
     fn poll_completion(&mut self, cx: &mut Context<'_>) -> Poll<Completion>;

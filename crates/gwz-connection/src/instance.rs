@@ -29,16 +29,21 @@
 //! A fitting lease of an idle connection that another binding last used then waits for the adapter's reuse proof for
 //! the leasing binding (`EndpointAdapter::authorize_reuse`; contract section 7.1; step 1.6) before its exchange starts:
 //! scope fit first, then the cross-binding proof. The last lessee is metadata kept here with the connection's setup
-//! scope, apart from the pool's owner, which an idle entry does not have (contract section 8).
+//! scope, apart from the pool's owner, which an idle entry does not have (contract section 8). Each proof has a
+//! host-minted `ProofId`: only the completion that names it ends it, and a proof whose opening went or whose host
+//! sealed is cancelled (`cancel_reuse`). A lease no proof authorized goes back to idle unused (`release_unused`, which
+//! keeps its idle time), and the opening asks again with it excluded, so a binding's own idle connection is not
+//! shadowed by another binding's that it cannot prove.
 use crate::{
     AuthContext, AuthScope, BindingId, Clock, Completion, ConnectCommand, EndpointAdapter,
-    EndpointProfile, ExchangeEnd, ExchangeIo, ExchangeSpec, OpenFailure, ReuseCommand,
+    EndpointProfile, ExchangeEnd, ExchangeIo, ExchangeSpec, OpenFailure, ProofId, ReuseCommand,
     ReuseVerdict,
     cell::{Cell, Slot},
     pump::Signal,
 };
 use gwz_transport::pool::{
-    Action, Config, ConnectionId, Error, Identity, LeaseId, PoolMachine, Request, RequestId,
+    Action, Config, ConnectionId, Error, Identity, LeaseId, MAX_EXCLUDED, PoolMachine, Request,
+    RequestId,
 };
 use gwz_transport::protocol::Disposition;
 use gwz_transport::protocol::Scheme;
@@ -63,6 +68,9 @@ struct Pending {
     auth: AuthContext,
     /// Leases of another scope this opening was offered and gave back.
     misfits: usize,
+    /// Idle connections another binding last used that could not serve this opening (step 1.6): it asks again with
+    /// them excluded, so its own binding's idle connection, or a new one, is offered next.
+    excluded: Vec<ConnectionId>,
     /// The opening's absolute allocation deadline on the pool's clock, fixed at submit: a resubmission never extends it.
     deadline: u64,
     slot: Arc<Slot<Opened>>,
@@ -77,10 +85,12 @@ struct Setup {
     /// The binding that last leased it, once one has.
     lessee: Option<BindingId>,
 }
-/// An opening holding a fitting lease whose reuse proof for its binding is running.
+/// An opening holding a fitting lease whose reuse proof for its binding is running: the proof the host minted for it,
+/// which only a completion naming it can end.
 struct Authorizing {
     pending: Pending,
     lease: LeaseId,
+    proof: ProofId,
 }
 /// A finished exchange waiting for its adapter to confirm how it ended.
 struct Settling {
@@ -101,6 +111,8 @@ pub(crate) struct InstanceState {
     /// pool can match HTTPS idle connections by scope without holding the scope's bytes.
     scope_tokens: Vec<(AuthScope, u64)>,
     next_token: u64,
+    /// The serial of the next reuse proof (`ProofId`), never reused within the instance's life.
+    next_proof: u64,
 }
 impl InstanceState {
     /// The pool identity of a request for `key` and `identity` from an operation whose context has `scope`: HTTPS
@@ -199,6 +211,7 @@ impl Instance {
                 misfits: 0,
                 scope_tokens: Vec::new(),
                 next_token: 0,
+                next_proof: 0,
             }),
         }))
     }
@@ -262,9 +275,10 @@ impl Instance {
                         }
                         Completion::Reuse {
                             connection,
+                            proof,
                             verdict,
                         } => {
-                            verdicts.push((connection, verdict));
+                            verdicts.push((connection, proof, verdict));
                             Ok(())
                         }
                     };
@@ -273,8 +287,8 @@ impl Instance {
                     state.connections.remove(&connection);
                 }
             }
-            for (connection, verdict) in verdicts {
-                reused(state, connection, verdict);
+            for (connection, proof, verdict) in verdicts {
+                reused(state, connection, proof, verdict);
             }
             progressed |= openings(state);
             progressed |= settle(state, &mut cx);
@@ -314,6 +328,7 @@ impl Instance {
                 spec,
                 auth,
                 misfits: 0,
+                excluded: Vec::new(),
                 deadline,
                 slot: slot.clone(),
             });
@@ -362,13 +377,16 @@ impl Instance {
                 let pending = state.openings.remove(index);
                 state.pool.abandon(pending.request);
             }
-            // A lease whose reuse proof is running is still clean: it goes back to idle, and the proof's late end finds
-            // nothing to serve.
+            // A lease whose reuse proof is running is still clean: it goes back to idle with the idle time it had, its
+            // proof is cancelled, and the proof's late end, naming that proof, serves nothing.
             let mut index = 0;
             while index < state.authorizing.len() {
                 if Arc::ptr_eq(&state.authorizing[index].pending.slot, slot) {
                     let item = state.authorizing.remove(index);
-                    let _ = state.pool.release(item.lease, Disposition::Reusable);
+                    if let Some(adapter) = state.adapter.as_mut() {
+                        adapter.cancel_reuse(item.proof);
+                    }
+                    let _ = state.pool.release_unused(item.lease);
                 } else {
                     index += 1;
                 }
@@ -389,6 +407,9 @@ impl Instance {
             let mut state = self.lock();
             let mut openings = std::mem::take(&mut state.openings);
             for item in std::mem::take(&mut state.authorizing) {
+                if let Some(adapter) = state.adapter.as_mut() {
+                    adapter.cancel_reuse(item.proof);
+                }
                 let _ = state.pool.release(item.lease, Disposition::Discarded);
                 openings.push(item.pending);
             }
@@ -522,19 +543,29 @@ fn openings(state: &mut InstanceState) -> bool {
                 progressed = true;
                 let pending = state.openings.remove(index);
                 if last.is_some_and(|last| last != pending.binding) {
+                    state.next_proof += 1;
+                    let proof = ProofId(state.next_proof);
                     let command = ReuseCommand {
                         connection: lease.connection(),
                         binding: pending.binding,
+                        proof,
                     };
                     let started = state
                         .adapter
                         .as_mut()
                         .is_some_and(|adapter| adapter.authorize_reuse(command));
                     if started {
-                        state.authorizing.push(Authorizing { pending, lease });
+                        state.authorizing.push(Authorizing {
+                            pending,
+                            lease,
+                            proof,
+                        });
                     } else {
-                        let _ = state.pool.release(lease, Disposition::Reusable);
-                        ask_again(state, pending);
+                        // Nothing this binding can prove: the connection goes back to idle, its idle time untouched,
+                        // and this opening asks again without it.
+                        let bounced = lease.connection();
+                        let _ = state.pool.release_unused(lease);
+                        ask_again(state, pending, bounced);
                     }
                     continue;
                 }
@@ -580,11 +611,19 @@ fn serve(state: &mut InstanceState, pending: Pending, lease: LeaseId) {
     }
 }
 
-/// `pending`'s lease could not serve it: it asks the pool again, for a new connection (a fresh request takes no idle
-/// one), within its own allocation.
-fn ask_again(state: &mut InstanceState, mut pending: Pending) {
+/// `pending`'s lease of `bounced` could not serve it: it asks the pool again, with every connection that could not serve
+/// it excluded, so that its own binding's idle connection, or a new one, is offered next (step 1.6 remediation, S-P2-2),
+/// within its own allocation. Past the pool's exclusion bound it asks fresh, for a new connection.
+fn ask_again(state: &mut InstanceState, mut pending: Pending, bounced: ConnectionId) {
+    if !pending.excluded.contains(&bounced) {
+        pending.excluded.push(bounced);
+    }
     let mut asked = pending.template.clone();
-    asked.fresh = true;
+    if pending.excluded.len() <= MAX_EXCLUDED {
+        asked.exclude = pending.excluded.clone();
+    } else {
+        asked.fresh = true;
+    }
     // Within the deadline the opening was given at submit, never a new one.
     match state.pool.request_until(asked, Some(pending.deadline)) {
         Ok(request) => {
@@ -597,27 +636,34 @@ fn ask_again(state: &mut InstanceState, mut pending: Pending) {
     }
 }
 
-/// The reuse proof for `connection` ended with `verdict` (contract section 7.1): an authorized lease serves its
-/// opening; a revoked one is discarded and an unprovable one goes back to idle, and the opening asks again. A proof
-/// whose opening went (its lease already back to idle) changes nothing.
-fn reused(state: &mut InstanceState, connection: ConnectionId, verdict: ReuseVerdict) {
+/// The reuse proof `proof` for `connection` ended with `verdict` (contract section 7.1): an authorized lease serves its
+/// opening; a revoked one is discarded and an unprovable one goes back to idle with its idle time untouched, and the
+/// opening asks again without it. A completion whose proof the host no longer waits for (its opening went, or another
+/// binding's proof now holds the connection) changes nothing (contract section 4.1: a late completion never acts on
+/// another generation).
+fn reused(
+    state: &mut InstanceState,
+    connection: ConnectionId,
+    proof: ProofId,
+    verdict: ReuseVerdict,
+) {
     let Some(index) = state
         .authorizing
         .iter()
-        .position(|item| item.lease.connection() == connection)
+        .position(|item| item.proof == proof && item.lease.connection() == connection)
     else {
         return;
     };
-    let Authorizing { pending, lease } = state.authorizing.remove(index);
+    let Authorizing { pending, lease, .. } = state.authorizing.remove(index);
     match verdict {
         ReuseVerdict::Authorized => serve(state, pending, lease),
         ReuseVerdict::Revoked => {
             let _ = state.pool.release(lease, Disposition::Discarded);
-            ask_again(state, pending);
+            ask_again(state, pending, connection);
         }
         ReuseVerdict::Unprovable => {
-            let _ = state.pool.release(lease, Disposition::Reusable);
-            ask_again(state, pending);
+            let _ = state.pool.release_unused(lease);
+            ask_again(state, pending, connection);
         }
     }
 }

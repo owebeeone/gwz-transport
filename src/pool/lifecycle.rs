@@ -154,6 +154,27 @@ impl PoolMachine {
     /// Reusable asserts that the host has completed protocol/backend cleanup.
     /// Uncertain health must use Discarded. Releasing twice is always stale.
     pub fn release(&mut self, lease: LeaseId, disposition: Disposition) -> Result<(), Error> {
+        self.release_at(lease, disposition, None)
+    }
+    /// Gives back a lease that served no exchange (its host found it unable to
+    /// serve the request, before any byte) as `Reusable` does, except that a
+    /// connection leased from idle keeps the idle time it had: its idle clock
+    /// runs from its last real release, so bouncing it never keeps it alive.
+    pub fn release_unused(&mut self, lease: LeaseId) -> Result<(), Error> {
+        let since = self
+            .entries
+            .get(&lease.connection)
+            .and_then(|entry| entry.idle_since);
+        self.release_at(lease, Disposition::Reusable, since)
+    }
+    /// `release`, with the idle time a reusable connection takes up again:
+    /// `since`, or now.
+    fn release_at(
+        &mut self,
+        lease: LeaseId,
+        disposition: Disposition,
+        since: Option<u64>,
+    ) -> Result<(), Error> {
         if !self.is_live(lease) {
             return Err(Error::Stale);
         }
@@ -168,8 +189,10 @@ impl PoolMachine {
             return Err(Error::WrongState);
         }
         if disposition == Disposition::Reusable && entry.reusable && !self.stopped {
+            let since = since.unwrap_or(self.now);
             entry.owner = None;
-            entry.state = State::Idle { since: self.now };
+            entry.idle_since = None;
+            entry.state = State::Idle { since };
         } else {
             let reason = if !entry.reusable {
                 CloseReason::Unproven
