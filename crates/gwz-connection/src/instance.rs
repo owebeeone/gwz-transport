@@ -504,11 +504,30 @@ fn openings(state: &mut InstanceState) -> bool {
             Ok(lease) => {
                 let scope = state.openings[index].auth.scope();
                 let setup = state.connections.get(&lease.connection());
+                if setup.is_none() {
+                    // No setup record: the adapter has disposed of the connection (its IdleClosed lost the race to this
+                    // lease, and the pool refused it). It is never handed back as reusable, which would revive it; the
+                    // release ends it, and the opening asks again, not as a misfit, within its own deadline.
+                    progressed = true;
+                    let _ = state.pool.release(lease, Disposition::Discarded);
+                    let bound = state.pool.capacity().per_user_host + 1;
+                    let pending = &mut state.openings[index];
+                    pending.misfits += 1;
+                    if pending.misfits > bound {
+                        let pending = state.openings.remove(index);
+                        let _ = pending.slot.fill(Err(OpenFailure::NoFittingConnection));
+                        continue;
+                    }
+                    let pending = state.openings.remove(index);
+                    ask_again(state, pending, None);
+                    continue;
+                }
                 // The scope partitions HTTPS keys only; SSH reuse is authorized by the proof below (step 1.6).
                 let fits = setup.is_some_and(|setup| !setup.https || setup.scope == Some(scope));
                 if !fits {
-                    // Set up under another operation's context: never handed over. It goes back untouched, for its own
-                    // scope, and the opening asks once more for a connection of its own, by its original deadline.
+                    // Set up under another operation's scope (a known one): never handed over. It goes back untouched, for
+                    // its own scope, and the opening asks once more for a connection of its own, by its original
+                    // deadline.
                     progressed = true;
                     state.misfits += 1;
                     let _ = state.pool.release(lease, Disposition::Reusable);
@@ -565,7 +584,7 @@ fn openings(state: &mut InstanceState) -> bool {
                         // and this opening asks again without it.
                         let bounced = lease.connection();
                         let _ = state.pool.release_unused(lease);
-                        ask_again(state, pending, bounced);
+                        ask_again(state, pending, Some(bounced));
                     }
                     continue;
                 }
@@ -613,9 +632,12 @@ fn serve(state: &mut InstanceState, pending: Pending, lease: LeaseId) {
 
 /// `pending`'s lease of `bounced` could not serve it: it asks the pool again, with every connection that could not serve
 /// it excluded, so that its own binding's idle connection, or a new one, is offered next (step 1.6 remediation, S-P2-2),
-/// within its own allocation. Past the pool's exclusion bound it asks fresh, for a new connection.
-fn ask_again(state: &mut InstanceState, mut pending: Pending, bounced: ConnectionId) {
-    if !pending.excluded.contains(&bounced) {
+/// within its own allocation. Past the pool's exclusion bound it asks fresh, for a new connection. A connection already
+/// disposed of (`None`) is excluded by nothing: the pool no longer offers it.
+fn ask_again(state: &mut InstanceState, mut pending: Pending, bounced: Option<ConnectionId>) {
+    if let Some(bounced) = bounced
+        && !pending.excluded.contains(&bounced)
+    {
         pending.excluded.push(bounced);
     }
     let mut asked = pending.template.clone();
@@ -625,6 +647,23 @@ fn ask_again(state: &mut InstanceState, mut pending: Pending, bounced: Connectio
         asked.fresh = true;
     }
     // Within the deadline the opening was given at submit, never a new one.
+    match state.pool.request_until(asked, Some(pending.deadline)) {
+        Ok(request) => {
+            pending.request = request;
+            state.openings.push(pending);
+        }
+        Err(error) => {
+            let _ = pending.slot.fill(Err(OpenFailure::Pool(error)));
+        }
+    }
+}
+
+/// `pending` asks the pool again for a new connection, with no exclusion, within the deadline it was given at submit.
+fn ask_fresh(state: &mut InstanceState, mut pending: Pending) {
+    pending.excluded.clear();
+    let mut asked = pending.template.clone();
+    asked.fresh = true;
+    asked.exclude.clear();
     match state.pool.request_until(asked, Some(pending.deadline)) {
         Ok(request) => {
             pending.request = request;
@@ -658,12 +697,14 @@ fn reused(
     match verdict {
         ReuseVerdict::Authorized => serve(state, pending, lease),
         ReuseVerdict::Revoked => {
+            // A denied proof is asked once, not once per pooled connection (reuse design §4): the retry takes no idle
+            // connection, whether or not the adapter has yet reported the siblings it retired as `IdleClosed`.
             let _ = state.pool.release(lease, Disposition::Discarded);
-            ask_again(state, pending, connection);
+            ask_fresh(state, pending);
         }
         ReuseVerdict::Unprovable => {
             let _ = state.pool.release_unused(lease);
-            ask_again(state, pending, connection);
+            ask_again(state, pending, Some(connection));
         }
     }
 }

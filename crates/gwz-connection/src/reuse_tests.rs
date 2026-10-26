@@ -279,3 +279,71 @@ fn p1_6_rem_sealing_the_host_during_a_proof_closes_the_opening_and_ignores_the_l
     drop(close);
     drop(wait);
 }
+
+// Merge fix-up of the two accepted-review findings (dev-docs/GwzConnectionApiContract-Step1.5-ReviewState-2.md and
+// -Step1.6-ReviewState-2.md, N-P3-1 each).
+
+#[test]
+fn p1_5_n_p3_1_a_lease_with_no_setup_record_is_discarded_and_never_revived() {
+    // The adapter reports IdleClosed for a connection the pool has just leased to B's opening: the pool refuses it (the
+    // lease keeps the connection) but the host forgets its setup record. The lease is discarded, not handed back
+    // reusable, and the opening asks again without counting a misfit.
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    idle_after_a(&rig, &handle);
+    rig.world.lose_connections();
+    let b = registered(&handle, "op-b");
+    let exchange = now(b.open(exchange_spec()).unwrap().wait()).unwrap();
+    assert!(!exchange.reused(), "B is served by a connection of its own");
+    assert_eq!(rig.world.connects(), 2);
+    assert_eq!(rig.world.closes(), 1, "the lost connection is closed once");
+    assert_eq!(b.instance_for_test().misfits_for_test(), 0);
+    now(exchange.finish());
+    now(b.finish());
+    // The next opening of the same scope is offered B's connection, not a revived dead one, and no misfit comes of it.
+    let c = registered(&handle, "op-c");
+    let exchange = now(c.open(exchange_spec()).unwrap().wait()).unwrap();
+    assert!(exchange.reused());
+    assert_eq!(rig.world.connects(), 2);
+    assert_eq!(c.instance_for_test().misfits_for_test(), 0);
+    now(exchange.finish());
+    now(c.finish());
+}
+
+#[test]
+fn p1_6_n_p3_1_a_revoked_proof_asks_fresh_before_the_siblings_idle_closed_arrives() {
+    // Two idle connections of one key, both last used by A. B's proof for the first is revoked and the adapter reports
+    // the second's IdleClosed only after that: B must not be offered the second (a second proof, and for the real
+    // adapter another confirmation prompt for a key just denied), whatever the completion order.
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    let a = registered(&handle, "op-a");
+    let first = now(a.open(exchange_spec()).unwrap().wait()).unwrap();
+    let second = now(a.open(exchange_spec()).unwrap().wait()).unwrap();
+    now(first.finish());
+    now(second.finish());
+    now(a.finish());
+    assert_eq!(handle.snapshot().connections.idle, 2);
+    let held = rig.world.connected_ids();
+    rig.world.hold_reuse.store(true, Ordering::SeqCst);
+    let b = registered(&handle, "op-b");
+    let mut wait = b.open(exchange_spec()).unwrap().wait();
+    let proof = rig.world.reuses()[0];
+    rig.world.end_reuse_of(proof, ReuseVerdict::Revoked);
+    rig.progress.run();
+    assert_eq!(
+        rig.world.reuses().len(),
+        1,
+        "the retry took no idle connection of the denied key"
+    );
+    let sibling = held.into_iter().find(|id| *id != proof.connection).unwrap();
+    rig.world.idle_closed_of(sibling);
+    rig.progress.run();
+    let exchange = now(&mut wait).unwrap();
+    assert!(!exchange.reused());
+    assert_eq!(rig.world.connects(), 3, "B has a connection of its own");
+    assert_eq!(rig.world.reuses().len(), 1);
+    assert_eq!(rig.world.closes(), 1, "the revoked connection is closed");
+    now(exchange.finish());
+    now(b.finish());
+}

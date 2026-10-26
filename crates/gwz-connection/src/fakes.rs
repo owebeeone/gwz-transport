@@ -336,6 +336,25 @@ impl FakeWorld {
             }
         });
     }
+    /// The connections every adapter holds now, in the order they connected.
+    pub(crate) fn connected_ids(&self) -> Vec<ConnectionId> {
+        let queues = self.queues.lock().unwrap().clone();
+        queues
+            .iter()
+            .flat_map(|queue| queue.lock().unwrap().connected.clone())
+            .collect()
+    }
+    /// `connection` alone is lost while idle (the peer closed it), and its adapter disposes of it and reports it.
+    pub(crate) fn idle_closed_of(&self, connection: ConnectionId) {
+        self.each_queue(|queue| {
+            if queue.connected.contains(&connection) {
+                queue.connected.retain(|id| *id != connection);
+                queue
+                    .completions
+                    .push_back(Completion::IdleClosed { connection });
+            }
+        });
+    }
     /// The held exchanges' ends are confirmed; the hosts' wakers are woken.
     pub(crate) fn confirm_finishes(&self) {
         self.confirmed.store(true, Ordering::SeqCst);
