@@ -826,6 +826,40 @@ fn bootstrap_rejection_rejects_operation_errors_without_retaining_them() {
 }
 
 #[test]
+fn an_initiator_retains_each_of_the_five_bind_rejection_codes() {
+    // GwzSplitCommandChannel 3.4: the carrier-backed client answers a bind with these.
+    for code in [
+        ErrorCode::UnsupportedVersion,
+        ErrorCode::UnsupportedOperation,
+        ErrorCode::Capacity,
+        ErrorCode::InvalidRequest,
+        ErrorCode::Cancelled,
+    ] {
+        let (mut core, mut cli) = pair();
+        register(&mut core, &mut cli, "a");
+        core.begin("a").unwrap();
+        core.next_message();
+        let failure = Failure {
+            detail: None,
+            setup_cause: None,
+            code,
+            effect: Effect::None,
+            facts: None,
+        };
+        let reply = Envelope {
+            version: 1,
+            session_id: "session".into(),
+            kind: MessageKind::BindRejected,
+            bind_rejected: Some(failure.clone()),
+            ..Default::default()
+        };
+        assert_eq!(core.receive(&("a".into(), reply)), Ok(()), "{code:?}");
+        assert_eq!(core.phase(), Phase::Closed);
+        assert_eq!(core.bootstrap_failure(), Some(&failure));
+    }
+}
+
+#[test]
 fn bootstrap_rejection_codec_enforces_its_entire_failure_domain() {
     use gwz_transport::{cbor, codec};
     for code in 1..=13 {
@@ -845,9 +879,14 @@ fn bootstrap_rejection_codec_enforces_its_entire_failure_domain() {
                     }),
                     ..Default::default()
                 };
+                // GwzSplitCommandChannel 3.4: the five codes a bind is rejected with.
                 let allowed = matches!(
                     code,
-                    ErrorCode::UnsupportedVersion | ErrorCode::UnsupportedOperation
+                    ErrorCode::UnsupportedVersion
+                        | ErrorCode::UnsupportedOperation
+                        | ErrorCode::Capacity
+                        | ErrorCode::InvalidRequest
+                        | ErrorCode::Cancelled
                 ) && effect == Effect::None
                     && facts.is_none();
                 assert_eq!(

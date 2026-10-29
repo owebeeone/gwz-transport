@@ -462,6 +462,7 @@ impl Instance {
             item.end.set(ExchangeEnd {
                 disposition: Disposition::Discarded,
                 cleanup: crate::CleanupStatus::Complete,
+                failure: None,
             });
         }
         self.wake_waiters();
@@ -844,6 +845,7 @@ fn settle(state: &mut InstanceState, cx: &mut Context<'_>) -> bool {
         item.end.set(ExchangeEnd {
             disposition,
             cleanup: crate::CleanupStatus::Complete,
+            failure: None,
         });
     }
     progressed

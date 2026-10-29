@@ -29,6 +29,7 @@ use crate::{
     cell::Cell,
     domain::{CleanupTicket, RetainedWork, Revocable},
     instance::Instance,
+    operation::AdmitInput,
     operation::{OperationEnd, Registration, TerminalReason},
     ports::{Clock, EndpointFactory, Progress},
     pump::{self, Driver, Signal},
@@ -203,6 +204,28 @@ pub struct HostSnapshot {
     pub waiting_admissions: usize,
     /// The instances' connections by state, summed.
     pub connections: pool::Counts,
+    refused: bool,
+}
+impl HostSnapshot {
+    /// What a carrier-backed handle reports (GwzSplitCommandChannel 3.4): a refusal with no counts, every field zero. The
+    /// client's pools, the hosts it is connected to, are not the core's to see.
+    pub(crate) fn refusal(namespace: HostNamespace) -> Self {
+        Self {
+            phase: HostPhase::Open,
+            namespace,
+            endpoint_instances: 0,
+            retained_cleanup: 0,
+            bindings: 0,
+            active_operations: 0,
+            waiting_admissions: 0,
+            connections: pool::Counts::default(),
+            refused: true,
+        }
+    }
+    /// Whether this is a carrier-backed handle's refusal: it carries no counts, and its zeros mean nothing.
+    pub fn refused(&self) -> bool {
+        self.refused
+    }
 }
 
 struct Waiter {
@@ -499,7 +522,7 @@ impl HostShared {
             .now()
             .plus(Duration::from_millis(self.limits.admission_bound_ms));
         let sleep = self.clock.sleep_until(deadline);
-        Ok(Admission::new(self, id, input, charge, sleep))
+        Ok(Admission::local(self, id, input, charge, sleep))
     }
     /// What an admission found when it asked for its slot.
     pub(crate) fn take_slot(&self, id: u64, waker: &Waker) -> Slot {
@@ -632,6 +655,7 @@ impl HostShared {
             cleanup: CleanupStatus::Complete,
             exchanges_opened: binding.opened.load(Acquire),
             cancelled: binding.cancelled.load(Acquire),
+            revoked: None,
         });
     }
     pub(crate) fn closing_reason(&self) -> TerminalReason {
@@ -788,7 +812,7 @@ pub(crate) trait Backend: Send + Sync {
     fn snapshot(&self) -> HostSnapshot;
     fn check_open(&self) -> Result<(), HostClosing>;
     fn attach_instance(self: Arc<Self>, spec: EndpointSpec) -> Result<(), AttachError>;
-    fn admit(self: Arc<Self>, input: PreparedOperation) -> Result<Admission, AdmissionError>;
+    fn admit(self: Arc<Self>, input: AdmitInput) -> Result<Admission, AdmissionError>;
     fn carrier(&self) -> CarrierId;
     fn route(
         &self,
@@ -827,6 +851,7 @@ impl Backend for HostShared {
             active_operations: active,
             waiting_admissions: waiting,
             connections,
+            refused: false,
         }
     }
     fn check_open(&self) -> Result<(), HostClosing> {
@@ -839,8 +864,12 @@ impl Backend for HostShared {
     fn attach_instance(self: Arc<Self>, spec: EndpointSpec) -> Result<(), AttachError> {
         self.attach_profile(&spec).map(|_| ())
     }
-    fn admit(self: Arc<Self>, input: PreparedOperation) -> Result<Admission, AdmissionError> {
-        self.admit_input(input)
+    fn admit(self: Arc<Self>, input: AdmitInput) -> Result<Admission, AdmissionError> {
+        match input {
+            AdmitInput::Prepared(input) => self.admit_input(input),
+            // A local host builds nothing from a reference: its composition prepared the operation.
+            AdmitInput::Reference(_) => Err(AdmissionError::WrongInput),
+        }
     }
     fn carrier(&self) -> CarrierId {
         HostShared::carrier(self)
@@ -867,8 +896,15 @@ impl HostHandle {
     }
     /// Validates `input` and reserves one of the host's waiting-admission records. It registers nothing, starts no
     /// thread, makes no endpoint and has no network effect; `Admission::acquire` waits for the slot (contract 5).
-    pub fn admit(&self, input: PreparedOperation) -> Result<Admission, AdmissionError> {
-        self.backend.clone().admit(input)
+    /// A local host takes a [`PreparedOperation`]; a carrier-backed handle (`remote::handle`) takes an
+    /// [`OperationRef`](crate::OperationRef) and does no carrier I/O. Each refuses the other with
+    /// `AdmissionError::WrongInput`.
+    pub fn admit(&self, input: impl Into<AdmitInput>) -> Result<Admission, AdmissionError> {
+        self.backend.clone().admit(input.into())
+    }
+    /// A handle over `backend`: the local host's, or a carrier-backed one's.
+    pub(crate) fn over(backend: Arc<dyn Backend>) -> Self {
+        Self { backend }
     }
     #[allow(dead_code, reason = "the tests use it; the carrier adapter will")]
     pub(crate) fn check_open(&self) -> Result<(), HostClosing> {

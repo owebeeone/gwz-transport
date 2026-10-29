@@ -1,5 +1,10 @@
 //! A registered operation and its exchanges (contract sections 4, 5 and 8).
 //!
+//! `Operation`, `Opening`, `OpenWait`, `Exchange`, `MessageStream` and their futures are the one set of types for a local
+//! host and a carrier-backed handle (GwzSplitCommandChannel 3.4): each holds the local case below, or the carrier-backed
+//! one of `remote`, behind a private representation, and a caller cannot tell one from the other by type. What follows
+//! describes the local case.
+//!
 //! An `Operation` owns one binding. `open` registers a request in the binding's two sessions (so the binding's own limit
 //! applies) and returns an `Opening`, which leases a connection from the host's pool for the operation's profile and
 //! yields an `Exchange`: one exclusive lease, one stream. Finishing an exchange returns its connection to idle only if
@@ -15,10 +20,14 @@ use crate::{
     host::HostShared,
     instance::{Instance, Opened, cancel_authorizing},
     operation::TerminalReason,
+    remote::{
+        RemoteCancel, RemoteFinish, RemoteLive, RemoteOp, RemoteOpenWait, RemoteOpening,
+        RemoteStream,
+    },
 };
 use gwz_transport::{
     pool::{LeaseId, Owner, Request},
-    protocol::{Disposition, Effect},
+    protocol::{Disposition, Effect, ErrorCode},
 };
 use std::{
     fmt,
@@ -32,55 +41,73 @@ use std::{
 };
 
 enum Kind {
-    Live(Arc<BindingShared>),
+    Live {
+        host: Arc<HostShared>,
+        binding: Arc<BindingShared>,
+    },
     Terminal(TerminalReason),
+    Remote(RemoteOp),
 }
 /// One registered operation, or the terminal stand-in for one that never registered. `Send`, not `Clone`.
 pub struct Operation {
-    host: Arc<HostShared>,
     kind: Kind,
     finished: bool,
 }
 impl Operation {
     pub(crate) fn live(host: Arc<HostShared>, binding: Arc<BindingShared>) -> Self {
         Self {
-            host,
-            kind: Kind::Live(binding),
+            kind: Kind::Live { host, binding },
             finished: false,
         }
     }
-    pub(crate) fn terminal(host: Arc<HostShared>, reason: TerminalReason) -> Self {
+    pub(crate) fn terminal(reason: TerminalReason) -> Self {
         Self {
-            host,
             kind: Kind::Terminal(reason),
             finished: false,
         }
     }
+    pub(crate) fn remote(op: RemoteOp) -> Self {
+        Self {
+            kind: Kind::Remote(op),
+            finished: false,
+        }
+    }
+    /// Where the registration stands. A local operation is registered or never was; a carrier-backed one is
+    /// `Pending` until the client answers `bound` or `bind_rejected` or the carrier ends.
     pub fn registration(&self) -> Registration {
         match &self.kind {
-            Kind::Live(binding) => Registration::Registered(binding.id),
+            Kind::Live { binding, .. } => Registration::Registered(binding.id),
             Kind::Terminal(reason) => Registration::NeverRegistered(*reason),
+            Kind::Remote(op) => op.registration(),
         }
+    }
+    /// Resolves once the registration is no longer `Pending`: at once for a local operation.
+    pub fn registered(&self) -> Registered<'_> {
+        Registered { operation: self }
     }
     /// Cancels this operation only; the handle is weak and `Send + Sync + Clone`.
     pub fn cancel_handle(&self) -> OperationCancel {
-        OperationCancel {
-            binding: match &self.kind {
-                Kind::Live(binding) => Arc::downgrade(binding),
-                Kind::Terminal(_) => Weak::new(),
-            },
-        }
+        OperationCancel(match &self.kind {
+            Kind::Live { binding, .. } => CancelKind::Local(Arc::downgrade(binding)),
+            Kind::Terminal(_) => CancelKind::Local(Weak::new()),
+            Kind::Remote(op) => CancelKind::Remote(op.cancel_handle()),
+        })
     }
     /// Registers a request in the binding's sessions and begins to lease a connection for it. No effect happens
     /// until the returned opening is polled.
     pub fn open(&self, spec: ExchangeSpec) -> Result<Opening, OpenError> {
-        let binding = match &self.kind {
-            Kind::Live(binding) => binding,
+        let (host, binding) = match &self.kind {
+            Kind::Live { host, binding } => (host, binding),
             Kind::Terminal(reason) => {
                 return Err(OpenError::Terminal {
                     reason: *reason,
                     effect: Effect::None,
                 });
+            }
+            Kind::Remote(op) => {
+                return op
+                    .open(spec)
+                    .map(|opening| Opening(OpeningKind::Remote(opening)));
             }
         };
         if binding.cancelled.load(Acquire) {
@@ -107,24 +134,25 @@ impl Operation {
             }
         }
         binding.opened.fetch_add(1, AcqRel);
-        Ok(Opening {
-            live: Live::new(self.host.clone(), binding.clone()),
+        Ok(Opening(OpeningKind::Local(LocalOpening {
+            live: Live::new(host.clone(), binding.clone()),
             spec,
             tag: request,
-        })
+        })))
     }
     /// Seals the operation now (no new opens), and resolves when nothing of it is live: its exchanges and openings
     /// have ended. It never closes the host or another operation's connections. Dropping the future changes nothing.
     pub fn finish(mut self) -> OperationFinish {
         self.finished = true;
         match &self.kind {
-            Kind::Live(binding) => {
+            Kind::Live { host, binding } => {
                 binding.sealed.store(true, Release);
-                self.host.retire_if_done(binding);
+                host.retire_if_done(binding);
                 OperationFinish {
                     cell: binding.done.clone(),
                 }
             }
+            Kind::Remote(op) => OperationFinish { cell: op.finish() },
             Kind::Terminal(reason) => {
                 let cell = Cell::new();
                 cell.set(OperationEnd {
@@ -132,6 +160,7 @@ impl Operation {
                     cleanup: crate::CleanupStatus::Complete,
                     exchanges_opened: 0,
                     cancelled: false,
+                    revoked: None,
                 });
                 OperationFinish { cell }
             }
@@ -143,8 +172,8 @@ impl Operation {
     )]
     pub(crate) fn binding_session(&self) -> String {
         match &self.kind {
-            Kind::Live(binding) => binding.session.clone(),
-            Kind::Terminal(_) => String::new(),
+            Kind::Live { binding, .. } => binding.session.clone(),
+            Kind::Terminal(_) | Kind::Remote(_) => String::new(),
         }
     }
     /// Streams the binding's two sessions hold (driver, endpoint).
@@ -154,11 +183,11 @@ impl Operation {
     )]
     pub(crate) fn binding_streams(&self) -> (usize, usize) {
         match &self.kind {
-            Kind::Live(binding) => {
+            Kind::Live { binding, .. } => {
                 let pair = binding.pair.lock().unwrap_or_else(|e| e.into_inner());
                 (pair.driver.active_streams(), pair.endpoint.active_streams())
             }
-            Kind::Terminal(_) => (0, 0),
+            Kind::Terminal(_) | Kind::Remote(_) => (0, 0),
         }
     }
 }
@@ -168,16 +197,16 @@ cfg_if::cfg_if! {
             /// The endpoint instance this operation's binding leases from.
             pub(crate) fn instance_for_test(&self) -> Arc<Instance> {
                 match &self.kind {
-                    Kind::Live(binding) => binding.instance.clone(),
-                    Kind::Terminal(_) => panic!("a terminal operation has no instance"),
+                    Kind::Live { binding, .. } => binding.instance.clone(),
+                    Kind::Terminal(_) | Kind::Remote(_) => panic!("only a local operation has an instance"),
                 }
             }
             /// Sets the binding's cancelled flag as a rejected frame does (`host.rs` `route`), without the sweep that
             /// `cancel_binding` makes: what a row needs to show that a retry is refused for a cancelled binding.
             pub(crate) fn mark_cancelled_for_test(&self) {
                 match &self.kind {
-                    Kind::Live(binding) => binding.cancelled.store(true, Release),
-                    Kind::Terminal(_) => panic!("a terminal operation has no binding"),
+                    Kind::Live { binding, .. } => binding.cancelled.store(true, Release),
+                    Kind::Terminal(_) | Kind::Remote(_) => panic!("only a local operation has a binding"),
                 }
             }
         }
@@ -189,10 +218,14 @@ impl Drop for Operation {
         if self.finished {
             return;
         }
-        if let Kind::Live(binding) = &self.kind {
-            cancel_binding(binding);
-            binding.sealed.store(true, Release);
-            self.host.retire_if_done(binding);
+        match &self.kind {
+            Kind::Live { host, binding } => {
+                cancel_binding(binding);
+                binding.sealed.store(true, Release);
+                host.retire_if_done(binding);
+            }
+            Kind::Remote(op) => op.abandon(),
+            Kind::Terminal(_) => {}
         }
     }
 }
@@ -227,20 +260,40 @@ pub(crate) fn cancel_binding(binding: &Arc<BindingShared>) -> bool {
 
 /// Cancels one operation. `Send + Sync + Clone`; it holds the binding weakly, so it keeps nothing alive.
 #[derive(Clone)]
-pub struct OperationCancel {
-    binding: Weak<BindingShared>,
+pub struct OperationCancel(CancelKind);
+#[derive(Clone)]
+enum CancelKind {
+    Local(Weak<BindingShared>),
+    Remote(RemoteCancel),
 }
 impl OperationCancel {
     pub fn cancel(&self) -> CancelState {
-        match self.binding.upgrade() {
-            Some(binding) if !binding.retired.load(Acquire) => {
-                if cancel_binding(&binding) {
-                    CancelState::Cancelled
-                } else {
-                    CancelState::AlreadyCancelled
+        match &self.0 {
+            CancelKind::Local(binding) => match binding.upgrade() {
+                Some(binding) if !binding.retired.load(Acquire) => {
+                    if cancel_binding(&binding) {
+                        CancelState::Cancelled
+                    } else {
+                        CancelState::AlreadyCancelled
+                    }
                 }
-            }
-            _ => CancelState::Gone,
+                _ => CancelState::Gone,
+            },
+            CancelKind::Remote(cancel) => cancel.cancel(),
+        }
+    }
+}
+
+/// See [`Operation::registered`].
+pub struct Registered<'a> {
+    operation: &'a Operation,
+}
+impl Future for Registered<'_> {
+    type Output = Registration;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Registration> {
+        match &self.operation.kind {
+            Kind::Remote(op) => op.poll_registered(cx),
+            _ => Poll::Ready(self.operation.registration()),
         }
     }
 }
@@ -275,19 +328,33 @@ impl Drop for Live {
 }
 
 /// A request for an exchange: a registered request, no connection yet.
-pub struct Opening {
+pub struct Opening(OpeningKind);
+enum OpeningKind {
+    Local(LocalOpening),
+    Remote(RemoteOpening),
+}
+impl Opening {
+    /// Submits the opening: from here its lease, its connection and the start of its exchange are the host's
+    /// driver's to progress, whether or not the returned future is polled (contract section 6: progress is
+    /// independent of the application's calls). The future yields the exchange once the driver has started it, on a
+    /// connection of this operation's profile set up under a context of its scope. Dropping the future cancels this
+    /// opening only; an exchange already started for it is aborted and its connection discarded. A carrier-backed
+    /// opening sends its `open` when the binding is ready and yields the exchange when the client answers `opened`.
+    pub fn wait(self) -> OpenWait {
+        OpenWait(match self.0 {
+            OpeningKind::Local(opening) => OpenWaitKind::Local(opening.wait()),
+            OpeningKind::Remote(opening) => OpenWaitKind::Remote(RemoteOpenWait::new(opening)),
+        })
+    }
+}
+struct LocalOpening {
     live: Live,
     spec: ExchangeSpec,
     /// The request's name in the binding, which tags its pool request.
     tag: String,
 }
-impl Opening {
-    /// Submits the opening to the host: from here its lease, its connection and the start of its exchange are the
-    /// host's driver's to progress, whether or not the returned future is polled (contract section 6: progress is
-    /// independent of the application's calls). The future yields the exchange once the driver has started it, on a
-    /// connection of this operation's profile set up under a context of its scope. Dropping the future cancels this
-    /// opening only; an exchange already started for it is aborted and its connection discarded.
-    pub fn wait(self) -> OpenWait {
+impl LocalOpening {
+    fn wait(self) -> LocalOpenWait {
         let binding = self.live.binding.clone();
         let refused = closing_reason(binding.closing.load(Acquire))
             .map(OpenFailure::Closing)
@@ -326,7 +393,7 @@ impl Opening {
             Ok(submitted) => (Some(submitted), None),
             Err(failure) => (None, Some(failure)),
         };
-        OpenWait {
+        LocalOpenWait {
             live: Some(self.live),
             submitted,
             early,
@@ -334,18 +401,47 @@ impl Opening {
     }
 }
 /// See [`Opening::wait`].
-pub struct OpenWait {
+pub struct OpenWait(OpenWaitKind);
+enum OpenWaitKind {
+    Local(LocalOpenWait),
+    Remote(RemoteOpenWait),
+}
+impl OpenWait {
+    /// Whether the opening is already decided: the next poll is ready. A local opening's exchange has been started by
+    /// the host's driver (or has ended); a carrier-backed one has been answered or has failed.
+    pub fn is_ready(&self) -> bool {
+        match &self.0 {
+            OpenWaitKind::Local(wait) => wait.is_ready(),
+            OpenWaitKind::Remote(wait) => wait.is_ready(),
+        }
+    }
+}
+impl Future for OpenWait {
+    type Output = Result<Exchange, OpenFailure>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match &mut self.0 {
+            OpenWaitKind::Local(wait) => Pin::new(wait).poll(cx),
+            OpenWaitKind::Remote(wait) => wait.poll_open(cx).map_ok(|started| Exchange {
+                stream: MessageStream(StreamKind::Remote(started.stream)),
+                back: Back::Remote {
+                    reused: started.reused,
+                    live: Some(started.live),
+                },
+            }),
+        }
+    }
+}
+struct LocalOpenWait {
     live: Option<Live>,
     submitted: Option<Arc<Slot<Opened>>>,
     early: Option<OpenFailure>,
 }
-impl OpenWait {
-    /// Whether the host's driver has already started this opening's exchange (or ended it): the next poll is ready.
-    pub fn is_ready(&self) -> bool {
+impl LocalOpenWait {
+    fn is_ready(&self) -> bool {
         self.early.is_some() || self.submitted.as_ref().is_some_and(|slot| slot.is_filled())
     }
 }
-impl Future for OpenWait {
+impl Future for LocalOpenWait {
     type Output = Result<Exchange, OpenFailure>;
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
@@ -377,22 +473,24 @@ impl Future for OpenWait {
                 this.submitted = None;
                 let live = this.live.take().expect("live checked above");
                 Poll::Ready(Ok(Exchange {
-                    stream: MessageStream {
+                    stream: MessageStream(StreamKind::Local {
                         io: Some(io),
                         binding: binding.clone(),
-                    },
-                    lease: Some(LeaseGuard {
-                        instance: binding.instance.clone(),
-                        lease: Some(lease),
                     }),
-                    reused,
-                    _live: Some(live),
+                    back: Back::Local {
+                        lease: Some(LeaseGuard {
+                            instance: binding.instance.clone(),
+                            lease: Some(lease),
+                        }),
+                        reused,
+                        _live: Some(live),
+                    },
                 }))
             }
         }
     }
 }
-impl Drop for OpenWait {
+impl Drop for LocalOpenWait {
     fn drop(&mut self) {
         if let (Some(slot), Some(live)) = (self.submitted.take(), &self.live) {
             live.binding.instance.abandon(&slot);
@@ -422,93 +520,172 @@ impl Drop for LeaseGuard {
 
 /// Why a stream call failed.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum StreamError {
     /// The operation was cancelled (or its host closed): the exchange is over.
     Cancelled,
+    /// The adapter's I/O failed; `ErrorKind::WouldBlock` means not yet, on either side of a carrier.
     Io(std::io::Error),
+    /// A carrier-backed exchange: the carrier ended under it. A `receive_pack_exchange` that had started reports
+    /// `Effect::Possible`.
+    CarrierLost { effect: Effect },
+    /// A carrier-backed exchange: the client's exchange failed with this code and effect.
+    Failed { code: ErrorCode, effect: Effect },
+    /// A carrier-backed exchange: its write side has ended, or the exchange is closed.
+    Closed,
+    /// A carrier-backed exchange: the stream broke a rule of the transport.
+    Protocol,
 }
-/// One exchange's byte stream, over the adapter's own I/O. Reads and writes are serialized by `&mut`.
-pub struct MessageStream {
-    /// Taken only by the exchange's end, which consumes the exchange.
-    io: Option<Box<dyn ExchangeIo>>,
-    binding: Arc<BindingShared>,
+/// One exchange's byte stream, over the adapter's own I/O (or, carrier-backed, over the lane). Reads and writes are
+/// serialized by `&mut`, and a call that cannot proceed returns `Io(WouldBlock)`, never blocks.
+pub struct MessageStream(StreamKind);
+enum StreamKind {
+    Local {
+        /// Taken only by the exchange's end, which consumes the exchange.
+        io: Option<Box<dyn ExchangeIo>>,
+        binding: Arc<BindingShared>,
+    },
+    Remote(RemoteStream),
 }
 impl MessageStream {
     pub fn write(&mut self, data: &[u8]) -> Result<usize, StreamError> {
-        self.io()?.write(data).map_err(StreamError::Io)
+        match &mut self.0 {
+            StreamKind::Remote(stream) => stream.write(data),
+            StreamKind::Local { .. } => self.io()?.write(data).map_err(StreamError::Io),
+        }
     }
     pub fn read(&mut self, out: &mut [u8]) -> Result<usize, StreamError> {
-        self.io()?.read(out).map_err(StreamError::Io)
+        match &mut self.0 {
+            StreamKind::Remote(stream) => stream.read(out),
+            StreamKind::Local { .. } => self.io()?.read(out).map_err(StreamError::Io),
+        }
     }
     fn io(&mut self) -> Result<&mut Box<dyn ExchangeIo>, StreamError> {
-        if self.binding.cancelled.load(Acquire) {
+        let StreamKind::Local { io, binding } = &mut self.0 else {
+            return Err(StreamError::Closed);
+        };
+        if binding.cancelled.load(Acquire) {
             return Err(StreamError::Cancelled);
         }
-        self.io.as_mut().ok_or(StreamError::Cancelled)
+        io.as_mut().ok_or(StreamError::Cancelled)
+    }
+    /// The local exchange's adapter I/O, taken by the exchange's end.
+    fn take_io(&mut self) -> Option<Box<dyn ExchangeIo>> {
+        match &mut self.0 {
+            StreamKind::Local { io, .. } => io.take(),
+            StreamKind::Remote(_) => None,
+        }
+    }
+    fn local_binding(&self) -> Option<&Arc<BindingShared>> {
+        match &self.0 {
+            StreamKind::Local { binding, .. } => Some(binding),
+            StreamKind::Remote(_) => None,
+        }
     }
 }
 
-/// One exclusive lease and its stream. `Send`, not `Clone`; dropping it discards the lease.
+/// One exclusive lease and its stream. `Send`, not `Clone`; dropping it discards the lease (or, carrier-backed,
+/// cancels the exchange).
 pub struct Exchange {
     stream: MessageStream,
-    lease: Option<LeaseGuard>,
-    reused: bool,
-    _live: Option<Live>,
+    back: Back,
+}
+enum Back {
+    Local {
+        lease: Option<LeaseGuard>,
+        reused: bool,
+        _live: Option<Live>,
+    },
+    Remote {
+        reused: bool,
+        live: Option<RemoteLive>,
+    },
 }
 impl Exchange {
     pub fn stream(&mut self) -> &mut MessageStream {
         &mut self.stream
     }
     /// Whether the connection served an exchange before this one (the observation's `reused`): it was idle, of this
-    /// operation's profile, and set up under a context of this operation's scope.
+    /// operation's profile, and set up under a context of this operation's scope. Carrier-backed, the client's
+    /// connection.
     pub fn reused(&self) -> bool {
-        self.reused
+        match &self.back {
+            Back::Local { reused, .. } | Back::Remote { reused, .. } => *reused,
+        }
     }
     /// Ends the exchange: its connection goes back to idle only if the adapter proves the protocol clean and the
     /// operation was not cancelled. The orderly end starts when this is built, and the host's driver settles the
     /// lease when the adapter confirms it (`ExchangeIo::poll_finish`), whether or not the future is polled.
     pub fn finish(mut self) -> ExchangeFinish {
-        let (Some(mut io), Some(mut lease)) = (self.stream.io.take(), self.lease.take()) else {
-            return ExchangeFinish(Cell::ready(discarded()));
-        };
-        if self.stream.binding.cancelled.load(Acquire) {
-            io.abort();
-            lease.release(Disposition::Discarded);
-            return ExchangeFinish(Cell::ready(discarded()));
+        let cancelled = self
+            .stream
+            .local_binding()
+            .is_some_and(|binding| binding.cancelled.load(Acquire));
+        match &mut self.back {
+            Back::Remote { live, .. } => ExchangeFinish(match (live.take(), &self.stream.0) {
+                (Some(live), StreamKind::Remote(stream)) => FinishKind::Remote(stream.finish(live)),
+                _ => FinishKind::Local(Cell::ready(discarded())),
+            }),
+            Back::Local { lease, .. } => {
+                let (Some(mut io), Some(mut lease)) = (self.stream.take_io(), lease.take()) else {
+                    return ExchangeFinish(FinishKind::Local(Cell::ready(discarded())));
+                };
+                if cancelled {
+                    io.abort();
+                    lease.release(Disposition::Discarded);
+                    return ExchangeFinish(FinishKind::Local(Cell::ready(discarded())));
+                }
+                let id = lease.lease.take().expect("a live lease");
+                ExchangeFinish(FinishKind::Local(lease.instance.settle(io, id)))
+            }
         }
-        let id = lease.lease.take().expect("a live lease");
-        ExchangeFinish(lease.instance.settle(io, id))
     }
     /// Ends the exchange abnormally: its connection is discarded.
     pub fn abort(mut self) {
-        if let Some(mut io) = self.stream.io.take() {
+        if let Some(mut io) = self.stream.take_io() {
             io.abort();
         }
-        if let Some(lease) = self.lease.take() {
+        if let Back::Local { lease, .. } = &mut self.back
+            && let Some(lease) = lease.take()
+        {
             lease.release(Disposition::Discarded);
         }
+        // A carrier-backed exchange: dropping its `Live` cancels the exchange and the client discards its connection.
     }
 }
 fn discarded() -> ExchangeEnd {
     ExchangeEnd {
         disposition: Disposition::Discarded,
         cleanup: crate::CleanupStatus::Complete,
+        failure: None,
     }
 }
 impl Drop for Exchange {
     fn drop(&mut self) {
-        if self.lease.is_some()
-            && let Some(io) = self.stream.io.as_mut()
+        if let Back::Local { lease: Some(_), .. } = &self.back
+            && let StreamKind::Local { io: Some(io), .. } = &mut self.stream.0
         {
             io.abort();
         }
     }
 }
 /// The receipt of a finished exchange, set by the host's driver once the adapter confirmed the exchange's end.
-pub struct ExchangeFinish(Cell<ExchangeEnd>);
+pub struct ExchangeFinish(FinishKind);
+enum FinishKind {
+    Local(Cell<ExchangeEnd>),
+    Remote(RemoteFinish),
+}
 impl Future for ExchangeFinish {
     type Output = ExchangeEnd;
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<ExchangeEnd> {
-        self.0.poll(cx)
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<ExchangeEnd> {
+        match &mut self.0 {
+            FinishKind::Local(cell) => cell.poll(cx),
+            FinishKind::Remote(finish) => Pin::new(finish).poll(cx),
+        }
+    }
+}
+impl fmt::Debug for Exchange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Exchange").finish_non_exhaustive()
     }
 }

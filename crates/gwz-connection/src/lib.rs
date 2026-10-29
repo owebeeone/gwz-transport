@@ -12,8 +12,13 @@
 //!   owns (sections 4, 5 and 8); `binding`: the two mux sessions each operation owns (sections 6 and D6); `instance`:
 //!   an endpoint instance, its adapter and its pool; `pump`: the host's driver, the task on the composition's
 //!   `Progress` that advances every instance's pending work without application calls.
+//! - [`remote`]: what stands behind the same `HostHandle`, `Admission`, `Operation`, `Opening` and `Exchange` when the
+//!   connection is carrier-backed (a served core's handle, `remote::handle`), and the client's receiver that serves the
+//!   core's bindings against its own owner (GwzSplitCommandChannel section 3.3, 3.4 and 5). A caller cannot tell a local
+//!   operation from a carrier-backed one by type: `admit` takes a `PreparedOperation` or an `OperationRef`,
+//!   `Operation::registration` may be `Pending`, and `snapshot()` is refused.
 //!
-//! Steps 1.1, 1.2 and 1.3b of dev-docs/GwzTransportReleaseConvergencePlan.md.
+//! Steps 1.1, 1.2, 1.3b and 2.2c of dev-docs/GwzTransportReleaseConvergencePlan.md.
 mod admission;
 mod binding;
 mod cell;
@@ -24,6 +29,7 @@ mod instance;
 mod operation;
 mod ports;
 mod pump;
+pub mod remote;
 mod safety;
 
 pub use admission::{Acquire, Admission, AdmissionPermit};
@@ -34,16 +40,17 @@ pub use domain::{
 };
 pub use exchange::{
     Exchange, ExchangeFinish, MessageStream, OpenWait, Opening, Operation, OperationCancel,
-    OperationFinish, StreamError,
+    OperationFinish, Registered, StreamError,
 };
 pub use host::{
     AttachError, BuildError, ConfigReason, HostClose, HostClosing, HostConfig, HostHandle,
     HostLimits, HostOwner, HostPhase, HostSnapshot, build,
 };
 pub use operation::{
-    AdmissionError, AuthContext, AuthScope, CancelState, EndpointProfile, EndpointRoute,
-    ExchangeEnd, ExchangeSpec, GitService, InvalidInput, MAX_PROFILE_BYTES, OpenError, OpenFailure,
-    OperationEnd, OperationPolicy, PreparedOperation, Registration, TerminalReason,
+    AdmissionError, AdmitInput, AuthContext, AuthScope, CancelState, EndpointProfile,
+    EndpointRoute, ExchangeEnd, ExchangeSpec, GitService, InvalidInput, MAX_PROFILE_BYTES,
+    OpenError, OpenFailure, OperationEnd, OperationPolicy, OperationRef, PreparedOperation,
+    Registration, TerminalReason,
 };
 pub use ports::{
     Clock, Completion, ConnectCommand, DriverWork, EndpointAdapter, EndpointFactory, EndpointSpec,

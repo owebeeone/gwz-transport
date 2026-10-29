@@ -9,7 +9,7 @@ use gwz_transport::{
     binding,
     mux::{self, Mux},
     pool::{Capacity, Identity, Key},
-    protocol::{AuthPolicy, Effect, EndpointRole, Scheme},
+    protocol::{AuthPolicy, Effect, EndpointRole, ErrorCode, Failure, Scheme},
 };
 use std::{any::Any, fmt, sync::Arc};
 
@@ -335,20 +335,75 @@ impl ExchangeSpec {
     }
 }
 
-/// Why a terminal (never registered) operation, or a closing host, refuses.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Why a terminal (never registered) operation, or a closing host, refuses. The last four belong to a carrier-backed
+/// handle, whose registration is a deferred commit answered by the client (GwzSplitCommandChannel 3.4).
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum TerminalReason {
     HostClosing,
     HostFault,
     DomainClosing,
+    /// The client answered `bind_rejected` with this code (`capacity`, `invalid_request` or `cancelled`), or broke the
+    /// bind's rules. `Effect::None`.
+    ClientRefused(ErrorCode),
+    /// The carrier ended before `bound` arrived (the third revocation outcome, contract section 15), or under a live
+    /// binding, which it revoked. A pending registration it ends had zero effects.
+    CarrierLost,
+    /// The client did not answer within the bootstrap bound.
+    TimedOut,
+    /// The operation was cancelled or finished before `bound` arrived.
+    Cancelled,
 }
 /// Whether an operation became a binding.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Registration {
+    /// A carrier-backed registration whose `bind` is in flight: neither `bound` nor `bind_rejected` has arrived. A
+    /// local registration is never pending.
+    Pending,
     Registered(BindingId),
     NeverRegistered(TerminalReason),
+}
+
+/// The call a carrier-backed operation serves: its `request_id`, and nothing the client builds its operation from
+/// (GwzSplitCommandChannel 3.4: the core supplies no profile, authentication context, policy or capacity).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OperationRef {
+    request_id: String,
+}
+impl OperationRef {
+    /// `request_id` is non-empty, at most 96 bytes (the operation name's bound), with no control character.
+    pub fn new(request_id: &str) -> Result<Self, InvalidInput> {
+        if request_id.is_empty()
+            || request_id.len() > 96
+            || request_id.chars().any(char::is_control)
+        {
+            return Err(InvalidInput::Operation);
+        }
+        Ok(Self {
+            request_id: request_id.to_owned(),
+        })
+    }
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+}
+/// What `HostHandle::admit` takes: a local host takes the operation its composition built, a carrier-backed handle the
+/// reference to the call whose client builds it. Each refuses the other with `AdmissionError::WrongInput`.
+#[derive(Clone, Debug)]
+pub enum AdmitInput {
+    Prepared(PreparedOperation),
+    Reference(OperationRef),
+}
+impl From<PreparedOperation> for AdmitInput {
+    fn from(value: PreparedOperation) -> Self {
+        Self::Prepared(value)
+    }
+}
+impl From<OperationRef> for AdmitInput {
+    fn from(value: OperationRef) -> Self {
+        Self::Reference(value)
+    }
 }
 
 /// Why `admit` or `acquire` refused.
@@ -363,6 +418,15 @@ pub enum AdmissionError {
     /// The host holds its limit of endpoint instances and none matches this profile.
     InstanceLimit,
     InputBudget,
+    /// The handle takes the other kind of input: a carrier-backed handle takes an `OperationRef` only (the core cannot
+    /// supply a profile or a policy), a local host a `PreparedOperation` only.
+    WrongInput,
+    /// A carrier-backed handle: `request_id` is not a live call of this session.
+    UnknownCall,
+    /// A carrier-backed handle: an admission or binding already serves this call.
+    DuplicateOperation,
+    /// A carrier-backed handle: the carrier has ended.
+    CarrierLost,
 }
 impl fmt::Display for AdmissionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -384,6 +448,9 @@ pub enum OpenError {
     Sealed,
     /// The binding's own registration limit.
     BindingLimit,
+    /// A carrier-backed operation: the spec has no row in the closed table (GwzSplitCommandChannel 3.4), so it is
+    /// `invalid_request` with `Effect::None` and nothing was sent.
+    Refused(crate::remote::TableRefusal),
 }
 /// Why an opening ended without an exchange.
 #[derive(Debug)]
@@ -398,6 +465,16 @@ pub enum OpenFailure {
     /// conforming opening misfits at most once (its fresh resubmission opens a connection under its own context), so
     /// this names a broken scope record, never load: nothing was started for this opening.
     NoFittingConnection,
+    /// A carrier-backed opening: the client's `open_failed`, with its code and effect.
+    Refused(Failure),
+    /// A carrier-backed opening: the carrier ended under it. A `receive_pack_exchange` whose `open` had left reports
+    /// `Effect::Possible`.
+    CarrierLost {
+        effect: Effect,
+    },
+    /// A carrier-backed opening: the binding broke a rule of the transport (contract section 6), or the table
+    /// refused the spec once the binding was ready: only it ended.
+    Fault(ErrorCode),
 }
 
 /// What `OperationCancel::cancel` found.
@@ -415,10 +492,16 @@ pub struct OperationEnd {
     pub cleanup: CleanupStatus,
     pub exchanges_opened: u64,
     pub cancelled: bool,
+    /// Set when the carrier ended under a live carrier-backed binding (`Some(TerminalReason::CarrierLost)`); a local
+    /// operation never sets it.
+    pub revoked: Option<TerminalReason>,
 }
 /// An exchange's terminal receipt.
 #[derive(Clone, Debug)]
 pub struct ExchangeEnd {
     pub disposition: gwz_transport::protocol::Disposition,
     pub cleanup: CleanupStatus,
+    /// A carrier-backed exchange that did not end orderly: the code and effect it ended with
+    /// (`ErrorCode::CarrierLost` when the carrier ended under it). A local exchange reports none.
+    pub failure: Option<(ErrorCode, Effect)>,
 }

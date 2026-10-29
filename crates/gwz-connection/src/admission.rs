@@ -1,5 +1,9 @@
 //! Admission, acquisition and registration (contract section 5).
 //!
+//! `Admission`, `Acquire` and `AdmissionPermit` are the one set of types for a local host and a carrier-backed handle
+//! (GwzSplitCommandChannel 3.4): each holds the local record below or the carrier-backed one of `remote`, behind a
+//! private representation. What follows describes the local one.
+//!
 //! `admit` reserves a waiting record; `acquire` waits for a slot in FIFO order and attaches the endpoint instance for
 //! the operation's profile (metadata only), within the admission bound; the permit it returns owns the prepared binding
 //! and one registration right. `register` is synchronous, does no I/O, calls no port and either publishes the binding
@@ -11,6 +15,7 @@ use crate::{
     host::{ChargeGuard, HostShared, Slot},
     operation::TerminalReason,
     ports::Sleep,
+    remote::{RemoteAcquire, RemoteAdmission, RemotePermit},
 };
 use std::{
     future::Future,
@@ -23,7 +28,42 @@ use std::{
 };
 
 /// A reserved admission record. Dropping it releases the record; nothing was registered.
-pub struct Admission {
+pub struct Admission(AdmissionKind);
+enum AdmissionKind {
+    Local(Box<LocalAdmission>),
+    Remote(RemoteAdmission),
+}
+impl Admission {
+    pub(crate) fn local(
+        host: Arc<HostShared>,
+        id: u64,
+        input: PreparedOperation,
+        charge: ChargeGuard,
+        sleep: Sleep,
+    ) -> Self {
+        Self(AdmissionKind::Local(Box::new(LocalAdmission::new(
+            host, id, input, charge, sleep,
+        ))))
+    }
+    pub(crate) fn remote(admission: RemoteAdmission) -> Self {
+        Self(AdmissionKind::Remote(admission))
+    }
+    /// Waits for the operation's slot, fairly, and, for a local host, for its endpoint instance, within the admission
+    /// bound. Dropping the future releases every reservation it made.
+    pub fn acquire(self) -> Acquire {
+        Acquire(match self.0 {
+            AdmissionKind::Local(admission) => AcquireKind::Local(Box::new(admission.acquire())),
+            AdmissionKind::Remote(admission) => AcquireKind::Remote(admission.acquire()),
+        })
+    }
+}
+impl std::fmt::Debug for Admission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Admission").finish_non_exhaustive()
+    }
+}
+
+struct LocalAdmission {
     host: Arc<HostShared>,
     id: u64,
     input: Option<PreparedOperation>,
@@ -31,8 +71,8 @@ pub struct Admission {
     sleep: Sleep,
     queued: bool,
 }
-impl Admission {
-    pub(crate) fn new(
+impl LocalAdmission {
+    fn new(
         host: Arc<HostShared>,
         id: u64,
         input: PreparedOperation,
@@ -48,13 +88,11 @@ impl Admission {
             queued: true,
         }
     }
-    /// Waits for the operation's slot, fairly, and for its endpoint instance, within the admission bound.
-    /// Dropping the future releases every reservation it made.
-    pub fn acquire(self) -> Acquire {
-        Acquire(self)
+    fn acquire(self) -> LocalAcquire {
+        LocalAcquire(self)
     }
 }
-impl Drop for Admission {
+impl Drop for LocalAdmission {
     fn drop(&mut self) {
         if self.queued {
             self.host.dequeue(self.id);
@@ -62,9 +100,28 @@ impl Drop for Admission {
     }
 }
 /// See [`Admission::acquire`].
-pub struct Acquire(Admission);
+pub struct Acquire(AcquireKind);
+enum AcquireKind {
+    Local(Box<LocalAcquire>),
+    Remote(RemoteAcquire),
+}
 impl Future for Acquire {
     type Output = Result<AdmissionPermit, AdmissionError>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match &mut self.0 {
+            AcquireKind::Local(acquire) => Pin::new(&mut **acquire)
+                .poll(cx)
+                .map_ok(|permit| AdmissionPermit(PermitKind::Local(permit))),
+            AcquireKind::Remote(acquire) => Pin::new(acquire)
+                .poll(cx)
+                .map_ok(|permit| AdmissionPermit(PermitKind::Remote(permit))),
+        }
+    }
+}
+
+struct LocalAcquire(LocalAdmission);
+impl Future for LocalAcquire {
+    type Output = Result<LocalPermit, AdmissionError>;
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let admission = &mut self.0;
         let host = admission.host.clone();
@@ -143,7 +200,7 @@ impl Future for Acquire {
             done: Cell::new(),
             _charge: charge,
         });
-        Poll::Ready(Ok(AdmissionPermit {
+        Poll::Ready(Ok(LocalPermit {
             host,
             claim: Some(claim),
             binding: Some(binding),
@@ -151,27 +208,44 @@ impl Future for Acquire {
     }
 }
 
-/// One registration right over a prepared binding. Dropping it unregistered releases the slot.
-pub struct AdmissionPermit {
+/// One registration right over a prepared binding (a local host) or a granted slot (a carrier-backed handle).
+/// Dropping it unregistered releases the slot.
+pub struct AdmissionPermit(PermitKind);
+enum PermitKind {
+    Local(LocalPermit),
+    Remote(RemotePermit),
+}
+impl AdmissionPermit {
+    /// Registers the operation: synchronous, no I/O, no port callback, infallible. If the host or the domain closed
+    /// first (or, carrier-backed, the carrier ended), the result is a terminal operation that never registered, which
+    /// opens nothing and did nothing. A carrier-backed registration is a deferred commit: the operation's registration
+    /// is pending until the client answers.
+    pub fn register(self) -> Operation {
+        match self.0 {
+            PermitKind::Local(permit) => permit.register(),
+            PermitKind::Remote(permit) => permit.register(),
+        }
+    }
+}
+
+struct LocalPermit {
     host: Arc<HostShared>,
     claim: Option<u64>,
     binding: Option<Arc<BindingShared>>,
 }
-impl AdmissionPermit {
-    /// Registers the operation: synchronous, no I/O, no port callback, infallible. If the host or the domain closed
-    /// first, the result is a terminal operation that never registered, which opens nothing and did nothing.
-    pub fn register(mut self) -> Operation {
+impl LocalPermit {
+    fn register(mut self) -> Operation {
         let (claim, binding) = (self.claim.take(), self.binding.take());
         let (Some(claim), Some(binding)) = (claim, binding) else {
-            return Operation::terminal(self.host.clone(), TerminalReason::HostFault);
+            return Operation::terminal(TerminalReason::HostFault);
         };
         match self.host.publish(claim, &binding) {
             Ok(()) => Operation::live(self.host.clone(), binding),
-            Err(reason) => Operation::terminal(self.host.clone(), reason),
+            Err(reason) => Operation::terminal(reason),
         }
     }
 }
-impl Drop for AdmissionPermit {
+impl Drop for LocalPermit {
     fn drop(&mut self) {
         if let Some(claim) = self.claim.take() {
             self.host.drop_claim(claim);

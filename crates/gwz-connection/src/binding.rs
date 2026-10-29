@@ -185,7 +185,8 @@ pub(crate) fn closing_code(reason: TerminalReason) -> usize {
     match reason {
         TerminalReason::HostClosing => 1,
         TerminalReason::DomainClosing => 2,
-        TerminalReason::HostFault => 3,
+        // The reasons of a carrier-backed registration never reach a host's binding.
+        _ => 3,
     }
 }
 pub(crate) fn closing_reason(code: usize) -> Option<TerminalReason> {
