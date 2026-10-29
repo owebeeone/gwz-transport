@@ -1,7 +1,7 @@
 //! The host's owner and handle against fakes only (step 1.1 of dev-docs/GwzTransportReleaseConvergencePlan.md;
 //! contract sections 4, 4.1, 5, 10, 11 and 13.1): no file, socket, thread or helper is involved.
 use crate::fakes::{
-    FakeSafety, Rig, auth, exchange_spec, https_spec, now, poll_once, prepared_with, spec,
+    FakeSafety, Rig, auth, exchange_spec, https_spec, now, poll_once, prepared_with, profile, spec,
 };
 use crate::{
     AttachError, AuthContext, AuthScope, BuildError, CleanupDomain, CleanupDomainOwner,
@@ -599,14 +599,29 @@ fn an_opening_that_no_connection_ever_fits_fails_by_name_within_its_bound() {
 
 // Step 1.5 remediation round 1 (dev-docs/GwzConnectionApiContract-Step1.5-RemPlan.md).
 
-/// The scope-a exchanges that fill the pool's per-user-host bound on the HTTPS key, all leased.
-fn saturate(handle: &HostHandle) -> (Operation, Vec<crate::Exchange>) {
-    let operation = registered_with(handle, "op-a", 1, auth(1, "a"));
-    let bound = gwz_transport::pool::Config::default().per_user_host;
-    let exchanges = (0..bound)
-        .map(|_| now(operation.open(https_spec()).unwrap().wait()).unwrap())
+/// The scope-a exchanges that fill the instance's ceiling on the HTTPS key, all leased: 256 of them, held by two
+/// operations at 128 per host each (an operation is held to its own limit, so one at 32 no longer fills the instance).
+fn saturate(handle: &HostHandle) -> (Operation, Operation, Vec<crate::Exchange>) {
+    let at_128 = |name: &str| {
+        let prepared = PreparedOperation::new(
+            name,
+            EndpointRoute::ssh_and_https(),
+            profile(1),
+            auth(1, "a"),
+            OperationPolicy::new(4, 128, 3).unwrap(),
+        )
+        .unwrap();
+        now(handle.admit(prepared).unwrap().acquire())
+            .unwrap()
+            .register()
+    };
+    let (first, second) = (at_128("op-a"), at_128("op-a2"));
+    let exchanges = [&first, &second]
+        .into_iter()
+        .flat_map(|operation| std::iter::repeat_n(operation, 128))
+        .map(|operation| now(operation.open(https_spec()).unwrap().wait()).unwrap())
         .collect();
-    (operation, exchanges)
+    (first, second, exchanges)
 }
 
 #[test]
@@ -709,7 +724,7 @@ fn under_saturated_load_of_one_scope_another_scope_is_served_after_at_most_one_m
     // served on a connection of its own, after at most one misfit.
     let rig = Rig::new();
     let (_owner, handle) = rig.host(1);
-    let (operation_a, mut exchanges) = saturate(&handle);
+    let (operation_a, _operation_a2, mut exchanges) = saturate(&handle);
     let operation_b = registered_with(&handle, "op-b", 1, auth(2, "b"));
     let mut wait = operation_b.open(https_spec()).unwrap().wait();
     let cycles = gwz_transport::pool::Config::default().per_user_host + 2;

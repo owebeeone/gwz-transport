@@ -34,36 +34,6 @@ fn close(pool: &mut PoolMachine) -> ConnectionId {
 }
 
 #[test]
-fn paired_install_refuses_busy_other_scheme_without_changing_either_limit() {
-    let (ssh, _ssh_driver) = Pool::new(config()).unwrap();
-    let (https, _https_driver) = Pool::new(config()).unwrap();
-    let busy = https
-        .checkout(Request::new(
-            Key::https("host", 443),
-            Identity::Https,
-            Owner::new("session", "owner"),
-        ))
-        .unwrap();
-    let initial = ssh.capacity();
-    let raised = Capacity {
-        per_user_host: 32,
-        per_host: 32,
-        total: 100,
-        max_requests: 1024,
-    };
-    assert_eq!(
-        ssh.install_capacity_pair(&https, raised),
-        Err(Error::ActiveOperation)
-    );
-    assert_eq!(ssh.capacity(), initial);
-    assert_eq!(https.capacity(), initial);
-    drop(busy);
-    assert_eq!(ssh.install_capacity_pair(&https, raised), Ok(()));
-    assert_eq!(ssh.capacity(), raised);
-    assert_eq!(https.capacity(), raised);
-}
-
-#[test]
 fn capacity_defaults_and_validation_allow_requested_large_values() {
     let defaults = Config::default();
     assert_eq!(defaults.per_user_host, 32);
@@ -107,53 +77,6 @@ fn thirty_third_user_host_lease_waits_and_large_request_budget_is_not_clamped() 
     }
     assert_eq!(large.outstanding_requests(), 1500);
     assert_eq!(large.request(request("git", "extra")), Err(Error::Capacity));
-}
-
-#[test]
-fn idle_operation_installs_caps_and_active_operation_refuses_replacement() {
-    let mut pool = PoolMachine::new(config()).unwrap();
-    let first = pool.request(request("git", "host")).unwrap();
-    let connection = connect(&mut pool, Identity::Ambient);
-    let lease = pool.take(first).unwrap();
-    let limits = Capacity {
-        per_user_host: 4,
-        per_host: 4,
-        total: 400,
-        max_requests: 1024,
-    };
-    assert_eq!(pool.install_capacity(limits), Err(Error::ActiveOperation));
-    pool.release(lease, Disposition::Reusable).unwrap();
-    pool.install_capacity(limits).unwrap();
-    assert_eq!(pool.capacity(), limits);
-    let next = pool.request(request("git", "host")).unwrap();
-    assert_eq!(pool.take(next).unwrap().connection(), connection);
-}
-
-#[test]
-fn lowering_caps_closes_only_idle_connections_above_the_new_limits() {
-    let mut original = config();
-    original.per_user_host = 4;
-    original.per_host = 4;
-    let mut pool = PoolMachine::new(original).unwrap();
-    let mut connections = Vec::new();
-    for user in ["a", "b", "c"] {
-        let id = pool.request(request(user, "host")).unwrap();
-        let connection = connect(&mut pool, Identity::Ambient);
-        let lease = pool.take(id).unwrap();
-        pool.release(lease, Disposition::Reusable).unwrap();
-        connections.push(connection);
-    }
-    pool.install_capacity(Capacity {
-        per_user_host: 1,
-        per_host: 1,
-        total: 1,
-        max_requests: 1024,
-    })
-    .unwrap();
-    assert_eq!(pool.counts().idle, 1);
-    assert_eq!(pool.counts().closing, 2);
-    assert_eq!(close(&mut pool), connections[1]);
-    assert_eq!(close(&mut pool), connections[2]);
 }
 
 #[test]

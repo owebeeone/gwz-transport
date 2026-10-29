@@ -151,65 +151,47 @@ impl PoolMachine {
     pub fn capacity(&self) -> Capacity {
         Capacity::from(&self.config)
     }
-    pub fn can_install_capacity(&self, capacity: Capacity) -> Result<(), Error> {
-        if !capacity.valid() {
-            return Err(Error::InvalidConfig);
-        }
-        if self.driver_lost {
-            return Err(Error::DriverLost);
-        }
-        if self.stopped {
-            return Err(Error::Shutdown);
-        }
-        if !self.requests.is_empty()
-            || self
-                .entries
-                .values()
-                .any(|entry| !matches!(entry.state, State::Idle { .. }))
-        {
-            return Err(Error::ActiveOperation);
-        }
-        Ok(())
+    /// The limits `request` is held to: its operation's, or the pool's own capacity when it carries none.
+    pub(super) fn limits_of(&self, request: &Request) -> Capacity {
+        request.limits.unwrap_or_else(|| self.capacity())
     }
-    /// Install one operation's capacity only after all prior physical work has
-    /// become idle. Surplus idle resources are retired before new allocation.
-    pub fn install_capacity(&mut self, capacity: Capacity) -> Result<(), Error> {
-        self.can_install_capacity(capacity)?;
-        self.config.per_user_host = capacity.per_user_host;
-        self.config.per_host = capacity.per_host;
-        self.config.total = capacity.total;
-        self.config.max_requests = capacity.max_requests;
-        // Limits, settle times and holds belong to the operation that set them.
-        self.limits.clear();
-        self.settles.clear();
-        self.no_evicts.clear();
-        self.holds.clear();
-
-        let mut kept_total = 0usize;
-        let mut kept_hosts = BTreeMap::<String, usize>::new();
-        let mut kept_users = BTreeMap::<(String, Option<String>), usize>::new();
-        let mut surplus = Vec::new();
-        for (id, entry) in &self.entries {
-            let host = entry.key.host.clone();
-            let user_host = (host.clone(), entry.key.username.clone());
-            let hosts = kept_hosts.get(&host).copied().unwrap_or(0);
-            let users = kept_users.get(&user_host).copied().unwrap_or(0);
-            if kept_total < capacity.total
-                && hosts < capacity.per_host
-                && users < capacity.per_user_host
-            {
-                kept_total += 1;
-                kept_hosts.insert(host, hosts + 1);
-                kept_users.insert(user_host, users + 1);
-            } else {
-                surplus.push(*id);
-            }
+    /// How many entries `session` holds that satisfy `matches`: opening or leased. Idle entries have no owner (they
+    /// belong to no operation) and closing ones are already released.
+    fn owned_where(&self, session: &str, matches: impl Fn(&Entry) -> bool) -> usize {
+        self.entries
+            .values()
+            .filter(|entry| {
+                matches!(entry.state, State::Opening { .. } | State::Leased { .. })
+                    && entry
+                        .owner
+                        .as_ref()
+                        .is_some_and(|owner| owner.session == session)
+                    && matches(entry)
+            })
+            .count()
+    }
+    /// Whether the owner of `request` holds as many entries as its limits allow for the request's key: in total, on its
+    /// host or for its user and host. Leasing an idle entry or opening one charges the owner, so a full owner gets
+    /// neither, and evicting an idle entry (which has no owner) cannot make room for it.
+    pub(super) fn owner_full(&self, request: &Request) -> bool {
+        let limits = self.limits_of(request);
+        let session = &request.owner.session;
+        self.owned_where(session, |_| true) >= limits.total
+            || self.owned_where(session, |entry| entry.key.host == request.key.host)
+                >= limits.per_host
+            || self.owned_where(session, |entry| entry.key.same_user_host(&request.key))
+                >= limits.per_user_host
+    }
+    /// The instance ceilings applied to `request`: each is max(ceiling, the request's limit), so a lone operation keeps
+    /// its own limits and overlapping operations share the ceilings (reuse design section 5).
+    pub(super) fn ceilings_for(&self, request: &Request) -> Capacity {
+        let limits = self.limits_of(request);
+        Capacity {
+            per_user_host: self.config.per_user_host.max(limits.per_user_host),
+            per_host: self.config.per_host.max(limits.per_host),
+            total: self.config.total.max(limits.total),
+            max_requests: self.config.max_requests.max(limits.max_requests),
         }
-        for id in surplus {
-            self.start_closing(id, CloseReason::Evicted);
-        }
-        self.touch();
-        Ok(())
     }
     pub fn request(&mut self, request: Request) -> Result<RequestId, Error> {
         self.request_until(request, None)
@@ -231,7 +213,15 @@ impl PoolMachine {
         if absolute_deadline.is_some_and(|deadline| deadline <= self.now) {
             return Err(Error::AllocationTimeout);
         }
-        if self.requests.len() >= self.config.max_requests {
+        // An owner's outstanding requests stay below its own `max_requests`, and all of them below the ceiling.
+        if self.requests.len() >= self.ceilings_for(&request).max_requests
+            || self
+                .requests
+                .values()
+                .filter(|pending| pending.request.owner.session == request.owner.session)
+                .count()
+                >= self.limits_of(&request).max_requests
+        {
             return Err(Error::Capacity);
         }
         self.request_serial = self.request_serial.checked_add(1).ok_or(Error::Capacity)?;

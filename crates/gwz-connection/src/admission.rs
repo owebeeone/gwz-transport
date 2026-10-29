@@ -128,6 +128,7 @@ impl Future for Acquire {
             id,
             session: session_name(id),
             operation: input.operation,
+            limits: input.policy.limits(),
             carrier: CarrierId(host.namespace),
             pair: Mutex::new(pair),
             instance,

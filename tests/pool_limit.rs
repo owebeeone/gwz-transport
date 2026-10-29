@@ -235,17 +235,6 @@ fn a_limit_is_cleared_and_validated() {
 }
 
 #[test]
-fn a_new_operations_capacity_drops_the_old_operations_limits() {
-    let mut pool = PoolMachine::new(Config::default()).unwrap();
-    pool.set_limit(&site(22), 1).unwrap();
-    pool.set_settle(&site(22), 250).unwrap();
-    pool.install_capacity(pool.capacity()).unwrap();
-    assert_eq!(pool.limit(&site(22)), None);
-    leased(&mut pool, ssh(22));
-    leased(&mut pool, ssh(22));
-}
-
-#[test]
 fn the_async_pool_offers_the_same_operations() {
     let (pool, _driver) = Pool::new(Config::default()).unwrap();
     pool.set_limit(&site(22), 1).unwrap();

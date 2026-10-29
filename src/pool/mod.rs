@@ -231,6 +231,9 @@ pub struct Request {
     /// another compatible idle connection, or a new one, is offered instead.
     /// At most [`MAX_EXCLUDED`]; the pool decides nothing else by them.
     pub exclude: Vec<ConnectionId>,
+    /// The limits of the operation that makes this request (reuse design section 5): its owner's opening and leased
+    /// entries stay below them. `None` is the pool's own capacity.
+    pub limits: Option<Capacity>,
 }
 /// How many idle connections one request may exclude.
 pub const MAX_EXCLUDED: usize = 64;
@@ -246,6 +249,7 @@ impl Request {
             fresh: false,
             tag: None,
             exclude: Vec::new(),
+            limits: None,
         }
     }
     fn valid(&self, config: &Config) -> bool {
@@ -260,6 +264,7 @@ impl Request {
                 .interaction_timeout_ms
                 .is_none_or(|v| v > 0 && v <= config.interaction_timeout_ms)
             && self.exclude.len() <= MAX_EXCLUDED
+            && self.limits.is_none_or(Capacity::valid)
     }
 }
 fn network_timeout_valid(value: Option<u64>, configured: u64) -> bool {

@@ -220,8 +220,9 @@ identities for a request waiting on the site (it waits for room instead; other
 closes are unaffected) and `no_evict` reads it. A `Request` may carry an opaque
 `tag`, which the pool hands back on the `Connect` action of the connection that
 request opens and reads for nothing else; a host uses it to know which member a
-connection serves. `clear_limit` and `limit` remove and read a limit. `install_capacity`
-clears limits, settle times, eviction switches and holds, which belong to one operation. `Pool`
+connection serves. `clear_limit` and `limit` remove and read a limit. Limits, settle times and
+eviction switches live until the host sets them again; the host that sets them
+for an operation clears them when the operation ends. `Pool`
 offers the same calls, and `Pool::control()` (also `PoolDriver::control()`)
 returns a `PoolControl` with them that is not an owner: dropping the last `Pool`
 still shuts the pool down, after which the control takes no new numbers
@@ -234,10 +235,23 @@ Limits default to 32 connections per user/host across ports
 no-username capacity bucket for each configured host. Reuse still requires the
 full scheme/username/host/port key.
 Opening, idle, leased and closing all count. Ready and failed unclaimed results
-still occupy request slots. Construction fixes these ceilings; operation fan-out
-limits cannot resize the pool. Compatible waiters are served in order, while an
-incompatible head does not prevent eligible reuse. Incompatible idle resources
-can be retired to make room for a new identity.
+still occupy request slots.
+
+`Config`'s numbers are the pool's instance ceilings, fixed at construction; nothing
+installs or resizes them. Each operation's limits travel with its requests:
+`Request::limits` is a `Capacity`, and the machine counts the entries each
+`Owner::session` has opening or leased (idle entries have no owner) and leases an
+idle entry or opens a connection for a request only while its owner is below
+those limits in total, on the host and for the user and host, and its
+outstanding requests stay below `max_requests`. A request without limits is held
+to the pool's own capacity. A new connection needs fewer than max(ceiling, the
+request's limit) entries in the pool, on its host and for its user and host: a
+lone operation keeps its own limits exactly, whatever the ceilings are, and
+operations that overlap share the ceilings. An owner at its own limits waits;
+evicting an idle entry would not give it room, so none is evicted for it. A
+lower limit never closes another operation's connections. Compatible waiters are
+served in order, while an incompatible head does not prevent eligible reuse.
+Incompatible idle resources can be retired to make room for a new identity.
 
 Idle expiry defaults to 60 seconds from healthy release. Other defaults are
 30 seconds for allocation, 30 seconds of connect-network time, 120 seconds of

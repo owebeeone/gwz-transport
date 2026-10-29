@@ -160,6 +160,8 @@ pub(crate) struct BindingShared {
     pub(crate) id: BindingId,
     pub(crate) session: String,
     pub(crate) operation: String,
+    /// The operation's limits: every pool request this binding makes carries them (reuse design section 5).
+    pub(crate) limits: gwz_transport::pool::Capacity,
     pub(crate) carrier: CarrierId,
     pub(crate) pair: Mutex<MuxPair>,
     pub(crate) instance: Arc<Instance>,

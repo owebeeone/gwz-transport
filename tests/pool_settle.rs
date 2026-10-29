@@ -105,21 +105,6 @@ fn an_evicted_slot_is_held_for_the_settle_time_and_then_serves_its_evictor() {
 }
 
 #[test]
-fn a_hold_does_not_block_installing_a_new_operations_capacity() {
-    let (mut pool, idle) = full(2, 0);
-    pool.advance(10);
-    let b = pool.request(request(ssh(), explicit("b"))).unwrap();
-    let (victim, _) = next_close(&mut pool);
-    assert_eq!(victim, idle[0]);
-    pool.closed(victim).unwrap();
-    pool.abandon(b);
-    assert_eq!(pool.settling(&site()), 1);
-    pool.can_install_capacity(pool.capacity()).unwrap();
-    pool.install_capacity(pool.capacity()).unwrap();
-    assert_eq!(pool.settling(&site()), 0);
-}
-
-#[test]
 fn two_evictors_each_wait_for_their_own_hold() {
     // Case 42b, with the closes acknowledged in either order.
     for reversed in [false, true] {

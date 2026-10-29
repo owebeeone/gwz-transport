@@ -8,7 +8,7 @@ use crate::{BindingId, CleanupStatus, FactoryError};
 use gwz_transport::{
     binding,
     mux::{self, Mux},
-    pool::{Identity, Key},
+    pool::{Capacity, Identity, Key},
     protocol::{AuthPolicy, Effect, EndpointRole, Scheme},
 };
 use std::{any::Any, fmt, sync::Arc};
@@ -191,7 +191,7 @@ impl fmt::Debug for AuthContext {
     }
 }
 
-/// Capacity and retry inputs of one operation (carried now, applied per binding in step 1.4).
+/// Capacity and retry inputs of one operation. Its capacity is its binding's: [`OperationPolicy::limits`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OperationPolicy {
     pub concurrency: usize,
@@ -217,6 +217,17 @@ impl OperationPolicy {
             max_retries,
         })
     }
+    /// The operation's limits (reuse design section 5): `per_user_host` and `per_host` are `--max-per-host`, `total` is
+    /// max(256, jobs) and `max_requests` max(1024, jobs). They belong to the operation's binding and travel with every
+    /// pool request the binding makes; the instance's pool keeps only physical ceilings, applied as max(ceiling, limit).
+    pub fn limits(&self) -> Capacity {
+        Capacity {
+            per_user_host: self.max_connections_per_host,
+            per_host: self.max_connections_per_host,
+            total: self.concurrency.max(256),
+            max_requests: self.concurrency.max(1024),
+        }
+    }
 }
 
 /// Everything an operation is, frozen: no other application state reaches the host.
@@ -226,7 +237,6 @@ pub struct PreparedOperation {
     pub(crate) route: EndpointRoute,
     pub(crate) profile: EndpointProfile,
     pub(crate) auth: AuthContext,
-    #[allow(dead_code, reason = "carried now; the binding applies it in step 1.4")]
     pub(crate) policy: OperationPolicy,
 }
 impl PreparedOperation {

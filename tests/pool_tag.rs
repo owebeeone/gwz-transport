@@ -55,12 +55,3 @@ fn no_evict_makes_a_waiting_request_wait_instead_of_closing_an_idle_connection()
     pool.set_no_evict(&site, false).unwrap();
     assert!(matches!(pool.next_action(), Some(Action::Close { .. })));
 }
-
-#[test]
-fn a_capacity_install_clears_the_switch() {
-    let mut pool = PoolMachine::new(Config::default()).unwrap();
-    let site = ssh(22).site();
-    pool.set_no_evict(&site, true).unwrap();
-    pool.install_capacity(pool.capacity()).unwrap();
-    assert!(!pool.no_evict(&site));
-}

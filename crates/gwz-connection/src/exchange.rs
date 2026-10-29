@@ -308,6 +308,8 @@ impl Opening {
                 );
                 // The tag is how a connect the pool starts for this request finds the operation's context.
                 request.tag = Some(self.tag);
+                // The binding's limits travel with every request it makes; the pool holds the binding to them.
+                request.limits = Some(binding.limits);
                 binding
                     .instance
                     .submit(

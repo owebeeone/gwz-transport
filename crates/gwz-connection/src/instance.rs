@@ -186,6 +186,17 @@ impl Wake for Wakes {
         }
     }
 }
+/// An instance pool's physical ceilings: 256 in total and per host and for a user and host, the reuse design's
+/// provisional values (section 5). A request is held to its binding's limits and a new connection needs fewer than
+/// max(ceiling, the binding's limit) entries, so a binding keeps limits above them and overlapping bindings share them.
+fn ceilings() -> Config {
+    Config {
+        per_user_host: 256,
+        per_host: 256,
+        total: 256,
+        ..Config::default()
+    }
+}
 pub(crate) struct Instance {
     pub(crate) profile: EndpointProfile,
     clock: Arc<dyn Clock>,
@@ -201,7 +212,7 @@ impl Instance {
         clock: Arc<dyn Clock>,
         driver: Arc<Signal>,
     ) -> Result<Arc<Self>, Error> {
-        let config = Config::default();
+        let config = ceilings();
         Ok(Arc::new(Self {
             profile,
             clock,
@@ -546,8 +557,8 @@ fn openings(state: &mut InstanceState, now: u64) -> bool {
                     progressed = true;
                     state.misfits += 1;
                     let _ = state.pool.release(lease, Disposition::Reusable);
-                    let bound = state.pool.capacity().per_user_host + 1;
                     let pending = &mut state.openings[index];
+                    let bound = misfit_bound(&state.pool, &pending.template);
                     pending.misfits += 1;
                     let asked = if pending.misfits > bound {
                         Err(OpenFailure::NoFittingConnection)
@@ -652,12 +663,22 @@ fn serve(state: &mut InstanceState, pending: Pending, lease: LeaseId) {
     }
 }
 
+/// How many misfits an opening may meet: its binding's own per-user-host limit, plus one. More than that can only mean a
+/// broken adapter (a request without limits is bounded by the pool's own capacity).
+fn misfit_bound(pool: &PoolMachine, request: &Request) -> usize {
+    request
+        .limits
+        .unwrap_or_else(|| pool.capacity())
+        .per_user_host
+        + 1
+}
+
 /// `pending` held a lease of a connection that is gone (the adapter disposed of it, or retired it, before the exchange
 /// began): the lease is discarded by the caller and the opening asks again, not as a misfit, within its own deadline.
 /// More than `per_user_host + 1` of them can only mean a broken adapter, and the opening then fails by name.
 fn lost_lease(state: &mut InstanceState, mut pending: Pending) {
     pending.misfits += 1;
-    let bound = state.pool.capacity().per_user_host + 1;
+    let bound = misfit_bound(&state.pool, &pending.template);
     if pending.misfits > bound {
         let _ = pending.slot.fill(Err(OpenFailure::NoFittingConnection));
         return;

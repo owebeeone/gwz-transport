@@ -16,7 +16,7 @@ impl PoolMachine {
         // cannot steal the compatible idle resource of a later waiter.
         for id in &waiting {
             let request = &self.requests[id].request;
-            if request.fresh {
+            if request.fresh || self.owner_full(request) {
                 continue;
             }
             let idle = self.entries.iter().find_map(|(connection, entry)| {
@@ -67,8 +67,13 @@ impl PoolMachine {
             if self.no_evicts.iter().any(|site| key.on_site(site)) {
                 continue;
             }
-            let user_host_full = self.user_host_total(key) >= self.config.per_user_host;
-            let host_full = self.host_total(&key.host) >= self.config.per_host;
+            // An idle entry has no owner: evicting one gives an owner at its own limits no room.
+            if self.owner_full(&pending.request) {
+                continue;
+            }
+            let ceilings = self.ceilings_for(&pending.request);
+            let user_host_full = self.user_host_total(key) >= ceilings.per_user_host;
+            let host_full = self.host_total(&key.host) >= ceilings.per_host;
             let site_full = self.site_full(key);
             let victim = self
                 .entries
@@ -107,9 +112,11 @@ impl PoolMachine {
             return;
         }
         let key = &pending.request.key;
-        if self.entries.len() >= self.config.total
-            || self.user_host_total(key) >= self.config.per_user_host
-            || self.host_total(&key.host) >= self.config.per_host
+        let ceilings = self.ceilings_for(&pending.request);
+        if self.owner_full(&pending.request)
+            || self.entries.len() >= ceilings.total
+            || self.user_host_total(key) >= ceilings.per_user_host
+            || self.host_total(&key.host) >= ceilings.per_host
             || self.site_full(key)
         {
             return;

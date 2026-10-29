@@ -10,8 +10,7 @@ impl PoolMachine {
     /// slots still held for a settle time. It applies next to `per_host` and
     /// `per_user_host`, in creation and in idle eviction. Lowering it closes
     /// nothing by itself: requests wait, and idle connections of the site are
-    /// evicted for them as for any cap. A limit lives until the next
-    /// `install_capacity`.
+    /// evicted for them as for any cap. A limit lives until `clear_limit`.
     pub fn set_limit(&mut self, site: &Site, limit: usize) -> Result<(), Error> {
         self.accepts_numbers()?;
         if !site.valid() || limit == 0 {
@@ -79,7 +78,7 @@ impl PoolMachine {
     /// Stops (or allows again) evicting idle connections for a request waiting
     /// on `site`: the request waits for room instead, which the host asks for
     /// while a due test needs the key quiet. Other closes are not affected.
-    /// Lives until the next `install_capacity`.
+    /// Lives until it is set again.
     pub fn set_no_evict(&mut self, site: &Site, on: bool) -> Result<(), Error> {
         self.accepts_numbers()?;
         if !site.valid() {
