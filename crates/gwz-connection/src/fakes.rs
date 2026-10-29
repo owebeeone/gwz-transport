@@ -238,6 +238,8 @@ pub(crate) struct FakeWorld {
     pub(crate) cancelled_reuses: Mutex<Vec<ProofId>>,
     /// The next exchange start finds its connection retired (the adapter's `NotConnected`).
     pub(crate) start_lost: AtomicBool,
+    /// The next this many exchange starts find their connection retired.
+    pub(crate) start_lost_n: AtomicUsize,
     /// Every adapter's queue and the waker the host last gave it.
     queues: Mutex<Vec<Arc<Mutex<Queue>>>>,
     /// Which operation's context each connect and exchange was given, by the provider's tag, in order.
@@ -270,6 +272,7 @@ impl FakeWorld {
             hold_reuse: AtomicBool::new(false),
             cancelled_reuses: Mutex::new(Vec::new()),
             start_lost: AtomicBool::new(false),
+            start_lost_n: AtomicUsize::new(0),
             queues: Mutex::new(Vec::new()),
             contexts: Mutex::new(Vec::new()),
             inputs: Mutex::new(Vec::new()),
@@ -523,7 +526,13 @@ impl EndpointAdapter for FakeAdapter {
         spec: &ExchangeSpec,
         auth: &AuthContext,
     ) -> io::Result<Box<dyn ExchangeIo>> {
-        if self.world.start_lost.swap(false, Ordering::SeqCst) {
+        if self.world.start_lost.swap(false, Ordering::SeqCst)
+            || self
+                .world
+                .start_lost_n
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+        {
             return Err(io::ErrorKind::NotConnected.into());
         }
         self.world.exchanges.fetch_add(1, Ordering::SeqCst);

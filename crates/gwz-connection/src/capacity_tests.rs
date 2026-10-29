@@ -103,3 +103,35 @@ fn p1_4_a_limit_above_the_old_pool_default_is_neither_clamped_nor_refused() {
         now(exchange.finish());
     }
 }
+
+#[test]
+fn p1_4_rem_lost_leases_across_many_idle_entries_do_not_exhaust_a_small_bindings_bound() {
+    // State review P3-1: a binding at 1 per host opens after a binding at 8 left 8 idle entries and 6 of them are lost
+    // (the adapter disposed of them before the exchange began). The misfit bound outlasts the idle entries, so the open
+    // continues to a connection that can serve it instead of failing NoFittingConnection.
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    let big = registered(&handle, "big", 4, 8);
+    let mut big_waits = open_many(&rig, &big, 8);
+    for exchange in ready(&mut big_waits) {
+        now(exchange.finish());
+    }
+    now(big.finish());
+    let small = registered(&handle, "small", 4, 1);
+    rig.world
+        .start_lost_n
+        .store(6, std::sync::atomic::Ordering::SeqCst);
+    let mut waits = open_many(&rig, &small, 1);
+    for _ in 0..20 {
+        if waits[0].is_ready() {
+            break;
+        }
+        rig.progress.run();
+    }
+    assert!(waits[0].is_ready(), "the open reaches a fitting connection");
+    let started = ready(&mut waits);
+    assert_eq!(started.len(), 1, "the open succeeds");
+    for exchange in started {
+        now(exchange.finish());
+    }
+}

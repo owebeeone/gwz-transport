@@ -17,9 +17,10 @@
 //! connections, and reuse resumes under a changed context while the old context's connections are still idle. The scope
 //! check at lease stays as the guard: a lease that does not fit (its setup scope unknown or other) is given back
 //! untouched (`Reusable`, never retired), and the opening asks once more with a `fresh` request, which opens a
-//! connection of its own under the opening's own tag and so its own scope. More than `per_user_host + 1` misfits can only
-//! mean a broken scope record, and the opening then fails by name (`OpenFailure::NoFittingConnection`). No resubmission,
-//! after a misfit or after a failed reuse proof, extends the allocation deadline the opening was given at submit.
+//! connection of its own under the opening's own tag and so its own scope. More than `misfit_bound` misfits (the larger of
+//! the pool's and the binding's `per_user_host`, plus one) can only mean a broken scope record, and the opening then
+//! fails by name (`OpenFailure::NoFittingConnection`). No resubmission, after a misfit or after a failed reuse proof,
+//! extends the allocation deadline the opening was given at submit.
 //!
 //! Recorded limitation (lane owner's decision, step 1.5 remediation round 1): when one scope keeps the key's
 //! `per_user_host` connections busy and its openings keep arriving, every connection that comes free goes to the next
@@ -663,19 +664,21 @@ fn serve(state: &mut InstanceState, pending: Pending, lease: LeaseId) {
     }
 }
 
-/// How many misfits an opening may meet: its binding's own per-user-host limit, plus one. More than that can only mean a
-/// broken adapter (a request without limits is bounded by the pool's own capacity).
+/// How many misfits an opening may meet: the larger of the pool's per-user-host ceiling and its binding's own limit, plus
+/// one. Idle entries on a key can reach the larger of the two (overlapping bindings share the ceilings), and each one the
+/// opening meets that cannot serve it, or that the adapter has lost, counts once; more than that can only mean a broken
+/// adapter (a request without limits is bounded by the pool's own capacity).
 fn misfit_bound(pool: &PoolMachine, request: &Request) -> usize {
+    let ceiling = pool.capacity().per_user_host;
     request
         .limits
-        .unwrap_or_else(|| pool.capacity())
-        .per_user_host
+        .map_or(ceiling, |limits| ceiling.max(limits.per_user_host))
         + 1
 }
 
 /// `pending` held a lease of a connection that is gone (the adapter disposed of it, or retired it, before the exchange
 /// began): the lease is discarded by the caller and the opening asks again, not as a misfit, within its own deadline.
-/// More than `per_user_host + 1` of them can only mean a broken adapter, and the opening then fails by name.
+/// More than `misfit_bound` of them can only mean a broken adapter, and the opening then fails by name.
 fn lost_lease(state: &mut InstanceState, mut pending: Pending) {
     pending.misfits += 1;
     let bound = misfit_bound(&state.pool, &pending.template);

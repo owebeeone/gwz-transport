@@ -313,7 +313,6 @@ impl LeaseId {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Error {
     InvalidConfig,
-    ActiveOperation,
     InvalidRequest,
     Capacity,
     WouldBlock,

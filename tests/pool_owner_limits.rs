@@ -198,3 +198,29 @@ fn https_requests_are_counted_per_owner_too() {
     assert!(pool.take(first).is_ok());
     assert_eq!(pool.take(second), Err(Error::WouldBlock));
 }
+
+#[test]
+fn operations_that_share_a_session_share_one_count_so_callers_key_one_per_request() {
+    // State review P2-1: the machine counts entries per `Owner.session`, so two operations with differing limits under
+    // ONE session judge each other's entries against their own limit. The caller that wants each held to its own limit
+    // gives each limit-bearing request its own session (gwz-core's SSH and HTTPS paths do).
+    let mut pool = PoolMachine::new(ceilings(64, 64)).unwrap();
+    let (large, small) = (limits(32, 256, 1024), limits(4, 256, 1024));
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    assert_eq!(lease_up_to(&mut pool, "shared", "h", large, 10, &mut a), 10);
+    assert_eq!(
+        lease_up_to(&mut pool, "shared", "h", small, 4, &mut b),
+        0,
+        "the small limit is judged against the shared session's ten"
+    );
+    // With a session each, the same sequence holds each to its own.
+    let mut pool = PoolMachine::new(ceilings(64, 64)).unwrap();
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    assert_eq!(lease_up_to(&mut pool, "one", "h", large, 10, &mut a), 10);
+    assert_eq!(lease_up_to(&mut pool, "two", "h", small, 4, &mut b), 4);
+    // Reverse order, one session: the small limit's four leave the large one 28 of its 32.
+    let mut pool = PoolMachine::new(ceilings(64, 64)).unwrap();
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    assert_eq!(lease_up_to(&mut pool, "shared", "h", small, 4, &mut b), 4);
+    assert_eq!(lease_up_to(&mut pool, "shared", "h", large, 40, &mut a), 28);
+}

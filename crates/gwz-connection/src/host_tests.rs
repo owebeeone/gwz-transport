@@ -564,14 +564,15 @@ fn a_digest_collision_is_not_equality_and_gets_another_instance() {
 fn an_opening_that_no_connection_ever_fits_fails_by_name_within_its_bound() {
     // Every connection the pool offers was set up under another context (the helper below rescopes each one before
     // its connect completes), so each lease is retired and the opening asks again; it must end, typed, after at most
-    // `per_user_host + 1` misfits, never spin.
+    // `misfit_bound` misfits (the instance pool's per-user-host ceiling, 256, plus one: idle entries on a key can reach it),
+    // never spin.
     let rig = Rig::new();
     rig.world.asynchronous.store(true, Ordering::SeqCst);
     let (_owner, handle) = rig.host(1);
     let operation = registered_with(&handle, "op", 1, auth(1, "a"));
     let mut wait = operation.open(https_spec()).unwrap().wait();
     let foreign = AuthScope::new([9; 32]);
-    let bound = gwz_transport::pool::Config::default().per_user_host + 1;
+    let bound = 256 + 1;
     let mut passes = 0;
     while !wait.is_ready() {
         assert!(
