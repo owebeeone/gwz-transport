@@ -340,6 +340,25 @@ fn snapshot_is_refused_and_carries_no_counts() {
         (0, 0, 0, 0),
         "and carries no counts, though a binding is live"
     );
+    assert_eq!(snapshot.phase, crate::HostPhase::Open);
+    // Across the carrier's loss it is still a refusal, and its phase says what the handle is: closed.
+    w.carrier.end();
+    w.remote.pump();
+    let lost = w.handle.snapshot();
+    assert!(lost.refused(), "still a refusal after the loss");
+    assert_eq!(
+        (
+            lost.bindings,
+            lost.active_operations,
+            lost.waiting_admissions
+        ),
+        (0, 0, 0)
+    );
+    assert_eq!(
+        lost.phase,
+        crate::HostPhase::Closed,
+        "a lost carrier is not an open handle"
+    );
 }
 
 #[test]

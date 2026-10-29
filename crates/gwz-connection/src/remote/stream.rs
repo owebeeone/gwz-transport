@@ -4,11 +4,11 @@
 //! `close` envelopes the pump carries. Nothing here is public.
 use super::{
     backend::{RemoteOpening, Shared},
-    core::{ExchEnd, Stage},
+    core::{ExchEnd, Stage, Wait},
 };
 use crate::{ExchangeEnd, OpenFailure, StreamError};
 use gwz_transport::{
-    protocol::{Effect, ErrorCode},
+    protocol::{Disposition, Effect, ErrorCode},
     stream,
 };
 use std::{
@@ -75,7 +75,7 @@ impl RemoteOpenWait {
             live: Some(opening.live),
         }
     }
-    /// Whether the next poll is ready: the opening is decided.
+    /// Whether the next poll is ready: the opening is decided, or its record is gone (which polls as `Cancelled`).
     pub(crate) fn is_ready(&self) -> bool {
         let Some(live) = &self.live else {
             return true;
@@ -93,10 +93,16 @@ impl RemoteOpenWait {
             return Poll::Ready(Err(OpenFailure::Cancelled));
         };
         let (shared, serial, token) = (live.shared.clone(), live.serial, live.token);
-        let waker = cx.waker().clone();
+        let waker = cx.waker();
         let decided = shared.with(|state| {
-            let entry = state.bindings.get_mut(&serial)?;
-            let exch = entry.exchanges.get_mut(&token)?;
+            // No binding or exchange record is a terminal answer, never a wait that nothing wakes.
+            let Some(exch) = state
+                .bindings
+                .get_mut(&serial)
+                .and_then(|entry| entry.exchanges.get_mut(&token))
+            else {
+                return Some(Err(OpenFailure::Cancelled));
+            };
             match exch.outcome.take() {
                 Some(Ok(())) => Some(Ok(exch.reused)),
                 Some(Err(failure)) => {
@@ -104,7 +110,7 @@ impl RemoteOpenWait {
                     Some(Err(failure))
                 }
                 None => {
-                    state.waiters.push(waker);
+                    state.wait_for(Wait::Opening(serial, token), waker);
                     None
                 }
             }
@@ -224,16 +230,24 @@ pub(crate) struct RemoteFinish {
 impl Future for RemoteFinish {
     type Output = ExchangeEnd;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<ExchangeEnd> {
-        let waker = cx.waker().clone();
+        let waker = cx.waker();
         let (serial, token) = (self.serial, self.token);
         let end = self.shared.with(|state| {
-            let end = state
+            let Some(exch) = state
                 .bindings
                 .get(&serial)
                 .and_then(|b| b.exchanges.get(&token))
-                .and_then(|e| e.end.clone());
+            else {
+                // No record: nothing is left to wait for. A record leaves the table only with its handle, so this is not
+                // reached while this future holds its `Live`; if it is, the push is reported as possibly applied.
+                return Some(ExchEnd {
+                    disposition: Disposition::Discarded,
+                    failure: Some((ErrorCode::Cancelled, Effect::Possible)),
+                });
+            };
+            let end = exch.end.clone();
             if end.is_none() {
-                state.waiters.push(waker);
+                state.wait_for(Wait::Ending(serial, token), waker);
             }
             end
         });

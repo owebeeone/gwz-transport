@@ -372,10 +372,11 @@ pub struct OperationRef {
     request_id: String,
 }
 impl OperationRef {
-    /// `request_id` is non-empty, at most 96 bytes (the operation name's bound), with no control character.
+    /// `request_id` is non-empty, at most 128 bytes (the bound of a lane request name, which the call's `request_id` is),
+    /// with no control character.
     pub fn new(request_id: &str) -> Result<Self, InvalidInput> {
         if request_id.is_empty()
-            || request_id.len() > 96
+            || request_id.len() > 128
             || request_id.chars().any(char::is_control)
         {
             return Err(InvalidInput::Operation);

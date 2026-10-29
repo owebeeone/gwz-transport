@@ -904,6 +904,41 @@ fn bootstrap_rejection_codec_enforces_its_entire_failure_domain() {
 }
 
 #[test]
+fn a_bind_rejected_carries_no_failure_detail_not_even_a_capacity_detail() {
+    use gwz_transport::{
+        codec,
+        protocol::{CapacityCause, CapacityDetail, FailureDetail},
+    };
+    // GwzSplitCommandChannel 3.4: `bind_rejected` is a code and `Effect::None` and nothing else. `capacity` is among its
+    // five codes and also the one code a failure detail may accompany elsewhere, so the detail is refused here by name.
+    for detail in [
+        None,
+        Some(Box::new(FailureDetail {
+            capacity: Some(CapacityDetail {
+                cause: CapacityCause::Local,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })),
+    ] {
+        let reply = Envelope {
+            version: 1,
+            session_id: "session".into(),
+            kind: MessageKind::BindRejected,
+            bind_rejected: Some(Failure {
+                detail: detail.clone(),
+                setup_cause: None,
+                code: ErrorCode::Capacity,
+                effect: Effect::None,
+                facts: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(codec::admit(&reply).is_ok(), detail.is_none(), "{detail:?}");
+    }
+}
+
+#[test]
 fn invalid_endpoint_configuration_fails_locally_before_bootstrap() {
     for invalid in 0..4 {
         let mut config = binding::EndpointConfig {

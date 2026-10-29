@@ -283,7 +283,8 @@ fn native_facts(facts: &Facts, version: i64) -> Result<(), Error> {
 
 /// Bootstrap is effect-free. It rejects version/capability negotiation, and, for a carrier-backed binding whose
 /// client builds its own operation (GwzSplitCommandChannel 3.4), a bind the client refuses for `capacity`,
-/// `invalid_request` or `cancelled`.
+/// `invalid_request` or `cancelled`. A rejection is a code and `Effect::None` and nothing else: no facts and no failure
+/// detail, not even the capacity detail that `capacity` carries on other failures.
 pub(crate) fn bind_rejection(failure: &Failure) -> Result<(), Error> {
     if !matches!(
         failure.code,
@@ -294,6 +295,7 @@ pub(crate) fn bind_rejection(failure: &Failure) -> Result<(), Error> {
             | ErrorCode::Cancelled
     ) || failure.effect != Effect::None
         || failure.facts.is_some()
+        || failure.detail.is_some()
     {
         return Err(Error::InvalidMessage);
     }

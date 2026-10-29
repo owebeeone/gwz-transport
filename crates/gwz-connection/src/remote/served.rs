@@ -74,6 +74,10 @@ enum Ex {
     Open(Box<Running>),
 }
 
+/// Streams the client's endpoint half of a binding holds at once (the mux's default bound), which the carrier holds the
+/// binding to as well (`BindBounds::client`).
+pub(super) const STREAMS: usize = 64;
+
 /// Why a frame cannot be answered per stream: the binding is faulted (contract section 6).
 struct Fault;
 
@@ -150,18 +154,23 @@ impl Served {
         self.terminate(ErrorCode::Cancelled, None);
     }
     fn terminate(&mut self, code: ErrorCode, offending: Option<i64>) {
-        let mut streams: Vec<(i64, bool)> = self
+        // Each running exchange's effect is what `cancel_stream` reports: a push whose bytes already crossed the owner's
+        // stream may have changed refs at the remote.
+        let mut streams: Vec<(i64, bool, Effect)> = self
             .exchanges
             .iter()
-            .map(|(id, ex)| (*id, matches!(ex, Ex::Opening { .. })))
+            .map(|(id, ex)| match ex {
+                Ex::Opening { .. } => (*id, true, Effect::None),
+                Ex::Open(run) => (*id, false, effect_after(run.service, run.forwarded)),
+            })
             .collect();
         if let Some(id) = offending
             && id > 0
-            && !streams.iter().any(|(known, _)| *known == id)
+            && !streams.iter().any(|(known, _, _)| *known == id)
         {
-            streams.push((id, true));
+            streams.push((id, true, Effect::None));
         }
-        for (id, opening) in streams {
+        for (id, opening, effect) in streams {
             let kind = if opening {
                 MessageKind::OpenFailed
             } else {
@@ -169,7 +178,7 @@ impl Served {
             };
             let failure = Failure {
                 code,
-                effect: Effect::None,
+                effect,
                 ..Default::default()
             };
             let mut envelope = Envelope {
@@ -240,6 +249,7 @@ impl Served {
         let config = mux::Config {
             limits: crate::binding::limits(),
             max_requests: 4,
+            max_streams: STREAMS,
             ..Default::default()
         };
         let built = Mux::endpoint(
@@ -337,6 +347,17 @@ impl Served {
     }
 }
 
+/// What an exchange's end may have left at the remote: a push (`receive-pack`) whose bytes already crossed the owner's
+/// stream may have changed refs; anything else changed nothing. The one rule for every way an exchange ends before its
+/// orderly close (a cancel, the call's end, a fault of the binding, a failure of the owner's stream).
+fn effect_after(service: GitService, forwarded: u64) -> Effect {
+    if service == GitService::ReceivePackExchange && forwarded > 0 {
+        Effect::Possible
+    } else {
+        Effect::None
+    }
+}
+
 fn send(
     mux: &mut Mux,
     request: &str,
@@ -357,11 +378,7 @@ fn cancel_stream(mux: &mut Mux, request: &str, exchanges: &mut BTreeMap<i64, Ex>
     match exchanges.remove(&id) {
         Some(Ex::Opening { .. }) => open_failed(mux, request, id, ErrorCode::Cancelled),
         Some(Ex::Open(mut run)) => {
-            let effect = if run.service == GitService::ReceivePackExchange && run.forwarded > 0 {
-                Effect::Possible
-            } else {
-                Effect::None
-            };
+            let effect = effect_after(run.service, run.forwarded);
             if let Some(exchange) = run.exchange.take() {
                 exchange.abort();
             }
@@ -739,11 +756,7 @@ fn fail(run: &mut Running, error: &crate::StreamError) {
         crate::StreamError::Cancelled => ErrorCode::Cancelled,
         _ => ErrorCode::Io,
     };
-    let effect = if run.service == GitService::ReceivePackExchange && run.forwarded > 0 {
-        Effect::Possible
-    } else {
-        Effect::None
-    };
+    let effect = effect_after(run.service, run.forwarded);
     let _ = run.machine.fail_terminal(Failure {
         code,
         effect,

@@ -5,9 +5,40 @@
 //! composition (core's adapter, or a test's fake carrier) implements these. Messages are gwz-transport's own
 //! `Attachment`, `(request name, Envelope)`: the request name is the lane frame's `request_id`, the call this client
 //! sent, and `Envelope.session_id` names the binding. Neither port decodes an envelope or waits.
+use super::backend::RemoteConfig;
 use crate::{Clock, HostNamespace, Progress};
 use gwz_transport::mux::Attachment;
 use std::{sync::Arc, task::Waker};
+
+/// What a carrier holds one remote binding's inbound state to (GwzSplitCommandChannel 3.3, "Transport-class bound"):
+/// derived here from the binding's own limits, because the carrier cannot name them. A peer that exceeds either faults
+/// that binding alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BindBounds {
+    /// Bytes of `data` one stream of the binding may have queued: the binding's `receive_window`.
+    pub receive_window: usize,
+    /// Streams of the binding that may hold queued state at once: the binding's mux's `max_streams`.
+    pub streams: usize,
+}
+impl BindBounds {
+    /// The core's end: bindings made under `config` (`streams_per_binding`).
+    pub fn core(config: &RemoteConfig) -> Self {
+        Self {
+            receive_window: window(),
+            streams: config.streams(),
+        }
+    }
+    /// The client's end: the bindings it serves, whose endpoint half runs the mux's default stream bound.
+    pub fn client() -> Self {
+        Self {
+            receive_window: window(),
+            streams: super::served::STREAMS,
+        }
+    }
+}
+fn window() -> usize {
+    usize::try_from(crate::binding::limits().receive_window).unwrap_or(usize::MAX)
+}
 
 /// Why a message was not queued. The message comes back: a lane never drops one.
 #[derive(Debug)]
@@ -37,6 +68,7 @@ pub trait Lane: Send + Sync + 'static {
     /// keeps for it, and discards what still arrives for it. The default keeps nothing. A byte-stream carrier routes
     /// the frames of open bindings only, so the composition that opens a binding (`CarrierLane` opens the core's as the
     /// `bind` goes out) retires it here.
+    /// A `bind` of a session the lane retired is over with it: the lane drops it rather than open the binding again.
     fn retire(&self, session: &str) {
         let _ = session;
     }

@@ -15,6 +15,7 @@
 //! | `admit(op_ref)` no carrier I/O; `acquire` core-local; `register` a deferred commit; `snapshot()` refused | `backend` |
 //! | `bound` registers; `bind_rejected` and carrier loss end `NeverRegistered`; live bindings revoked on loss | `core`, `backend` |
 //! | The core's openings, exchanges and byte streams over the lane | `stream` |
+//! | The bounds a carrier holds one binding to (its receive window, its mux's streams) | `lane` |
 //! | The closed `ExchangeSpec` to `Open.service` table | `table` |
 //! | Tuple canonical form (5.2), service class and push allowance (5.3) | `admission` |
 //! | The client's receiver: invocation capture, admission, the binding's endpoint half on the owner | `receiver`, `served` |
@@ -37,7 +38,7 @@ pub use backend::RemoteConfig;
 pub(crate) use backend::{
     RemoteAcquire, RemoteAdmission, RemoteCancel, RemoteOp, RemoteOpening, RemotePermit,
 };
-pub use lane::{ClientSession, CoreBinding, Lane, LaneEnded, LaneSend};
+pub use lane::{BindBounds, ClientSession, CoreBinding, Lane, LaneEnded, LaneSend};
 pub use receiver::{Invocation, Invocations, NamedKey, Receiver, RefusalNote, serve_bindings};
 pub(crate) use stream::{Live as RemoteLive, RemoteFinish, RemoteOpenWait, RemoteStream};
 pub use table::TableRefusal;

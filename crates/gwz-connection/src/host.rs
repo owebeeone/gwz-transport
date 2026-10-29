@@ -187,7 +187,9 @@ pub enum HostPhase {
     /// Nothing is left that the host owns: its disposal is confirmed, or belongs to the retainer.
     Closed,
 }
-/// Fixed-size counts. Step 1.2 adds the pool, binding and exchange counters of contract section 11.
+/// Fixed-size counts. Step 1.2 adds the pool, binding and exchange counters of contract section 11. On a carrier-backed
+/// handle the snapshot is a refusal ([`refused`](Self::refused)): every count is meaningless there, and only `phase` and
+/// `namespace` are the handle's own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HostSnapshot {
@@ -207,11 +209,12 @@ pub struct HostSnapshot {
     refused: bool,
 }
 impl HostSnapshot {
-    /// What a carrier-backed handle reports (GwzSplitCommandChannel 3.4): a refusal with no counts, every field zero. The
-    /// client's pools, the hosts it is connected to, are not the core's to see.
-    pub(crate) fn refusal(namespace: HostNamespace) -> Self {
+    /// What a carrier-backed handle reports (GwzSplitCommandChannel 3.4): a refusal with no counts, every count zero. The
+    /// client's pools, the hosts it is connected to, are not the core's to see. `phase` is the handle's own, truthfully:
+    /// `Closed` once the carrier is lost.
+    pub(crate) fn refusal(namespace: HostNamespace, phase: HostPhase) -> Self {
         Self {
-            phase: HostPhase::Open,
+            phase,
             namespace,
             endpoint_instances: 0,
             retained_cleanup: 0,
@@ -222,7 +225,9 @@ impl HostSnapshot {
             refused: true,
         }
     }
-    /// Whether this is a carrier-backed handle's refusal: it carries no counts, and its zeros mean nothing.
+    /// Whether this is a carrier-backed handle's refusal. When it is, every count (`endpoint_instances`,
+    /// `retained_cleanup`, `bindings`, `active_operations`, `waiting_admissions`, `connections`) is meaningless: its zeros
+    /// say nothing of the client. Only `phase` and `namespace` are the handle's own.
     pub fn refused(&self) -> bool {
         self.refused
     }

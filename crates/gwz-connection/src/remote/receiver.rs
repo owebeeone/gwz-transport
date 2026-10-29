@@ -183,6 +183,11 @@ impl Receiver {
         let session = &self.shared.session;
         let now = session.clock().now().get();
         loop {
+            // A core that sends binds and does not read costs this end no more than the outbox's room: it stops taking
+            // while the outbox is full, and what it has not taken waits in the lane.
+            if state.outbox.len() >= OUTBOX_ROOM {
+                break;
+            }
             match session.recv() {
                 Ok(Some(message)) => self.route_in(state, message),
                 Ok(None) => break,
@@ -391,13 +396,15 @@ impl fmt::Debug for Receiver {
     }
 }
 
-impl Receiver {
-    #[cfg(test)]
-    pub(crate) fn discarded(&self) -> usize {
-        self.shared.state.lock().unwrap().discarded
-    }
-    #[cfg(test)]
-    pub(crate) fn bindings(&self) -> usize {
-        self.shared.state.lock().unwrap().served.len()
+cfg_if::cfg_if! {
+    if #[cfg(test)] {
+        impl Receiver {
+            pub(crate) fn discarded(&self) -> usize {
+                self.shared.state.lock().unwrap().discarded
+            }
+            pub(crate) fn bindings(&self) -> usize {
+                self.shared.state.lock().unwrap().served.len()
+            }
+        }
     }
 }

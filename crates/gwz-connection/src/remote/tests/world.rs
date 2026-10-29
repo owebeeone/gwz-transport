@@ -12,9 +12,39 @@ use crate::{
 use gwz_transport::{mux::Attachment, protocol::MessageKind};
 use std::{
     collections::{BTreeMap, VecDeque},
-    sync::{Arc, Mutex},
-    task::Waker,
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    task::{Context, Poll, Wake, Waker},
 };
+
+/// A waker that counts its wakes: a row's stand-in for one executor task, so a row can tell a future that is woken by a
+/// state change from one that wakes itself.
+pub(crate) struct Count(AtomicUsize);
+impl Count {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self(AtomicUsize::new(0)))
+    }
+    pub(crate) fn wakes(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
+    /// Polls `future` once with this task's waker.
+    pub(crate) fn poll<F: Future + Unpin>(self: &Arc<Self>, future: &mut F) -> Poll<F::Output> {
+        let waker = Waker::from(self.clone());
+        Pin::new(future).poll(&mut Context::from_waker(&waker))
+    }
+}
+impl Wake for Count {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
 
 /// Which way a logged message went.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

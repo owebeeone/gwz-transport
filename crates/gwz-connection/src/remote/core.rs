@@ -20,6 +20,7 @@ use gwz_transport::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    sync::{Arc, OnceLock},
     task::Waker,
 };
 
@@ -60,6 +61,9 @@ pub(super) struct Exch {
     pub(super) finish_requested: bool,
     /// The application handle is gone: the exchange is aborted and reclaimed once its stream ends.
     pub(super) dropped: bool,
+    /// The operation was cancelled while the `Open` was unanswered: the opening already resolved `Cancelled`, and the
+    /// answer, when it comes, is met with `cancel` (or ignored, if it is a failure). The handle is still held.
+    pub(super) cancel_on_open: bool,
 }
 impl Exch {
     fn new(spec: ExchangeSpec) -> Self {
@@ -75,6 +79,13 @@ impl Exch {
             end: None,
             finish_requested: false,
             dropped: false,
+            cancel_on_open: false,
+        }
+    }
+    /// Decides the opening, unless the operation was cancelled meanwhile: that decision stands.
+    fn decide(&mut self, outcome: Result<(), OpenFailure>) {
+        if !self.cancel_on_open {
+            self.outcome = Some(outcome);
         }
     }
     pub(super) fn effect_on_loss(&self) -> Effect {
@@ -103,6 +114,11 @@ pub(super) struct Binding {
     pub(super) live: usize,
     pub(super) revoked: Option<TerminalReason>,
     pub(super) done: Cell<OperationEnd>,
+    /// The registration as it stood when the binding left the table, set under the state lock before the binding goes:
+    /// the operation reads it once its binding is gone, so its registration never steps back to `Pending`.
+    pub(super) last: Arc<OnceLock<Registration>>,
+    /// The binding's unsent messages were taken out of the outbox (it is over: faulted, cancelled, refused or timed out).
+    pub(super) purged: bool,
 }
 
 pub(super) struct Waiting {
@@ -121,12 +137,29 @@ pub(super) struct State {
     pub(super) bindings: BTreeMap<u64, Binding>,
     pub(super) by_session: BTreeMap<String, u64>,
     pub(super) outbox: VecDeque<Attachment>,
-    pub(super) waiters: Vec<Waker>,
+    pub(super) waiters: Vec<Waiter>,
     /// Messages dropped for a binding that was absent or retired: no state was made for any of them.
     pub(super) discarded: usize,
     /// Terminal receipts to publish once the lock is released.
     pub(super) finished: Vec<(Cell<OperationEnd>, OperationEnd)>,
 }
+
+/// What a pending future waits for. A waiter is woken when its condition holds, never by the poll that registered it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Wait {
+    /// The binding's registration is decided.
+    Registered(u64),
+    /// The exchange's opening is decided (or its record is gone).
+    Opening(u64, u64),
+    /// The exchange has ended (or its record is gone).
+    Ending(u64, u64),
+}
+pub(super) struct Waiter {
+    wait: Wait,
+    waker: Waker,
+}
+/// The most wakers kept for one wait: a task polled with a fresh waker each time cannot grow the list.
+const WAKERS_PER_WAIT: usize = 16;
 
 /// The most messages the outbox holds beyond the binds that `register` puts in it unconditionally.
 const OUTBOX_ROOM: usize = 64;
@@ -150,14 +183,71 @@ impl State {
         }
     }
 
-    pub(super) fn wake_all(&mut self) -> Vec<Waker> {
-        let mut wakers = std::mem::take(&mut self.waiters);
-        wakers.extend(
-            self.queue
-                .iter_mut()
-                .filter_map(|waiting| waiting.waker.take()),
-        );
-        wakers
+    /// Registers `waker` to be woken when `wait` holds. The caller has just seen it not hold, under the same lock.
+    pub(super) fn wait_for(&mut self, wait: Wait, waker: &Waker) {
+        let same: Vec<usize> = self
+            .waiters
+            .iter()
+            .enumerate()
+            .filter(|(_, waiter)| waiter.wait == wait)
+            .map(|(index, _)| index)
+            .collect();
+        if same
+            .iter()
+            .any(|&index| self.waiters[index].waker.will_wake(waker))
+        {
+            return;
+        }
+        if same.len() >= WAKERS_PER_WAIT {
+            self.waiters.remove(same[0]);
+        }
+        self.waiters.push(Waiter {
+            wait,
+            waker: waker.clone(),
+        });
+    }
+
+    fn holds(&self, wait: Wait) -> bool {
+        match wait {
+            Wait::Registered(serial) => self
+                .bindings
+                .get(&serial)
+                .is_none_or(|binding| !matches!(binding.reg, Reg::Pending)),
+            Wait::Opening(serial, token) => self
+                .bindings
+                .get(&serial)
+                .and_then(|binding| binding.exchanges.get(&token))
+                .is_none_or(|exch| exch.outcome.is_some()),
+            Wait::Ending(serial, token) => self
+                .bindings
+                .get(&serial)
+                .and_then(|binding| binding.exchanges.get(&token))
+                .is_none_or(|exch| exch.end.is_some()),
+        }
+    }
+
+    /// The wakers whose condition holds now, taken out: the waiting futures whose state moved, the admission at the head
+    /// of the queue once a slot is free (`active_limit`), and every admission once the carrier is lost. A future that
+    /// registered its waker in this very call and is still waiting is not among them.
+    pub(super) fn ready_wakers(&mut self, active_limit: usize) -> Vec<Waker> {
+        let mut ready = Vec::new();
+        for waiter in std::mem::take(&mut self.waiters) {
+            if self.holds(waiter.wait) {
+                ready.push(waiter.waker);
+            } else {
+                self.waiters.push(waiter);
+            }
+        }
+        let head = self.queue.front().map(|waiting| waiting.id);
+        let free = self.active < active_limit;
+        for waiting in &mut self.queue {
+            if (self.lost || (free && Some(waiting.id) == head))
+                && let Some(waker) = waiting.waker.take()
+            {
+                ready.push(waker);
+            }
+        }
+        ready
     }
 
     /// Moves everything that can move: arrivals into their bindings, each binding's work, and the outbox to the lane.
@@ -213,7 +303,22 @@ impl State {
         entry.receive(message);
     }
 
+    /// Takes the unsent messages of every binding that is over out of the outbox: a `bind` still queued behind a full lane
+    /// when its operation ended must never leave, or the client would register and the carrier open a binding nothing
+    /// holds.
+    fn purge_ended(&mut self) {
+        for entry in self.bindings.values_mut() {
+            if entry.faulted && !entry.purged {
+                entry.purged = true;
+                let session = entry.session.as_str();
+                self.outbox
+                    .retain(|message| message.1.session_id != session);
+            }
+        }
+    }
+
     fn flush(&mut self, binding: &dyn CoreBinding) {
+        self.purge_ended();
         while let Some(message) = self.outbox.pop_front() {
             match binding.send(message) {
                 Ok(()) => {}
@@ -242,8 +347,6 @@ impl State {
         for entry in self.bindings.values_mut() {
             entry.revoke();
         }
-        let mut wakers = self.wake_all();
-        self.waiters.append(&mut wakers);
     }
 
     /// Removes a sealed binding with nothing live; its slot goes back, and the lane is told it is over.
@@ -258,6 +361,7 @@ impl State {
             .collect();
         for serial in finished {
             if let Some(entry) = self.bindings.remove(&serial) {
+                let _ = entry.last.set(entry.registration());
                 self.by_session.remove(&entry.session);
                 lane.retire(&entry.session);
                 self.requests.remove(&entry.request);
@@ -316,6 +420,8 @@ impl Binding {
             live: 0,
             revoked: None,
             done,
+            last: Arc::new(OnceLock::new()),
+            purged: false,
         }
     }
 
@@ -368,9 +474,14 @@ impl Binding {
             }
             let effect = exch.effect_on_loss();
             exch.spec = None;
-            if exch.outcome.is_none() {
+            // An opening still unanswered takes the binding's end, even one that was cancelled meanwhile and not yet
+            // polled: a carrier that ended is the more telling answer. A cancel is `Cancelled`, a fault of the binding is
+            // the fault.
+            if exch.outcome.is_none() || exch.cancel_on_open {
                 exch.outcome = Some(Err(if revoked {
                     OpenFailure::CarrierLost { effect }
+                } else if code == ErrorCode::Cancelled {
+                    OpenFailure::Cancelled
                 } else {
                     OpenFailure::Fault(code)
                 }));
@@ -417,7 +528,10 @@ impl Binding {
                     });
                     exch.stage = Stage::Ended;
                 }
-                Stage::Opening => exch.dropped = true,
+                Stage::Opening => {
+                    exch.cancel_on_open = true;
+                    exch.outcome = Some(Err(OpenFailure::Cancelled));
+                }
                 Stage::Open | Stage::Closing => {
                     if let Some(machine) = exch.machine.as_mut() {
                         machine.cancel();
@@ -602,16 +716,16 @@ impl Binding {
                         stream_config(&limits.0, stream, stream::Side::Initiator, &limits.1);
                     match StreamMachine::new(config) {
                         Ok(mut machine) => {
-                            if exch.dropped {
+                            if exch.dropped || exch.cancel_on_open {
                                 machine.cancel();
                             }
                             exch.machine = Some(machine);
                             exch.reused = opened.reused;
                             exch.stage = Stage::Open;
-                            exch.outcome = Some(Ok(()));
+                            exch.decide(Ok(()));
                         }
                         Err(_) => {
-                            exch.outcome = Some(Err(OpenFailure::Fault(ErrorCode::Protocol)));
+                            exch.decide(Err(OpenFailure::Fault(ErrorCode::Protocol)));
                             exch.end = Some(ExchEnd {
                                 disposition: Disposition::Discarded,
                                 failure: Some((ErrorCode::Protocol, exch.effect_on_loss())),
@@ -626,7 +740,7 @@ impl Binding {
                         disposition: Disposition::Discarded,
                         failure: Some((failure.code, failure.effect)),
                     });
-                    exch.outcome = Some(Err(OpenFailure::Refused(failure)));
+                    exch.decide(Err(OpenFailure::Refused(failure)));
                     exch.stage = Stage::Ended;
                     self.by_stream.remove(&stream);
                 }

@@ -377,10 +377,9 @@ target: all three or none), `limit_applied` (the per-host limit in use),
 it.
 
 Admission refuses a detail that breaks these rules, as `InvalidMessage`, on
-every failure carrier (`OpenFailed`, `Failed`, `IdentityCheckFailed` and
-`Closed.failure`; a `BindRejected` already admits only two other codes): the
-failure's code must be `Capacity`, and the
-detail carries none of `helper_cause`, `pipe_kind`, `schemes` or
+every failure carrier that may carry one (`OpenFailed`, `Failed`,
+`IdentityCheckFailed` and `Closed.failure`): the failure's code must be
+`Capacity`, and the detail carries none of `helper_cause`, `pipe_kind`, `schemes` or
 `helper_budget_ms`. A server cause needs `max_per_host` (1 to `u32::MAX`) and
 `elapsed_ms` (not negative); `last_signal` is absent when a 403 that carried
 `Retry-After` ended the member; `limit_applied` is 1 to
@@ -391,6 +390,11 @@ detail carries nothing but its cause, and the failure carries no
 `retry_attempt`. An unknown cause or signal fails the whole message to decode,
 as for every enum here, so both peers of a connection must be built from the
 same version.
+
+A `BindRejected` carries no detail at all: it is one of five codes
+(`UnsupportedVersion`, `UnsupportedOperation`, `Capacity`, `InvalidRequest`,
+`Cancelled`) with `Effect::None`, and no facts and no failure detail, not even
+the capacity detail that `Capacity` carries on the other failures.
 
 For generation install `taut-proto==0.10.0` and Rust 1.96.0's rustfmt, then run
 `python3 scripts/regen.py --check`. The script generates only with the taut-proto

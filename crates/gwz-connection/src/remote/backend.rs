@@ -6,16 +6,16 @@
 //! and returns an operation whose registration is pending, answered by `bound` or `bind_rejected` or ended by the
 //! carrier; `snapshot()` is refused. Nothing here is public: callers cannot tell this backing from a local one by type.
 use super::{
-    core::{Binding, Reg, Stage, State, Waiting},
+    core::{Binding, Reg, Stage, State, Wait, Waiting},
     lane::CoreBinding,
     stream::Live,
     table::{self, OpenContext},
 };
 use crate::{
     Admission, AdmissionError, AdmitInput, AttachError, BindingId, CancelState, CarrierId,
-    Direction, Discard, EndpointSpec, ExchangeSpec, HostClosing, HostHandle, HostSnapshot,
-    OpenError, OperationEnd, Registration, Routed, Sleep, TerminalReason, binding::session_name,
-    cell::Cell, host::Backend,
+    Direction, Discard, EndpointSpec, ExchangeSpec, HostClosing, HostHandle, HostPhase,
+    HostSnapshot, OpenError, OperationEnd, Registration, Routed, Sleep, TerminalReason,
+    binding::session_name, cell::Cell, host::Backend,
 };
 use gwz_transport::{
     mux::{self, Attachment, Mux},
@@ -25,10 +25,10 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, Ordering::AcqRel},
     },
-    task::{Context, Poll, Waker},
+    task::{Context, Poll},
 };
 
 /// The core-local bounds of a carrier-backed handle and the defaults it offers the client; the client clamps `deadlines`
@@ -44,6 +44,12 @@ pub struct RemoteConfig {
     /// Streams one binding's mux holds at once (at most 1024).
     pub streams_per_binding: usize,
     pub deadlines: Deadlines,
+}
+impl RemoteConfig {
+    /// `streams_per_binding` as the binding's mux takes it.
+    pub(super) fn streams(&self) -> usize {
+        self.streams_per_binding.clamp(1, 1024)
+    }
 }
 impl Default for RemoteConfig {
     fn default() -> Self {
@@ -79,14 +85,16 @@ impl Shared {
             driver_spawned: AtomicBool::new(false),
         })
     }
-    /// Pumps, runs `f` under the state lock, pumps again, then (lock released) publishes receipts and wakes waiters.
+    /// Pumps, runs `f` under the state lock, pumps again, then (lock released) publishes receipts and wakes the waiters
+    /// whose condition now holds. A future that registered its waker inside `f` and still waits is not woken by its own
+    /// poll: only a change of the state it waits for wakes it.
     pub(super) fn with<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
         let (result, wakers, finished) = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             state.pump(&*self.binding, &self.config);
             let result = f(&mut state);
             state.pump(&*self.binding, &self.config);
-            let wakers = state.wake_all();
+            let wakers = state.ready_wakers(self.config.active_operations);
             let finished = std::mem::take(&mut state.finished);
             (result, wakers, finished)
         };
@@ -151,7 +159,12 @@ impl Future for Driver {
 impl Backend for Shared {
     /// Refusal-only: the client's pools, the hosts it is connected to, are not the core's to see.
     fn snapshot(&self) -> HostSnapshot {
-        HostSnapshot::refusal(self.binding.namespace())
+        let phase = if self.with(|state| state.lost) {
+            HostPhase::Closed
+        } else {
+            HostPhase::Open
+        };
+        HostSnapshot::refusal(self.binding.namespace(), phase)
     }
     fn check_open(&self) -> Result<(), HostClosing> {
         if self.with(|state| state.lost) {
@@ -321,7 +334,7 @@ impl RemotePermit {
     pub(crate) fn register(mut self) -> crate::Operation {
         self.held = false;
         let (shared, id, request) = (self.shared.clone(), self.id, self.request.clone());
-        let streams = shared.config.streams_per_binding.clamp(1, 1024);
+        let streams = shared.config.streams();
         let outcome = shared.with(|state| {
             state.claims.remove(&id);
             if state.lost {
@@ -349,24 +362,24 @@ impl RemotePermit {
                 return Err(TerminalReason::HostFault);
             }
             let done = Cell::new();
-            state.bindings.insert(
-                serial,
-                Binding::new(
-                    binding_id,
-                    session.clone(),
-                    request.clone(),
-                    mux,
-                    done.clone(),
-                ),
+            let binding = Binding::new(
+                binding_id,
+                session.clone(),
+                request.clone(),
+                mux,
+                done.clone(),
             );
+            let last = binding.last.clone();
+            state.bindings.insert(serial, binding);
             state.by_session.insert(session, serial);
-            Ok((serial, done))
+            Ok((serial, done, last))
         });
         match outcome {
-            Ok((serial, done)) => crate::Operation::remote(RemoteOp {
+            Ok((serial, done, last)) => crate::Operation::remote(RemoteOp {
                 shared,
                 serial,
                 done,
+                last,
             }),
             Err(reason) => crate::Operation::terminal(reason),
         }
@@ -398,25 +411,40 @@ pub(crate) struct RemoteOp {
     pub(super) shared: Arc<Shared>,
     pub(super) serial: u64,
     pub(super) done: Cell<OperationEnd>,
+    /// The registration the binding ended with, set under the state lock as the binding leaves the table.
+    last: Arc<OnceLock<Registration>>,
 }
 impl RemoteOp {
     /// Where the deferred commit stands: `Pending` until `bound` or `bind_rejected` arrives or the carrier ends.
     pub(crate) fn registration(&self) -> Registration {
         let serial = self.serial;
-        self.shared.with(|state| match state.bindings.get(&serial) {
-            Some(entry) => entry.registration(),
-            None => done_registration(&self.done),
-        })
+        self.shared
+            .with(|state| self.registration_in(state, serial))
     }
-    /// Resolves once the registration is no longer pending.
-    pub(crate) fn poll_registered(&self, cx: &mut Context<'_>) -> Poll<Registration> {
-        let registration = self.registration();
-        if registration != Registration::Pending {
-            return Poll::Ready(registration);
+    /// The registration under the lock: the binding's, or the one it left behind. It never steps back to `Pending`.
+    fn registration_in(&self, state: &State, serial: u64) -> Registration {
+        match state.bindings.get(&serial) {
+            Some(entry) => entry.registration(),
+            // A binding leaves the table only in `retire_finished`, which records its registration first.
+            None => self
+                .last
+                .get()
+                .copied()
+                .unwrap_or(Registration::NeverRegistered(TerminalReason::HostFault)),
         }
-        let waker = cx.waker().clone();
-        self.shared.with(|state| state.waiters.push(waker));
-        Poll::Pending
+    }
+    /// Resolves once the registration is no longer pending; the waker is woken when it is decided, not by this poll.
+    pub(crate) fn poll_registered(&self, cx: &mut Context<'_>) -> Poll<Registration> {
+        let serial = self.serial;
+        let waker = cx.waker();
+        self.shared.with(|state| {
+            let registration = self.registration_in(state, serial);
+            if registration == Registration::Pending {
+                state.wait_for(Wait::Registered(serial), waker);
+                return Poll::Pending;
+            }
+            Poll::Ready(registration)
+        })
     }
     pub(crate) fn cancel_handle(&self) -> RemoteCancel {
         RemoteCancel {
@@ -500,14 +528,6 @@ impl RemoteOp {
         });
     }
 }
-fn done_registration(done: &Cell<OperationEnd>) -> Registration {
-    let mut cx = Context::from_waker(Waker::noop());
-    match done.poll(&mut cx) {
-        Poll::Ready(end) => end.registration,
-        Poll::Pending => Registration::Pending,
-    }
-}
-
 /// Cancels one operation; it holds the state weakly, so it keeps nothing alive.
 #[derive(Clone)]
 pub(crate) struct RemoteCancel {
