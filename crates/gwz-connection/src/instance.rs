@@ -45,6 +45,7 @@ use crate::{
     ReuseVerdict,
     cell::{Cell, Slot},
     pump::Signal,
+    tables::InstanceTables,
 };
 use gwz_transport::pool::{
     Action, Config, ConnectionId, Error, Identity, LeaseId, MAX_EXCLUDED, PoolMachine, Request,
@@ -235,6 +236,18 @@ impl Instance {
                 next_proof: 0,
             }),
         }))
+    }
+    #[allow(dead_code, reason = "the sustained-use rows read it through the host")]
+    pub(crate) fn tables(&self) -> InstanceTables {
+        let state = self.lock();
+        InstanceTables {
+            openings: state.openings.len(),
+            authorizing: state.authorizing.len(),
+            settling: state.settling.len(),
+            connections: state.connections.len(),
+            scope_tokens: state.scope_tokens.len(),
+            requests: state.pool.outstanding_requests(),
+        }
     }
     pub(crate) fn lock(&self) -> MutexGuard<'_, InstanceState> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())

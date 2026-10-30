@@ -34,6 +34,7 @@ use crate::{
     ports::{Clock, EndpointFactory, Progress},
     pump::{self, Driver, Signal},
     safety::SharedProcessSafety,
+    tables::{InstanceTables, Tables},
 };
 use gwz_transport::{mux::Attachment, pool};
 use std::{
@@ -49,6 +50,14 @@ use std::{
     time::Duration,
 };
 
+/// How long an admission waits for its slot and its endpoint by default, in milliseconds (contract section 10).
+///
+/// Release-kind decision A (2026-10-31): the client's default is strictly below the core mux's bootstrap bound
+/// (`gwz_transport::mux::Config::bootstrap_timeout_ms`, also 5 s), so a client admission wait ends, by name, before the
+/// bootstrap bound that a core waiting on the client would also be running. The row
+/// `the_default_admission_bound_is_strictly_below_the_mux_bootstrap_bound` fails if the two ever meet.
+pub(crate) const DEFAULT_ADMISSION_BOUND_MS: u64 = 4_000;
+
 /// The finite limits of a host (contract section 10). Plain values; the defaults are the contract's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HostLimits {
@@ -63,7 +72,8 @@ pub struct HostLimits {
     /// Requests one binding may register in each of its two sessions (the bootstrap's and every exchange's): the
     /// binding's own limit, never the host's.
     pub binding_registrations: usize,
-    /// How long an admission may wait for its slot and its endpoint, in milliseconds.
+    /// How long an admission may wait for its slot and its endpoint, in milliseconds. The default is
+    /// [`DEFAULT_ADMISSION_BOUND_MS`], strictly below the core mux's bootstrap bound.
     pub admission_bound_ms: u64,
 }
 impl Default for HostLimits {
@@ -74,7 +84,7 @@ impl Default for HostLimits {
             endpoint_instances: 16,
             close_bound_ms: 5_000,
             binding_registrations: 256,
-            admission_bound_ms: 5_000,
+            admission_bound_ms: DEFAULT_ADMISSION_BOUND_MS,
         }
     }
 }
@@ -420,6 +430,31 @@ impl HostShared {
         drop(self.seal(TerminalReason::HostFault));
     }
     /// The instances the driver drives.
+    pub(crate) fn tables(&self) -> Tables {
+        let (bindings, claims, queued, active, instances) = {
+            let state = self.lock();
+            (
+                state.bindings.len(),
+                state.claims.len(),
+                state.queue.len(),
+                state.active,
+                state.instances.clone(),
+            )
+        };
+        let mut tables = Tables {
+            bindings,
+            claims,
+            queued,
+            active,
+            charged: self.charged.load(Ordering::Acquire),
+            instances: instances.len(),
+            instance: InstanceTables::default(),
+        };
+        for instance in &instances {
+            tables.instance = tables.instance.plus(instance.tables());
+        }
+        tables
+    }
     pub(crate) fn instances(&self) -> Vec<Arc<Instance>> {
         self.lock().instances.clone()
     }
@@ -815,6 +850,10 @@ impl Future for HostClose {
 )]
 pub(crate) trait Backend: Send + Sync {
     fn snapshot(&self) -> HostSnapshot;
+    /// The sizes of the host's per-operation tables, when the backing has them (a carrier-backed handle has none).
+    fn tables(&self) -> Option<Tables> {
+        None
+    }
     fn check_open(&self) -> Result<(), HostClosing>;
     fn attach_instance(self: Arc<Self>, spec: EndpointSpec) -> Result<(), AttachError>;
     fn admit(self: Arc<Self>, input: AdmitInput) -> Result<Admission, AdmissionError>;
@@ -828,6 +867,9 @@ pub(crate) trait Backend: Send + Sync {
     ) -> Routed;
 }
 impl Backend for HostShared {
+    fn tables(&self) -> Option<Tables> {
+        Some(HostShared::tables(self))
+    }
     fn snapshot(&self) -> HostSnapshot {
         let (phase, instances, bindings, active, waiting) = {
             let state = self.lock();
@@ -910,6 +952,11 @@ impl HostHandle {
     /// A handle over `backend`: the local host's, or a carrier-backed one's.
     pub(crate) fn over(backend: Arc<dyn Backend>) -> Self {
         Self { backend }
+    }
+    /// The sizes of the host's per-operation tables; `None` on a carrier-backed handle, which has none.
+    #[allow(dead_code, reason = "the sustained-use rows read it")]
+    pub(crate) fn tables(&self) -> Option<Tables> {
+        self.backend.tables()
     }
     #[allow(dead_code, reason = "the tests use it; the carrier adapter will")]
     pub(crate) fn check_open(&self) -> Result<(), HostClosing> {

@@ -31,6 +31,7 @@ mod ports;
 mod pump;
 pub mod remote;
 mod safety;
+mod tables;
 
 pub use admission::{Acquire, Admission, AdmissionPermit};
 pub use binding::{BindingId, CarrierId, Direction, Discard, Routed};
@@ -68,5 +69,6 @@ cfg_if::cfg_if! {
         mod operation_tests;
         mod pump_tests;
         mod reuse_tests;
+        mod sustained_tests;
     }
 }

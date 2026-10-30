@@ -72,6 +72,16 @@ pub(crate) fn limits() -> Limits {
     limits
 }
 
+/// The configuration of both mux halves of a binding. Everything but the limits and the registration bound is the core
+/// mux's default, including its bootstrap bound, which the host's default admission bound stays below (`host.rs`).
+pub(crate) fn mux_config(registrations: usize) -> mux::Config {
+    mux::Config {
+        limits: limits(),
+        max_requests: registrations,
+        ..Default::default()
+    }
+}
+
 /// The session identifier of a binding.
 pub(crate) fn session_name(id: BindingId) -> String {
     format!("{:032x}.{}", id.host.get(), id.serial)
@@ -99,11 +109,7 @@ impl MuxPair {
         operation: &str,
     ) -> Result<Self, Fault> {
         let session = session_name(id);
-        let config = mux::Config {
-            limits: limits(),
-            max_requests: registrations,
-            ..Default::default()
-        };
+        let config = mux_config(registrations);
         let driver = Mux::initiator(&session, config.clone()).map_err(|_| Fault::Protocol)?;
         let endpoint = Mux::endpoint(&session, route.endpoint_config(&session), config)
             .map_err(|_| Fault::Protocol)?;

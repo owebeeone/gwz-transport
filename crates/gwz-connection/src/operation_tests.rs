@@ -79,11 +79,65 @@ fn finish_a_then_b_reuses_the_idle_connection() {
         "one physical connection served both operations"
     );
     assert_eq!(rig.world.exchanges.load(Ordering::SeqCst), 2);
+    let used = rig.world.exchange_connections.lock().unwrap().clone();
+    assert_eq!(used.len(), 2);
+    assert_eq!(
+        used[0], used[1],
+        "both exchanges ran on the one fake connection"
+    );
     assert_eq!(handle.snapshot().connections.leased, 1);
     assert_eq!(handle.snapshot().connections.idle, 0);
     now(exchange.finish());
     now(b.finish());
     assert_eq!(handle.snapshot().connections.idle, 1);
+}
+
+#[test]
+fn r3_a_and_b_overlap_a_is_cancelled_b_completes_and_c_reuses_the_idle_connection() {
+    // Plan section 3, R3: creations <= 2; A Cancelled, B Ok; C reuses (`reused: true`) the connection B left idle.
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    let a = registered(&rig, &handle, "op-a", 1);
+    let b = registered(&rig, &handle, "op-b", 1);
+    let mut exchange_a = now(a.open(exchange_spec()).unwrap().wait()).unwrap();
+    let mut exchange_b = now(b.open(exchange_spec()).unwrap().wait()).unwrap();
+    assert_eq!(
+        rig.world.connects(),
+        2,
+        "A and B overlapped on two connections"
+    );
+    let (conn_a, conn_b) = {
+        let used = rig.world.exchange_connections.lock().unwrap();
+        (used[0], used[1])
+    };
+    assert_ne!(conn_a, conn_b);
+    assert_eq!(a.cancel_handle().cancel(), CancelState::Cancelled);
+    assert!(exchange_a.stream().write(b"late").is_err());
+    // B completes untouched by A's cancellation.
+    assert_eq!(exchange_b.stream().write(b"b-data").unwrap(), 6);
+    let mut buffer = [0u8; 8];
+    assert_eq!(exchange_b.stream().read(&mut buffer).unwrap(), 6);
+    assert_eq!(&buffer[..6], b"b-data");
+    assert_eq!(now(exchange_a.finish()).disposition, Disposition::Discarded);
+    assert_eq!(now(exchange_b.finish()).disposition, Disposition::Reusable);
+    assert!(now(a.finish()).cancelled);
+    assert!(!now(b.finish()).cancelled);
+    assert_eq!(rig.world.closes(), 1, "only A's connection was closed");
+    assert_eq!(handle.snapshot().connections.idle, 1);
+    assert_eq!(rig.world.connected_ids(), vec![conn_b]);
+    // C is admitted afterwards and takes B's idle connection: no third connect, and its exchange runs on conn_b.
+    let c = registered(&rig, &handle, "op-c", 1);
+    let mut exchange_c = now(c.open(exchange_spec()).unwrap().wait()).unwrap();
+    assert!(exchange_c.reused(), "C reused the idle connection");
+    assert_eq!(rig.world.connects(), 2, "no connection was made for C");
+    assert_eq!(rig.world.exchange_connections.lock().unwrap()[2], conn_b);
+    assert_eq!(exchange_c.stream().write(b"c-data").unwrap(), 6);
+    assert_eq!(exchange_c.stream().read(&mut buffer).unwrap(), 6);
+    assert_eq!(&buffer[..6], b"c-data");
+    assert_eq!(now(exchange_c.finish()).disposition, Disposition::Reusable);
+    assert!(!now(c.finish()).cancelled);
+    assert_eq!(handle.snapshot().connections.idle, 1);
+    assert_eq!(rig.world.closes(), 1);
 }
 
 #[test]
@@ -417,7 +471,8 @@ fn an_admission_that_waits_past_its_bound_times_out_and_one_at_close_fails_by_na
     let _holder = registered(&rig, &handle, "holder", 1);
     let mut waiting = handle.admit(prepared("waiting", 1)).unwrap().acquire();
     assert!(matches!(poll_once(&mut waiting), Poll::Pending));
-    rig.clock.advance(4_999);
+    let bound = HostLimits::default().admission_bound_ms;
+    rig.clock.advance(bound - 1);
     assert!(matches!(poll_once(&mut waiting), Poll::Pending));
     rig.clock.advance(1);
     assert!(matches!(

@@ -201,6 +201,14 @@ cfg_if::cfg_if! {
                     Kind::Terminal(_) | Kind::Remote(_) => panic!("only a local operation has an instance"),
                 }
             }
+            /// A weak reference to the binding: once the operation and everything of it has ended it upgrades to nothing,
+            /// which is how a row shows that no table, receipt or lease keeps a retired binding (or its muxes) alive.
+            pub(crate) fn binding_weak_for_test(&self) -> std::sync::Weak<BindingShared> {
+                match &self.kind {
+                    Kind::Live { binding, .. } => Arc::downgrade(binding),
+                    Kind::Terminal(_) | Kind::Remote(_) => panic!("only a local operation has a binding"),
+                }
+            }
             /// Sets the binding's cancelled flag as a rejected frame does (`host.rs` `route`), without the sweep that
             /// `cancel_binding` makes: what a row needs to show that a retry is refused for a cancelled binding.
             pub(crate) fn mark_cancelled_for_test(&self) {

@@ -35,3 +35,22 @@ jobs:
         run: cargo +1.95.0 test --locked --features unstable-sequenced
       - name: Verify the standalone package
         run: cargo +1.95.0 package --locked
+
+  # The connection owner's own tests, in the crate alone. The owner-contracts job's `cargo test` runs the root package only
+  # (the workspace root is a package, so no `--workspace`), so it never reaches crates/gwz-connection; this job does, on the
+  # three platforms of the release matrix (plan step 1.8, contract section 13.1-2).
+  connection-crate:
+    name: gwz-connection (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-2022]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install the MSRV toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Test the connection crate alone at the MSRV
+        run: cargo +1.95.0 test --locked -p gwz-connection

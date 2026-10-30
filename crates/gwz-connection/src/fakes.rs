@@ -219,6 +219,8 @@ pub(crate) struct FakeWorld {
     pub(crate) connects: AtomicUsize,
     pub(crate) closes: AtomicUsize,
     pub(crate) exchanges: AtomicUsize,
+    /// The connection each exchange started on, in order.
+    pub(crate) exchange_connections: Mutex<Vec<ConnectionId>>,
     /// The next exchange to finish reports that its connection cannot be reused.
     pub(crate) discard_next: AtomicBool,
     /// Connects complete only on `complete_connects`, as a real worker's do.
@@ -261,6 +263,7 @@ impl FakeWorld {
             connects: AtomicUsize::new(0),
             closes: AtomicUsize::new(0),
             exchanges: AtomicUsize::new(0),
+            exchange_connections: Mutex::new(Vec::new()),
             discard_next: AtomicBool::new(false),
             asynchronous: AtomicBool::new(false),
             hold_finish: AtomicBool::new(false),
@@ -522,7 +525,7 @@ impl EndpointAdapter for FakeAdapter {
     }
     fn start_exchange(
         &mut self,
-        _connection: ConnectionId,
+        connection: ConnectionId,
         spec: &ExchangeSpec,
         auth: &AuthContext,
     ) -> io::Result<Box<dyn ExchangeIo>> {
@@ -536,6 +539,11 @@ impl EndpointAdapter for FakeAdapter {
             return Err(io::ErrorKind::NotConnected.into());
         }
         self.world.exchanges.fetch_add(1, Ordering::SeqCst);
+        self.world
+            .exchange_connections
+            .lock()
+            .unwrap()
+            .push(connection);
         *self.world.last_spec.lock().unwrap() = Some((spec.service(), spec.path().into()));
         self.world
             .contexts

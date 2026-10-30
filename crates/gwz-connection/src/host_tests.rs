@@ -4,12 +4,13 @@ use crate::fakes::{
     FakeSafety, Rig, auth, exchange_spec, https_spec, now, poll_once, prepared_with, profile, spec,
 };
 use crate::{
-    AttachError, AuthContext, AuthScope, BuildError, CleanupDomain, CleanupDomainOwner,
-    CleanupStatus, CleanupTicket, ConfigReason, DomainClose, EndpointProfile, EndpointRoute,
-    EndpointSpec, HostClose, HostClosing, HostHandle, HostLimits, HostOwner, HostPhase,
-    OpenFailure, Operation, OperationPolicy, PreparedOperation, TicketStatus,
+    AttachError, AuthContext, AuthScope, BindingId, BuildError, CleanupDomain, CleanupDomainOwner,
+    CleanupStatus, CleanupTicket, ConfigReason, Direction, Discard, DomainClose, EndpointProfile,
+    EndpointRoute, EndpointSpec, HostClose, HostClosing, HostHandle, HostLimits, HostOwner,
+    HostPhase, OpenFailure, Operation, OperationPolicy, PreparedOperation, Registration, Routed,
+    TicketStatus,
 };
-use gwz_transport::protocol::Disposition;
+use gwz_transport::protocol::{Disposition, Envelope, MessageKind};
 use std::{
     sync::{Arc, atomic::Ordering},
     task::Poll,
@@ -49,6 +50,24 @@ fn a_built_host_is_open_and_empty_and_names_its_namespace() {
     assert_eq!(snapshot.retained_cleanup, 0);
     let (_other, second) = rig.host(42);
     assert_ne!(handle.snapshot().namespace, second.snapshot().namespace);
+}
+
+#[test]
+fn the_default_admission_bound_is_strictly_below_the_mux_bootstrap_bound() {
+    // Release-kind decision A (2026-10-31): the client's admission wait must end before the core mux's bootstrap bound.
+    // Both are read live, so a change to either one that makes them meet or cross fails here.
+    let admission = HostLimits::default().admission_bound_ms;
+    let bootstrap = gwz_transport::mux::Config::default().bootstrap_timeout_ms;
+    assert_eq!(admission, crate::host::DEFAULT_ADMISSION_BOUND_MS);
+    assert!(
+        admission < bootstrap,
+        "admission bound {admission} ms is not below the mux bootstrap bound {bootstrap} ms"
+    );
+    // The bindings this crate makes use that same default bootstrap bound (binding.rs `mux::Config`).
+    assert_eq!(
+        crate::binding::mux_config(1).bootstrap_timeout_ms,
+        bootstrap
+    );
 }
 
 #[test]
@@ -518,6 +537,122 @@ fn no_operations_auth_context_outlives_it_in_the_host() {
     assert!(!one_exchange(&handle, "op-2", 1, context()));
     assert_eq!(handle.snapshot().connections.idle, 1);
     assert_eq!(Arc::strong_count(&provider), 1, "the finished operation");
+}
+
+/// One operation with one exchange (HTTPS or SSH) over profile `profile` and context `context`, finished cleanly, whether
+/// its exchange reused a connection. `previous` is the binding and session of the operation before it: that operation's
+/// late frames are sent to this one's binding, and must be discarded with no record made anywhere.
+fn r4_operation(
+    handle: &HostHandle,
+    profile: u8,
+    context: AuthContext,
+    https: bool,
+    previous: &mut Option<(BindingId, String)>,
+) -> bool {
+    let operation = registered_with(handle, "op", profile, context);
+    let Registration::Registered(id) = operation.registration() else {
+        panic!("not registered");
+    };
+    if let Some((old_id, old_session)) = previous.take() {
+        let late = (
+            "x".to_string(),
+            Envelope {
+                version: 2,
+                session_id: old_session,
+                stream_id: 5,
+                kind: MessageKind::Data,
+                ..Default::default()
+            },
+        );
+        let before = handle.snapshot();
+        for direction in [Direction::ToEndpoint, Direction::ToDriver] {
+            assert_eq!(
+                handle.route(handle.carrier(), id, direction, &late),
+                Routed::Discarded(Discard::WrongSession),
+                "the old operation's event does not reach the new one"
+            );
+            assert_eq!(
+                handle.route(handle.carrier(), old_id, direction, &late),
+                Routed::Discarded(Discard::Retired)
+            );
+        }
+        assert_eq!(handle.snapshot(), before);
+        assert_eq!(operation.binding_streams(), (0, 0));
+    }
+    let session = operation.binding_session();
+    let spec = if https { https_spec() } else { exchange_spec() };
+    let exchange = now(operation.open(spec).unwrap().wait()).unwrap();
+    let reused = exchange.reused();
+    assert_eq!(now(exchange.finish()).disposition, Disposition::Reusable);
+    now(operation.finish());
+    *previous = Some((id, session));
+    reused
+}
+
+#[test]
+fn r4_a_changed_identity_configuration_or_helper_environment_reuses_nothing_and_no_stale_event_crosses()
+ {
+    // Plan section 3, R4. The core folds HOME, the agent, the CA file and the proxy into the endpoint profile (one profile
+    // kind each here) and the helper environment, GIT_CONFIG_GLOBAL and GH_TOKEN, into the operation's authentication
+    // context (one HTTPS scope each). After each change the first operation reuses nothing, reuse then resumes under the
+    // new value, the old value's idle connection is untouched, and no event of the old operation reaches the new one.
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    let mut previous = None;
+    let ssh = |profile, previous: &mut Option<(BindingId, String)>| {
+        r4_operation(&handle, profile, auth(1, "a"), false, previous)
+    };
+    assert!(!ssh(1, &mut previous), "the first operation connects");
+    assert!(ssh(1, &mut previous), "an unchanged configuration reuses");
+    for (changed, profile) in [("HOME", 2), ("agent", 3), ("CA file", 4), ("proxy", 5)] {
+        assert!(
+            !ssh(profile, &mut previous),
+            "{changed} changed: the first operation after it reuses nothing"
+        );
+        assert!(
+            ssh(profile, &mut previous),
+            "{changed}: reuse resumes under the new value"
+        );
+        assert!(
+            ssh(1, &mut previous),
+            "{changed}: the old value's idle connection is untouched"
+        );
+    }
+    assert_eq!(
+        handle.snapshot().endpoint_instances,
+        5,
+        "one instance per profile"
+    );
+    assert_eq!(rig.world.connects(), 5);
+    let https = |scope: u8, previous: &mut Option<(BindingId, String)>| {
+        r4_operation(&handle, 1, auth(scope, "env"), true, previous)
+    };
+    assert!(!https(1, &mut previous));
+    for (changed, scope) in [("GIT_CONFIG_GLOBAL", 2), ("GH_TOKEN", 3)] {
+        assert!(
+            !https(scope, &mut previous),
+            "{changed} changed: the first operation after it reuses nothing"
+        );
+        assert!(
+            https(scope, &mut previous),
+            "{changed}: reuse resumes under the new value"
+        );
+        assert!(
+            https(1, &mut previous),
+            "{changed}: the old value's idle connection is untouched"
+        );
+    }
+    assert_eq!(
+        rig.world.connects(),
+        8,
+        "five SSH profiles and three HTTPS scopes, each connected once"
+    );
+    assert_eq!(
+        rig.world.closes(),
+        0,
+        "no change closed another value's connection"
+    );
+    assert_eq!(handle.snapshot().bindings, 0);
 }
 
 #[test]
