@@ -84,7 +84,7 @@ impl CleanupTicket {
             sleep: self.0.clock.sleep_until(deadline),
         }
     }
-    fn confirm(&self) {
+    pub(crate) fn confirm(&self) {
         let wakers = {
             let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
             state.confirmed = true;

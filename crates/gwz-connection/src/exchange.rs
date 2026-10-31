@@ -15,7 +15,7 @@
 use crate::{
     CancelState, ExchangeEnd, ExchangeIo, ExchangeSpec, OpenError, OpenFailure, OperationEnd,
     Registration,
-    binding::{BindingShared, closing_reason},
+    binding::{BindingShared, Cleanups, closing_reason},
     cell::{Cell, Slot},
     host::HostShared,
     instance::{Instance, Opened, cancel_authorizing},
@@ -489,6 +489,7 @@ impl Future for LocalOpenWait {
                         lease: Some(LeaseGuard {
                             instance: binding.instance.clone(),
                             lease: Some(lease),
+                            cleanups: binding.cleanups.clone(),
                         }),
                         reused,
                         _live: Some(live),
@@ -510,19 +511,24 @@ impl Drop for LocalOpenWait {
 struct LeaseGuard {
     instance: Arc<Instance>,
     lease: Option<LeaseId>,
+    /// The operation's record of disposals left unconfirmed, which a release that leaves one adds to.
+    cleanups: Arc<Cleanups>,
 }
 impl LeaseGuard {
     fn release(mut self, disposition: Disposition) {
-        if let Some(lease) = self.lease.take() {
-            self.instance.release(lease, disposition);
+        self.give_back(disposition);
+    }
+    fn give_back(&mut self, disposition: Disposition) {
+        if let Some(lease) = self.lease.take()
+            && let Some(ticket) = self.instance.release(lease, disposition)
+        {
+            self.cleanups.note(ticket);
         }
     }
 }
 impl Drop for LeaseGuard {
     fn drop(&mut self) {
-        if let Some(lease) = self.lease.take() {
-            self.instance.release(lease, Disposition::Discarded);
-        }
+        self.give_back(Disposition::Discarded);
     }
 }
 
@@ -638,13 +644,18 @@ impl Exchange {
                 let (Some(mut io), Some(mut lease)) = (self.stream.take_io(), lease.take()) else {
                     return ExchangeFinish(FinishKind::Local(Cell::ready(discarded())));
                 };
+                let id = lease.lease.take().expect("a live lease");
                 if cancelled {
                     io.abort();
-                    lease.release(Disposition::Discarded);
-                    return ExchangeFinish(FinishKind::Local(Cell::ready(discarded())));
+                    return ExchangeFinish(FinishKind::Local(
+                        lease.instance.discard(id, &lease.cleanups),
+                    ));
                 }
-                let id = lease.lease.take().expect("a live lease");
-                ExchangeFinish(FinishKind::Local(lease.instance.settle(io, id)))
+                ExchangeFinish(FinishKind::Local(lease.instance.settle(
+                    io,
+                    id,
+                    lease.cleanups.clone(),
+                )))
             }
         }
     }

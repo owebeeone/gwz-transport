@@ -49,6 +49,7 @@ impl Case {
             total: 1 + random.below(8),
             max_requests: 1 + random.below(16),
             idle_timeout_ms: 10 + random.below(100) as u64,
+            max_age_ms: 86_400_000,
             allocation_timeout_ms: 100,
             connect_timeout_ms: 80,
             interaction_timeout_ms: 100,

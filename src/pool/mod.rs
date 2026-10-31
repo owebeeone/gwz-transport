@@ -39,6 +39,9 @@ pub struct Config {
     pub total: usize,
     pub max_requests: usize,
     pub idle_timeout_ms: u64,
+    /// The longest a connection is kept from its establishment (contract section 10: 10 minutes, checked when it is
+    /// released and when it would be leased, never by cutting off an active exchange).
+    pub max_age_ms: u64,
     pub allocation_timeout_ms: u64,
     pub connect_timeout_ms: u64,
     pub interaction_timeout_ms: u64,
@@ -52,6 +55,7 @@ impl Default for Config {
             total: 256,
             max_requests: 1024,
             idle_timeout_ms: 60_000,
+            max_age_ms: 600_000,
             allocation_timeout_ms: 30_000,
             connect_timeout_ms: 30_000,
             interaction_timeout_ms: 120_000,
@@ -64,6 +68,7 @@ impl Config {
         if !Capacity::from(self).valid()
             || [
                 self.idle_timeout_ms,
+                self.max_age_ms,
                 self.allocation_timeout_ms,
                 self.interaction_timeout_ms,
                 self.cleanup_timeout_ms,
@@ -345,6 +350,8 @@ impl std::error::Error for Error {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CloseReason {
     IdleExpired,
+    /// The connection outlived `Config::max_age_ms`.
+    AgeExpired,
     Evicted,
     Discarded,
     Unproven,

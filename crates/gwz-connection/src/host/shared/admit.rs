@@ -2,7 +2,7 @@
 //! slots, and the bindings a host registers and routes to.
 use super::{Claim, HostShared, Waiter};
 use crate::{
-    Admission, AdmissionError, CleanupStatus, Direction, PreparedOperation,
+    Admission, AdmissionError, Direction, PreparedOperation,
     binding::{BindingId, BindingShared, CarrierId, Discard, Routed},
     host::HostPhase,
     operation::{OperationEnd, Registration, TerminalReason},
@@ -205,7 +205,7 @@ impl HostShared {
         }
         binding.done.set(OperationEnd {
             registration: Registration::Registered(binding.id),
-            cleanup: CleanupStatus::Complete,
+            cleanup: binding.cleanups.status(),
             exchanges_opened: binding.opened.load(Acquire),
             cancelled: binding.cancelled.load(Acquire),
             revoked: None,

@@ -22,6 +22,7 @@
 mod admission;
 mod binding;
 mod cell;
+mod disposal;
 mod domain;
 mod exchange;
 mod host;
@@ -66,6 +67,7 @@ cfg_if::cfg_if! {
         mod domain_tests;
         mod fakes;
         mod host_tests;
+        mod lifecycle_tests;
         mod operation_tests;
         mod pump_tests;
         mod reuse_tests;

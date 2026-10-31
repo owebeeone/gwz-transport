@@ -69,11 +69,23 @@ impl PoolMachine {
         for (id, error) in expired {
             let _ = self.fail_request(id, error, CloseReason::Cancelled);
         }
-        let idle: Vec<_> = self.entries.iter().filter_map(|(id, entry)| {
-            matches!(entry.state, State::Idle { since } if self.now >= since.saturating_add(self.config.idle_timeout_ms)).then_some(*id)
-        }).collect();
-        for id in idle {
-            self.start_closing(id, CloseReason::IdleExpired);
+        let idle: Vec<_> = self
+            .entries
+            .iter()
+            .filter_map(|(id, entry)| match entry.state {
+                State::Idle { since }
+                    if self.now >= since.saturating_add(self.config.idle_timeout_ms) =>
+                {
+                    Some((*id, CloseReason::IdleExpired))
+                }
+                State::Idle { .. } if aged(self.now, entry.born, self.config.max_age_ms) => {
+                    Some((*id, CloseReason::AgeExpired))
+                }
+                _ => None,
+            })
+            .collect();
+        for (id, reason) in idle {
+            self.start_closing(id, reason);
         }
         self.lapse_holds();
         self.schedule();
@@ -122,7 +134,11 @@ impl PoolMachine {
             .entries
             .values()
             .filter_map(|entry| match &entry.state {
-                State::Idle { since } => Some(since.saturating_add(self.config.idle_timeout_ms)),
+                State::Idle { since } => Some(
+                    since
+                        .saturating_add(self.config.idle_timeout_ms)
+                        .min(entry.born.saturating_add(self.config.max_age_ms)),
+                ),
                 State::Opening {
                     cancel: Some(cleanup),
                     ..

@@ -30,6 +30,12 @@ pub(super) struct Entry {
     /// leased from idle so that a lease given back unused
     /// (`release_unused`) restores it instead of restarting the idle clock.
     pub idle_since: Option<u64>,
+    /// When the connection was established (the pool's clock), which `Config::max_age_ms` counts from.
+    pub born: u64,
+}
+/// Whether a connection established at `born` has outlived `max_age_ms` at `now`.
+pub(super) fn aged(now: u64, born: u64, max_age_ms: u64) -> bool {
+    now >= born.saturating_add(max_age_ms)
 }
 pub(super) enum State {
     Opening {

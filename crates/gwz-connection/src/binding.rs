@@ -7,7 +7,8 @@
 //! link). After the Bind/Bound bootstrap the muxes carry registration and cancellation; stream data crosses the adapter's
 //! `ExchangeIo` until the ordered-stream seam of contract section 6.1 exists in gwz-transport.
 use crate::{
-    AuthContext, EndpointRoute, HostNamespace, OperationEnd,
+    AuthContext, CleanupStatus, CleanupTicket, EndpointRoute, HostNamespace, OperationEnd,
+    TicketStatus,
     cell::Cell,
     instance::{Instance, InstanceHold},
     operation::TerminalReason,
@@ -163,6 +164,35 @@ fn fault(error: mux::Error) -> Fault {
     }
 }
 
+/// The tickets of the disposals that an operation's exchanges left unconfirmed when they ended (contract section 5: a
+/// terminal receipt states its cleanup). Bounded: one ticket per connection still closing, and a confirmed one is
+/// dropped at the next note.
+#[derive(Default)]
+pub(crate) struct Cleanups(Mutex<Vec<CleanupTicket>>);
+impl Cleanups {
+    pub(crate) fn note(&self, ticket: CleanupTicket) {
+        let mut tickets = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        tickets.retain(|known| known.status() == TicketStatus::Pending);
+        if ticket.status() == TicketStatus::Pending
+            && !tickets
+                .iter()
+                .any(|known| known.generation() == ticket.generation())
+        {
+            tickets.push(ticket);
+        }
+    }
+    /// `Pending` with the first disposal still unconfirmed, or `Complete`.
+    pub(crate) fn status(&self) -> CleanupStatus {
+        let tickets = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        tickets
+            .iter()
+            .find(|ticket| ticket.status() == TicketStatus::Pending)
+            .map_or(CleanupStatus::Complete, |ticket| {
+                CleanupStatus::Pending(ticket.clone())
+            })
+    }
+}
+
 /// What the host table and the operation both hold for one registered binding.
 pub(crate) struct BindingShared {
     pub(crate) id: BindingId,
@@ -188,6 +218,8 @@ pub(crate) struct BindingShared {
     pub(crate) opened: AtomicU64,
     pub(crate) next_exchange: AtomicU64,
     pub(crate) done: Cell<OperationEnd>,
+    /// The disposals its exchanges left unconfirmed, which its end states.
+    pub(crate) cleanups: Arc<Cleanups>,
     /// Held for the binding's life: the retained-input charge goes back when it does.
     pub(crate) _charge: crate::host::ChargeGuard,
 }

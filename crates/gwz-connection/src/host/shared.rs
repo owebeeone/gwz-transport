@@ -198,7 +198,7 @@ impl HostShared {
                 instance.pump(&mut state);
             }
             instance.fail_in_flight(reason);
-            if let Some(adapter) = instance.lock().adapter.take() {
+            if let Some(adapter) = instance.take_adapter() {
                 adapters.push(adapter);
             }
             instance.wake_waiters();

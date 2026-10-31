@@ -10,7 +10,7 @@
 //! or, if the host or domain closed first, yields a terminal operation that never registered.
 use crate::{
     AdmissionError, AttachError, BindingId, EndpointSpec, Operation, PreparedOperation,
-    binding::{BindingShared, CarrierId, MuxPair, session_name},
+    binding::{BindingShared, CarrierId, Cleanups, MuxPair, session_name},
     cell::Cell,
     host::{ChargeGuard, HostShared, Slot},
     operation::TerminalReason,
@@ -199,6 +199,7 @@ impl Future for LocalAcquire {
             opened: AtomicU64::new(0),
             next_exchange: AtomicU64::new(0),
             done: Cell::new(),
+            cleanups: Arc::new(Cleanups::default()),
             _charge: charge,
         });
         Poll::Ready(Ok(LocalPermit {

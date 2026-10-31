@@ -188,7 +188,8 @@ impl PoolMachine {
         ) {
             return Err(Error::WrongState);
         }
-        if disposition == Disposition::Reusable && entry.reusable && !self.stopped {
+        let outlived = aged(self.now, entry.born, self.config.max_age_ms);
+        if disposition == Disposition::Reusable && entry.reusable && !outlived && !self.stopped {
             let since = since.unwrap_or(self.now);
             entry.owner = None;
             entry.idle_since = None;
@@ -196,6 +197,8 @@ impl PoolMachine {
         } else {
             let reason = if !entry.reusable {
                 CloseReason::Unproven
+            } else if outlived && disposition == Disposition::Reusable {
+                CloseReason::AgeExpired
             } else {
                 CloseReason::Discarded
             };
@@ -234,6 +237,29 @@ impl PoolMachine {
         self.schedule();
         self.touch();
         Ok(())
+    }
+    /// The host's clock saw a suspend or a wall-clock jump (`Clock::epoch` changed; contract section 10): every idle
+    /// connection is retired now, as its idle time can no longer be trusted, and is disposed by the host as any other.
+    /// Leased and connecting ones are not cut off: their deadlines count the pool's own clock, which the host sets.
+    /// Returns how many it retired.
+    pub fn expire_idle(&mut self) -> usize {
+        let idle: Vec<_> = self
+            .entries
+            .iter()
+            .filter_map(|(id, entry)| matches!(entry.state, State::Idle { .. }).then_some(*id))
+            .collect();
+        for id in &idle {
+            self.start_closing(*id, CloseReason::IdleExpired);
+        }
+        self.schedule();
+        idle.len()
+    }
+    /// Whether `connection` is being closed: the host has released or lost it and the adapter has not yet confirmed
+    /// its disposal (`closed`). A connection the pool no longer holds is not closing.
+    pub fn is_closing(&self, connection: ConnectionId) -> bool {
+        self.entries
+            .get(&connection)
+            .is_some_and(|entry| matches!(entry.state, State::Closing { .. }))
     }
     pub fn shutdown(&mut self) {
         self.stop(Error::Shutdown, CloseReason::Shutdown);

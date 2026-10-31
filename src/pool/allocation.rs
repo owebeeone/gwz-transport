@@ -141,6 +141,7 @@ impl PoolMachine {
                 reusable: false,
                 owner: Some(request.owner.clone()),
                 idle_since: None,
+                born: self.now,
                 state: State::Opening {
                     request: Some(id),
                     clock: None,
@@ -297,6 +298,7 @@ impl PoolMachine {
                         Ok(lease) => {
                             let entry = self.entries.get_mut(&connection).expect("opening entry");
                             entry.reusable = proof.is_some();
+                            entry.born = self.now;
                             entry.state = State::Leased {
                                 lease,
                                 request: Some(id),

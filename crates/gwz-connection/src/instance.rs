@@ -40,10 +40,12 @@
 //! deadline (`AllocationTimeout`, which the driver wakes for); the command tells the adapter how much of the deadline
 //! is left. A binding that was cancelled asks the pool for nothing more.
 use crate::{
-    AuthContext, AuthScope, BindingId, Clock, Completion, ConnectCommand, EndpointAdapter,
-    EndpointProfile, ExchangeEnd, ExchangeIo, ExchangeSpec, OpenFailure, ProofId, ReuseCommand,
-    ReuseVerdict,
+    AuthContext, AuthScope, BindingId, CleanupStatus, CleanupTicket, Clock, Completion,
+    ConnectCommand, EndpointAdapter, EndpointProfile, ExchangeEnd, ExchangeIo, ExchangeSpec,
+    OpenFailure, ProofId, ReuseCommand, ReuseVerdict, TicketStatus,
+    binding::Cleanups,
     cell::{Cell, Slot},
+    disposal::Disposing,
     pump::Signal,
     tables::InstanceTables,
 };
@@ -95,6 +97,8 @@ struct Setup {
     served: bool,
     /// The binding that last leased it, once one has.
     lessee: Option<BindingId>,
+    /// The ticket of its disposal, once a receipt had to wait for it: confirmed when the adapter reports `Closed`.
+    closing: Option<CleanupTicket>,
 }
 /// An opening holding a fitting lease whose reuse proof for its binding is running: the proof the host minted for it,
 /// which only a completion naming it can end.
@@ -108,10 +112,26 @@ struct Settling {
     io: Box<dyn ExchangeIo>,
     lease: LeaseId,
     end: Cell<ExchangeEnd>,
+    /// The exchange's operation's record of disposals left unconfirmed.
+    cleanups: Arc<Cleanups>,
+}
+/// A finished exchange whose connection is closing: its receipt is set when the adapter confirms the disposal
+/// (`Complete`) or, if it has not by the cleanup bound, as `Pending` with the disposal's ticket.
+struct Ending {
+    ticket: CleanupTicket,
+    deadline: u64,
+    disposition: Disposition,
+    end: Cell<ExchangeEnd>,
 }
 pub(crate) struct InstanceState {
     pub(crate) adapter: Option<Box<dyn EndpointAdapter>>,
     pub(crate) pool: PoolMachine,
+    clock: Arc<dyn Clock>,
+    /// The clock's epoch at the last pass: a change is a suspend or a wall-clock jump (contract section 10).
+    epoch: u64,
+    /// The pool's cleanup bound, which a receipt waits for a disposal.
+    cleanup_ms: u64,
+    ending: Vec<Ending>,
     openings: Vec<Pending>,
     authorizing: Vec<Authorizing>,
     settling: Vec<Settling>,
@@ -126,6 +146,82 @@ pub(crate) struct InstanceState {
     next_proof: u64,
 }
 impl InstanceState {
+    /// The adapter, for disposal elsewhere, which confirms the unconfirmed tickets of this instance's connections when
+    /// it is done: from then on no pass of this instance reads the adapter's completions.
+    fn take_adapter(&mut self) -> Option<Box<dyn EndpointAdapter>> {
+        let tickets = self
+            .connections
+            .values()
+            .filter_map(|setup| setup.closing.clone())
+            .filter(|ticket| ticket.status() == TicketStatus::Pending)
+            .collect();
+        self.adapter
+            .take()
+            .map(|adapter| Disposing::wrap(adapter, tickets))
+    }
+    /// The ticket for the disposal of `connection` if it is still closing, which the adapter confirms by `Closed`; none
+    /// when the pool no longer holds it or the adapter has already disposed of it.
+    fn closing_ticket(&mut self, connection: ConnectionId) -> Option<CleanupTicket> {
+        if !self.pool.is_closing(connection) {
+            return None;
+        }
+        let setup = self.connections.get_mut(&connection)?;
+        let clock = &self.clock;
+        Some(
+            setup
+                .closing
+                .get_or_insert_with(|| CleanupTicket::new(connection.sequence(), clock.clone()))
+                .clone(),
+        )
+    }
+    /// Sets the receipt of a finished exchange whose lease was just released: at once if its connection stays, else
+    /// when its disposal is confirmed or the cleanup bound passes. `cleanups` is its operation's record.
+    fn report(
+        &mut self,
+        connection: ConnectionId,
+        disposition: Disposition,
+        end: Cell<ExchangeEnd>,
+        cleanups: &Cleanups,
+    ) {
+        match self.closing_ticket(connection) {
+            None => end.set(ExchangeEnd {
+                disposition,
+                cleanup: CleanupStatus::Complete,
+                failure: None,
+            }),
+            Some(ticket) => {
+                cleanups.note(ticket.clone());
+                let deadline = self.clock.now().get().saturating_add(self.cleanup_ms);
+                self.ending.push(Ending {
+                    ticket,
+                    deadline,
+                    disposition,
+                    end,
+                });
+            }
+        }
+    }
+    /// Sets the receipts whose disposal is confirmed, and those past the cleanup bound (`all`: every one, as the
+    /// instance stops) as pending on their ticket.
+    fn resolve_ending(&mut self, all: bool) {
+        let now = self.clock.now().get();
+        self.ending.retain(|item| {
+            let confirmed = item.ticket.status() == TicketStatus::Confirmed;
+            if !(confirmed || all || now >= item.deadline) {
+                return true;
+            }
+            item.end.set(ExchangeEnd {
+                disposition: item.disposition,
+                cleanup: if confirmed {
+                    CleanupStatus::Complete
+                } else {
+                    CleanupStatus::Pending(item.ticket.clone())
+                },
+                failure: None,
+            });
+            false
+        });
+    }
     /// The pool identity of a request for `key` and `identity` from an operation whose context has `scope`: HTTPS
     /// requests are scoped, everything else is unchanged.
     fn pool_identity(
@@ -233,11 +329,12 @@ impl Instance {
         driver: Arc<Signal>,
     ) -> Result<Arc<Self>, Error> {
         let config = ceilings();
+        let epoch = clock.epoch();
         Ok(Arc::new(Self {
             profile,
             holds: AtomicUsize::new(0),
             last_used: AtomicU64::new(0),
-            clock,
+            clock: clock.clone(),
             allocation_ms: config.allocation_timeout_ms,
             wakes: Arc::new(Wakes {
                 waiters: Mutex::new(Vec::new()),
@@ -245,6 +342,10 @@ impl Instance {
             }),
             state: Mutex::new(InstanceState {
                 adapter: Some(adapter),
+                epoch,
+                cleanup_ms: config.cleanup_timeout_ms,
+                clock,
+                ending: Vec::new(),
                 pool: PoolMachine::new(config)?,
                 openings: Vec::new(),
                 authorizing: Vec::new(),
@@ -301,7 +402,14 @@ impl Instance {
         let mut state = self.lock();
         state.pool.shutdown();
         self.pump(&mut state);
-        state.adapter.take()
+        // The adapter goes for disposal elsewhere, so no pass of this instance will confirm what waits on it.
+        state.resolve_ending(true);
+        state.take_adapter()
+    }
+    /// Takes the adapter for disposal, which confirms the tickets of the receipts stated while it was still the
+    /// instance's (`take_adapter` on the state).
+    pub(crate) fn take_adapter(&self) -> Option<Box<dyn EndpointAdapter>> {
+        self.lock().take_adapter()
     }
     pub(crate) fn lock(&self) -> MutexGuard<'_, InstanceState> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
@@ -339,10 +447,11 @@ impl Instance {
             .iter()
             .map(|item| item.pending.deadline)
             .min();
-        match (state.pool.next_deadline(), proofs) {
-            (Some(pool), Some(proofs)) => Some(pool.min(proofs)),
-            (pool, proofs) => pool.or(proofs),
-        }
+        let receipts = state.ending.iter().map(|item| item.deadline).min();
+        [state.pool.next_deadline(), proofs, receipts]
+            .into_iter()
+            .flatten()
+            .min()
     }
     /// One pass of the driver: everything the adapter reported, the pool's actions and the in-flight work.
     pub(crate) fn drive(&self) {
@@ -352,9 +461,19 @@ impl Instance {
         }
         self.wake_waiters();
     }
+    /// A suspend or a wall-clock jump (the clock's epoch moved) makes every idle entry's age untrustworthy: they are
+    /// retired before anything is leased (contract section 10). The clock is read outside the pool's transition.
+    fn observe_epoch(&self, state: &mut InstanceState) {
+        let epoch = self.clock.epoch();
+        if epoch != state.epoch {
+            state.epoch = epoch;
+            state.pool.expire_idle();
+        }
+    }
     /// Carries the pool's actions to the adapter, the adapter's completions to the pool, leases to waiting openings
     /// and confirmed ends to the pool, until none of them has more.
     pub(crate) fn pump(&self, state: &mut InstanceState) {
+        self.observe_epoch(state);
         state.pool.advance(self.clock.now().get());
         let waker = Waker::from(self.wakes.clone());
         let mut cx = Context::from_waker(&waker);
@@ -392,7 +511,14 @@ impl Instance {
                     };
                 }
                 for connection in ended {
-                    state.connections.remove(&connection);
+                    // The disposal receipts wait for is confirmed here, whatever ended the connection.
+                    if let Some(ticket) = state
+                        .connections
+                        .remove(&connection)
+                        .and_then(|setup| setup.closing)
+                    {
+                        ticket.confirm();
+                    }
                 }
             }
             // An opening's deadline passes whatever its proof is doing, and a verdict after it serves nothing.
@@ -406,6 +532,7 @@ impl Instance {
                 break;
             }
         }
+        state.resolve_ending(false);
         state.prune_scope_tokens();
     }
     /// Queues an opening's request and pumps once, so that an exchange the pool can lease at once is started now.
@@ -424,6 +551,7 @@ impl Instance {
             // The pool's clock is brought to now first, so the deadline recorded here is the one the pool gives the
             // request, and an idle connection whose time is up is not offered to it.
             let now = self.clock.now().get();
+            self.observe_epoch(&mut state);
             state.pool.advance(now);
             let deadline =
                 now.saturating_add(request.allocation_timeout_ms.unwrap_or(self.allocation_ms));
@@ -450,7 +578,12 @@ impl Instance {
         Ok(slot)
     }
     /// Hands a finished exchange to the pump, which releases its lease once the adapter confirms how it ended.
-    pub(crate) fn settle(&self, io: Box<dyn ExchangeIo>, lease: LeaseId) -> Cell<ExchangeEnd> {
+    pub(crate) fn settle(
+        &self,
+        io: Box<dyn ExchangeIo>,
+        lease: LeaseId,
+        cleanups: Arc<Cleanups>,
+    ) -> Cell<ExchangeEnd> {
         let end = Cell::new();
         {
             let mut state = self.lock();
@@ -458,20 +591,42 @@ impl Instance {
                 io,
                 lease,
                 end: end.clone(),
+                cleanups,
             });
             self.pump(&mut state);
         }
         self.pumped();
         end
     }
-    /// Gives a lease back and lets the pool act on it.
-    pub(crate) fn release(&self, lease: LeaseId, disposition: Disposition) {
+    /// Gives a lease back and lets the pool act on it. The ticket of the connection's disposal, if it is closing and the
+    /// adapter has not confirmed it.
+    pub(crate) fn release(
+        &self,
+        lease: LeaseId,
+        disposition: Disposition,
+    ) -> Option<CleanupTicket> {
+        let ticket = {
+            let mut state = self.lock();
+            let connection = lease.connection();
+            let _ = state.pool.release(lease, disposition);
+            self.pump(&mut state);
+            state.closing_ticket(connection)
+        };
+        self.pumped();
+        ticket
+    }
+    /// Discards an exchange's lease, as `release` does, and states how its end went in the receipt.
+    pub(crate) fn discard(&self, lease: LeaseId, cleanups: &Cleanups) -> Cell<ExchangeEnd> {
+        let end = Cell::new();
         {
             let mut state = self.lock();
-            let _ = state.pool.release(lease, disposition);
+            let connection = lease.connection();
+            let _ = state.pool.release(lease, Disposition::Discarded);
+            state.report(connection, Disposition::Discarded, end.clone(), cleanups);
             self.pump(&mut state);
         }
         self.pumped();
+        end
     }
     /// An opening went before its exchange: its request and its context leave the instance, and an exchange already
     /// handed to it is aborted and its lease discarded.
@@ -529,16 +684,35 @@ impl Instance {
             for item in &settling {
                 let _ = state.pool.release(item.lease, Disposition::Discarded);
             }
+            // The adapter is told to close what was released, and what it has already confirmed is drained. The rest
+            // goes for disposal elsewhere, whose confirmation is what confirms its tickets (`take_adapter`): receipts
+            // that wait on this instance are stated now.
+            self.pump(&mut state);
+            state.resolve_ending(true);
+            let settling: Vec<_> = settling
+                .into_iter()
+                .map(|item| {
+                    let ticket = state.closing_ticket(item.lease.connection());
+                    (item, ticket)
+                })
+                .collect();
             (openings, settling)
         };
         for pending in openings {
             let _ = pending.slot.fill(Err(OpenFailure::Closing(reason)));
         }
-        for mut item in settling {
+        for (mut item, ticket) in settling {
             item.io.abort();
+            let cleanup = match ticket {
+                Some(ticket) => {
+                    item.cleanups.note(ticket.clone());
+                    CleanupStatus::Pending(ticket)
+                }
+                None => CleanupStatus::Complete,
+            };
             item.end.set(ExchangeEnd {
                 disposition: Disposition::Discarded,
-                cleanup: crate::CleanupStatus::Complete,
+                cleanup,
                 failure: None,
             });
         }
@@ -582,6 +756,7 @@ fn actions(state: &mut InstanceState) -> bool {
                         https: key.scheme == Scheme::Https,
                         served: false,
                         lessee: None,
+                        closing: None,
                     },
                 );
                 adapter.connect(ConnectCommand {
@@ -918,12 +1093,9 @@ fn settle(state: &mut InstanceState, cx: &mut Context<'_>) -> bool {
         };
         progressed = true;
         let item = state.settling.remove(index);
+        let connection = item.lease.connection();
         let _ = state.pool.release(item.lease, disposition);
-        item.end.set(ExchangeEnd {
-            disposition,
-            cleanup: crate::CleanupStatus::Complete,
-            failure: None,
-        });
+        state.report(connection, disposition, item.end, &item.cleanups);
     }
     progressed
 }
