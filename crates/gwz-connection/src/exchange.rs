@@ -262,7 +262,7 @@ pub(crate) fn cancel_binding(binding: &Arc<BindingShared>) -> bool {
         ));
         binding.instance.pump(&mut state);
     }
-    binding.instance.wake_waiters();
+    binding.instance.pumped();
     true
 }
 

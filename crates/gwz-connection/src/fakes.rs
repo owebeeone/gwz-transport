@@ -227,6 +227,9 @@ pub(crate) struct FakeWorld {
     pub(crate) asynchronous: AtomicBool,
     /// Exchanges' ends are confirmed only on `confirm_finishes`.
     pub(crate) hold_finish: AtomicBool,
+    /// `close` is counted but `Completion::Closed` is never reported, as an adapter whose disposal stalls: the pool's
+    /// cleanup bound is then the only thing that ends the closing connection (it asks the adapter to close again).
+    pub(crate) hold_close: AtomicBool,
     pub(crate) confirmed: AtomicBool,
     pub(crate) cancelled_connects: AtomicUsize,
     /// The service and path of the last exchange started.
@@ -267,6 +270,7 @@ impl FakeWorld {
             discard_next: AtomicBool::new(false),
             asynchronous: AtomicBool::new(false),
             hold_finish: AtomicBool::new(false),
+            hold_close: AtomicBool::new(false),
             confirmed: AtomicBool::new(false),
             cancelled_connects: AtomicUsize::new(0),
             last_spec: Mutex::new(None),
@@ -517,6 +521,9 @@ impl EndpointAdapter for FakeAdapter {
     }
     fn close(&mut self, connection: ConnectionId) {
         self.world.closes.fetch_add(1, Ordering::SeqCst);
+        if self.world.hold_close.load(Ordering::SeqCst) {
+            return;
+        }
         let mut queue = self.queue.lock().unwrap();
         queue.connected.retain(|id| *id != connection);
         queue

@@ -57,7 +57,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc, Mutex, MutexGuard,
-        atomic::{AtomicBool, Ordering::Acquire},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     task::{Context, Poll, Wake, Waker},
 };
@@ -199,8 +199,26 @@ fn ceilings() -> Config {
         ..Config::default()
     }
 }
+/// An attachment to an endpoint instance: while one exists the host does not retire the instance. A binding holds one
+/// from the moment its admission attached to the instance until the binding is gone.
+pub(crate) struct InstanceHold(Arc<Instance>);
+impl InstanceHold {
+    pub(crate) fn instance(&self) -> &Arc<Instance> {
+        &self.0
+    }
+}
+impl Drop for InstanceHold {
+    fn drop(&mut self) {
+        self.0.holds.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 pub(crate) struct Instance {
     pub(crate) profile: EndpointProfile,
+    /// Attachments that hold the instance: one per [`InstanceHold`]. The host raises it under its own lock, when it
+    /// hands the instance out, and it is the one thing that says "a binding is on the way" before the binding exists.
+    holds: AtomicUsize,
+    /// The host's use serial at the last attachment: the order the host retires unbound instances in.
+    last_used: AtomicU64,
     clock: Arc<dyn Clock>,
     /// The pool's allocation bound, from which an opening's deadline is fixed at submit.
     allocation_ms: u64,
@@ -217,6 +235,8 @@ impl Instance {
         let config = ceilings();
         Ok(Arc::new(Self {
             profile,
+            holds: AtomicUsize::new(0),
+            last_used: AtomicU64::new(0),
             clock,
             allocation_ms: config.allocation_timeout_ms,
             wakes: Arc::new(Wakes {
@@ -249,6 +269,40 @@ impl Instance {
             requests: state.pool.outstanding_requests(),
         }
     }
+    /// Attaches to the instance for a binding that is about to be made, stamping its use. Only the host calls it, under
+    /// its registry lock, which is what makes selection and retirement one transition (contract section 6): an
+    /// instance whose holds are raised there cannot be chosen for retirement by a later transition.
+    pub(crate) fn hold(self: &Arc<Self>, used: u64) -> InstanceHold {
+        self.holds.fetch_add(1, Ordering::AcqRel);
+        self.last_used.store(used, Ordering::Release);
+        InstanceHold(self.clone())
+    }
+    /// The host's use serial when the instance was last attached.
+    pub(crate) fn last_used(&self) -> u64 {
+        self.last_used.load(Ordering::Acquire)
+    }
+    /// Whether the host may retire the instance now: nothing holds it (no binding, and none on the way), no opening
+    /// waits on it and no connection is leased (a reuse proof and an exchange waiting to be settled each hold a lease, so
+    /// retiring cannot strand a receipt). Idle, connecting and closing connections do not keep it: retiring stops the
+    /// pool, which closes or cancels them. The host calls it under its registry lock and attaches only under that lock,
+    /// so a hold cannot appear between this check and the removal. An opening belongs to a binding, so none waits
+    /// once nothing holds the instance: that condition is the contract's own wording and holds by construction.
+    pub(crate) fn unbound(&self) -> bool {
+        if self.holds.load(Ordering::Acquire) != 0 {
+            return false;
+        }
+        let state = self.lock();
+        state.adapter.is_some() && state.openings.is_empty() && state.pool.counts().leased == 0
+    }
+    /// Retires an unbound instance the host has taken out of its registry: the pool stops (its idle connections are told
+    /// to close) and the adapter is handed back for disposal. Nothing can attach to the instance any more, because only
+    /// the registry hands it out.
+    pub(crate) fn retire(&self) -> Option<Box<dyn EndpointAdapter>> {
+        let mut state = self.lock();
+        state.pool.shutdown();
+        self.pump(&mut state);
+        state.adapter.take()
+    }
     pub(crate) fn lock(&self) -> MutexGuard<'_, InstanceState> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -265,6 +319,16 @@ impl Instance {
         for waiter in waiters {
             waiter.wake();
         }
+    }
+    /// Ends a caller-driven pump (`submit`, `settle`, `release`, `abandon`, `exchange::cancel_binding`): wakes the openings
+    /// that wait on the instance and re-arms the host's driver. The pump may have created a deadline (an opening's
+    /// allocation bound, an idle entry's expiry, a cleanup bound) or moved one earlier than the driver's last pass
+    /// computed, and the driver sleeps only on that computation (contract section 4.1: `Progress` runs the timers
+    /// independently of application calls). The driver's own pass (`drive`) never calls this, or it would wake itself
+    /// in a loop.
+    pub(crate) fn pumped(&self) {
+        self.wake_waiters();
+        self.wakes.driver.notify();
     }
     /// The pool's next deadline on the host's clock, which the driver sleeps until.
     /// It includes the deadline of each opening that waits for its proof, which the pool no longer holds a request for.
@@ -382,7 +446,7 @@ impl Instance {
             });
             self.pump(&mut state);
         }
-        self.wake_waiters();
+        self.pumped();
         Ok(slot)
     }
     /// Hands a finished exchange to the pump, which releases its lease once the adapter confirms how it ended.
@@ -397,7 +461,7 @@ impl Instance {
             });
             self.pump(&mut state);
         }
-        self.wake_waiters();
+        self.pumped();
         end
     }
     /// Gives a lease back and lets the pool act on it.
@@ -407,7 +471,7 @@ impl Instance {
             let _ = state.pool.release(lease, disposition);
             self.pump(&mut state);
         }
-        self.wake_waiters();
+        self.pumped();
     }
     /// An opening went before its exchange: its request and its context leave the instance, and an exchange already
     /// handed to it is aborted and its lease discarded.
@@ -445,7 +509,7 @@ impl Instance {
             }
             self.pump(&mut state);
         }
-        self.wake_waiters();
+        self.pumped();
     }
     /// The host is sealed: what is in flight ends now. Openings get `Closing(reason)` from their own check; their
     /// slots are failed here so that nothing waits on a pump that has stopped. Settling exchanges are aborted and
@@ -738,7 +802,7 @@ fn ask_again(state: &mut InstanceState, mut pending: Pending, bounced: Option<Co
 /// a new request would open a connection, and spend an agent signature, for an operation the user stopped): the opening
 /// ends `Cancelled`. Whether it was.
 fn refused_for_cancelled(pending: &Pending) -> bool {
-    let cancelled = pending.cancelled.load(Acquire);
+    let cancelled = pending.cancelled.load(Ordering::Acquire);
     if cancelled {
         let _ = pending.slot.fill(Err(OpenFailure::Cancelled));
     }

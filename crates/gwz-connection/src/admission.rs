@@ -152,8 +152,8 @@ impl Future for LocalAcquire {
             host.drop_claim(claim);
             return Poll::Ready(Err(AdmissionError::Closing(TerminalReason::HostFault)));
         };
-        let instance = match host.attach_profile(&EndpointSpec::new(input.profile.clone())) {
-            Ok(instance) => instance,
+        let hold = match host.attach_profile(&EndpointSpec::new(input.profile.clone())) {
+            Ok(hold) => hold,
             Err(error) => {
                 host.drop_claim(claim);
                 return Poll::Ready(Err(match error {
@@ -188,7 +188,8 @@ impl Future for LocalAcquire {
             limits: input.policy.limits(),
             carrier: CarrierId(host.namespace),
             pair: Mutex::new(pair),
-            instance,
+            instance: hold.instance().clone(),
+            _hold: hold,
             auth: input.auth,
             cancelled: Arc::new(AtomicBool::new(false)),
             closing: AtomicUsize::new(0),

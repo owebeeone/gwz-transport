@@ -18,6 +18,10 @@
 //! leases connections to bindings. From step 1.3b the owner also owns the host's driver (`pump.rs`), the task on the
 //! composition's `Progress` that advances the instances' pending work without any application call.
 //!
+//! The registry holds at most `endpoint_instances` instances. At the limit it retires the least recently used instance that
+//! no binding holds and nothing is in flight on, in the same transition that reserves the new instance's place
+//! (`attach_profile`), and its adapter is disposed under the cleanup domain (contract sections 6 and 10).
+//!
 //! What it is not. It is not a process-wide singleton and there is no ambient lookup: the composition builds the owner,
 //! keeps it, and hands handles out; nothing here is stored in a static or a thread local, and no identifier comes from
 //! a global counter. It implements no endpoint: the SSH and HTTPS mechanisms stay behind the [`EndpointFactory`] port.
@@ -28,7 +32,7 @@ use crate::{
     binding::{BindingId, BindingShared, CarrierId, Discard, Routed, closing_code},
     cell::Cell,
     domain::{CleanupTicket, RetainedWork, Revocable},
-    instance::Instance,
+    instance::{Instance, InstanceHold},
     operation::AdmitInput,
     operation::{OperationEnd, Registration, TerminalReason},
     ports::{Clock, EndpointFactory, Progress},
@@ -259,6 +263,9 @@ pub(crate) struct HostState {
     instances: Vec<Arc<Instance>>,
     /// Instances a factory is making, which count against the limit before they exist.
     creating: usize,
+    /// The serial of the last attachment, which orders the instances by use (the least recently used goes first when
+    /// the limit is reached). Host-owned, never a global; 2^64 attachments are out of reach.
+    next_use: u64,
     close: Option<Cell<CleanupStatus>>,
     queue: VecDeque<Waiter>,
     next_waiter: u64,
@@ -268,6 +275,24 @@ pub(crate) struct HostState {
     /// Checked and monotonic: never wraps or resets.
     next_binding: u64,
     bindings: BTreeMap<u64, Arc<BindingShared>>,
+}
+impl HostState {
+    /// Attaches to `instance`: the hold that keeps it from being retired, stamped with the next use serial.
+    fn hold(&mut self, instance: &Arc<Instance>) -> InstanceHold {
+        self.next_use += 1;
+        instance.hold(self.next_use)
+    }
+    /// Takes out of the registry the least recently used instance that nothing holds and nothing is in flight on.
+    fn take_least_recently_used_unbound(&mut self) -> Option<Arc<Instance>> {
+        let index = self
+            .instances
+            .iter()
+            .enumerate()
+            .filter(|(_, instance)| instance.unbound())
+            .min_by_key(|(_, instance)| instance.last_used())
+            .map(|(index, _)| index)?;
+        Some(self.instances.remove(index))
+    }
 }
 pub(crate) struct HostShared {
     pub(crate) namespace: HostNamespace,
@@ -310,6 +335,7 @@ pub fn build(config: HostConfig, ports: HostPorts) -> Result<(HostOwner, HostHan
             closing: None,
             instances: Vec::new(),
             creating: 0,
+            next_use: 0,
             close: None,
             queue: VecDeque::new(),
             next_waiter: 0,
@@ -429,7 +455,7 @@ impl HostShared {
     pub(crate) fn fault(self: &Arc<Self>) {
         drop(self.seal(TerminalReason::HostFault));
     }
-    /// The instances the driver drives.
+    /// The sizes of the host's tables and of its instances' per-operation tables.
     pub(crate) fn tables(&self) -> Tables {
         let (bindings, claims, queued, active, instances) = {
             let state = self.lock();
@@ -455,15 +481,22 @@ impl HostShared {
         }
         tables
     }
+    /// The instances the driver drives.
     pub(crate) fn instances(&self) -> Vec<Arc<Instance>> {
         self.lock().instances.clone()
     }
-    /// The instance for `spec`'s profile: an existing one (equal profiles coalesce) or a new one the factory makes.
-    /// The first instance starts the host's driver.
+    /// The instance for `spec`'s profile: an existing one (equal profiles coalesce) or a new one the factory makes. The
+    /// first instance starts the host's driver. The instance comes with a hold, taken under the registry lock: until the
+    /// hold is dropped the instance is not retired.
+    ///
+    /// At the instance limit the least recently used instance that nothing holds and nothing is in flight on is retired
+    /// to make room, in the same registry transition that reserves the new instance's place (contract sections 6 and
+    /// 10): no attach can reach it after that, and none that reached it before can lose it. Its adapter is disposed
+    /// under the cleanup domain. When every instance is held or busy, the limit is refused.
     pub(crate) fn attach_profile(
         self: &Arc<Self>,
         spec: &EndpointSpec,
-    ) -> Result<Arc<Instance>, AttachError> {
+    ) -> Result<InstanceHold, AttachError> {
         let find = |state: &HostState| {
             state
                 .instances
@@ -471,18 +504,31 @@ impl HostShared {
                 .find(|instance| instance.profile.same_as(&spec.profile))
                 .cloned()
         };
-        {
+        let retired = {
             let mut state = self.lock();
             if state.phase != HostPhase::Open {
                 return Err(AttachError::Closing(HostClosing));
             }
             if let Some(instance) = find(&state) {
-                return Ok(instance);
+                return Ok(state.hold(&instance));
             }
-            if state.instances.len() + state.creating >= self.limits.endpoint_instances {
-                return Err(AttachError::InstanceLimit);
-            }
+            let retired =
+                if state.instances.len() + state.creating >= self.limits.endpoint_instances {
+                    match state.take_least_recently_used_unbound() {
+                        Some(instance) => Some(instance),
+                        None => return Err(AttachError::InstanceLimit),
+                    }
+                } else {
+                    None
+                };
             state.creating += 1;
+            retired
+        };
+        if let Some(instance) = retired
+            && self.dispose_retired(&instance).is_err()
+        {
+            self.lock().creating -= 1;
+            return Err(AttachError::Closing(HostClosing));
         }
         // The factory runs outside the host's lock.
         let made = self
@@ -504,13 +550,14 @@ impl HostShared {
             Ok(instance) if state.phase == HostPhase::Open => {
                 // Another attach of the same profile may have finished first: keep the one that is in the table.
                 if let Some(existing) = find(&state) {
-                    return Ok(existing);
+                    return Ok(state.hold(&existing));
                 }
                 state.instances.push(instance.clone());
+                let hold = state.hold(&instance);
                 drop(state);
                 // The executor is asked outside the host's lock; a refusal has faulted the host.
                 pump::ensure_running(self).map_err(|_| AttachError::Closing(HostClosing))?;
-                Ok(instance)
+                Ok(hold)
             }
             Ok(instance) => {
                 // Sealed while the factory worked: the new instance belongs to the retainer, not to a closed host.
@@ -522,6 +569,24 @@ impl HostShared {
                 Err(AttachError::Closing(HostClosing))
             }
         }
+    }
+    /// Disposes of an instance the registry has retired: its pool stops and its adapter goes to the cleanup domain's
+    /// retainer, which owns the disposal until it is confirmed. A retainer that refuses leaves the work with the host,
+    /// which has the executor drive it; an executor that refuses that is a host progress fault.
+    fn dispose_retired(
+        self: &Arc<Self>,
+        instance: &Instance,
+    ) -> Result<(), crate::ProgressUnavailable> {
+        let Some(adapter) = instance.retire() else {
+            return Ok(());
+        };
+        let (_ticket, kept) = self.pend(vec![adapter]);
+        let Some(mut work) = kept else {
+            return Ok(());
+        };
+        self.progress
+            .spawn(Box::pin(poll_fn(move |cx| work.poll_work(cx))))
+            .inspect_err(|_| self.fault())
     }
     /// Reserves `charge` of the retained-input budget, or refuses.
     fn charge(&self, charge: usize) -> Result<ChargeGuard, AdmissionError> {
@@ -909,7 +974,7 @@ impl Backend for HostShared {
         }
     }
     fn attach_instance(self: Arc<Self>, spec: EndpointSpec) -> Result<(), AttachError> {
-        self.attach_profile(&spec).map(|_| ())
+        self.attach_profile(&spec).map(drop)
     }
     fn admit(self: Arc<Self>, input: AdmitInput) -> Result<Admission, AdmissionError> {
         match input {

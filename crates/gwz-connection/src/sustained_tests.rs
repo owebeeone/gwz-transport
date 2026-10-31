@@ -2,34 +2,48 @@
 //! the fakes and in this crate alone: ten thousand successive operations on one host, with repeated external request
 //! identifiers, stale events after finish, abandoned receipts, abandoned operations and cancellations mixed in, and the
 //! size of every per-operation table returning to its bound. The clock is the logical one; nothing waits.
+//!
+//! Phase 1 remediation R1 (Code P3-1) made the workload as diverse as its claims: every operation has a scope of its own
+//! (so a scope token that is not pruned grows with the run), the operations use more profiles than the host has
+//! instances (so the registry must retire unbound instances to keep admitting), each operation's end is asserted by its
+//! own disposition (so a cancellation that reaches another operation under a repeated name shows), and once the work is
+//! done the idle connections must EXPIRE on the logical clock, not merely stay within a bound.
 use crate::fakes::{Rig, auth, exchange_spec, https_spec, now, poll_once, prepared_with};
 use crate::tables::{InstanceTables, Tables};
 use crate::{
-    BindingId, CancelState, Direction, Discard, Exchange, HostHandle, Operation, Registration,
-    Routed,
+    AuthContext, AuthScope, BindingId, CancelState, Direction, Discard, Exchange, HostHandle,
+    Operation, Registration, Routed,
 };
-use gwz_transport::protocol::{Envelope, MessageKind};
+use gwz_transport::protocol::{Disposition, Envelope, MessageKind};
 use std::{
     collections::VecDeque,
-    sync::{Weak, atomic::Ordering},
+    sync::{Arc, Weak, atomic::Ordering},
 };
 
-/// The per-host connection cap the fakes' operations carry (`prepared`: `OperationPolicy::new(4, 32, 3)`).
-const PER_HOST_CAP: usize = 32;
 /// Operations of the workload that are in flight together: the ring holds this many beside the one being driven, so
 /// no more than `RING + 1` exchanges are ever leased at once and the pool never needs more connections than that.
 const RING: usize = 3;
 /// Operations alive at once at most: the ring, the one being driven, and the one that is dropped mid-connect.
 const CONCURRENT: usize = RING + 2;
-/// Physical connections the workload may hold at most, whatever the number of operations: one per concurrent lease and
-/// at most one idle connection that a lease left behind. The pool's cap (`PER_HOST_CAP`) is far above it.
-const PHYSICAL: usize = 2 * CONCURRENT;
-const _: () = assert!(PHYSICAL <= PER_HOST_CAP);
+/// How far the logical clock moves after each operation.
+const STEP_MS: u64 = 1_000;
+/// Physical connections the workload may hold at most, whatever the number of operations: one per concurrent lease, and
+/// the idle connections the operations of the last idle timeout left behind. A fresh scope per operation means an HTTPS
+/// connection serves nobody else, so each one waits for its expiry (or the pool's eviction), and each operation leaves
+/// at most one.
+const PHYSICAL: usize = CONCURRENT + (IDLE_MS / STEP_MS) as usize + 1;
 /// External request identifiers the workload repeats: two names for ten thousand operations, so operations alive at once
 /// share a name and every name is reused after its holder ended.
 const EXTERNAL_IDS: usize = 2;
 /// The most retired bindings the workload remembers, to send them stale events.
 const REMEMBERED: usize = 64;
+/// Profiles every eighth operation draws on, one after another: with the three hot ones, more than the host's sixteen
+/// instances, so each new cold profile needs an unbound instance retired.
+const COLD_PROFILES: usize = 40;
+/// The host's default instance limit, which the workload's profiles exceed.
+const INSTANCES: usize = 16;
+/// The pool's idle timeout, which the host's driver enforces on the logical clock.
+const IDLE_MS: u64 = 60_000;
 
 /// How one operation of the workload ends.
 #[derive(Clone, Copy, Debug)]
@@ -118,6 +132,23 @@ fn higher(peak: Tables, now: Tables) -> Tables {
     }
 }
 
+/// Operation `i`'s authentication context: a scope no other operation has, so the instance meets as many scopes as there
+/// are operations and must forget each one's identity token once nothing of it is left.
+fn fresh_auth(i: usize) -> AuthContext {
+    let mut scope = [0xA5; 32];
+    scope[..8].copy_from_slice(&(i as u64).to_le_bytes());
+    AuthContext::new(64, AuthScope::new(scope), Arc::new("ctx".to_string()))
+}
+/// Operation `i`'s profile: usually one of three hot ones, which are reused, and every eighth a cold one out of
+/// `COLD_PROFILES`, which needs an instance of its own and so a retirement once the host is at its limit.
+fn profile_of(i: usize) -> u8 {
+    if i.is_multiple_of(8) {
+        10 + ((i / 8) % COLD_PROFILES) as u8
+    } else {
+        1 + (i % 3) as u8
+    }
+}
+
 impl Workload {
     fn new() -> Self {
         let rig = Rig::new();
@@ -144,8 +175,8 @@ impl Workload {
         let counts = self.handle.snapshot().connections;
         self.report.peak_physical = self.report.peak_physical.max(counts.total());
         assert!(
-            counts.total() <= PER_HOST_CAP,
-            "physical connections exceed the cap: {counts:?}"
+            counts.total() <= PHYSICAL,
+            "physical connections exceed the bound: {counts:?}"
         );
         assert!(
             self.rig.world.connected_ids().len() <= counts.total(),
@@ -202,27 +233,37 @@ impl Workload {
         };
         let session = operation.binding_session();
         self.report.ended[ending as usize] += 1;
+        // Every operation ends by its own disposition: an operation's cancellation or abort reaches no other operation,
+        // whatever name they share, so a clean exchange is `Reusable` and a cancelled or aborted one `Discarded`.
+        let finished = |exchange: Exchange, expected: Disposition| {
+            assert_eq!(now(exchange.finish()).disposition, expected, "{ending:?}");
+        };
+        let ended = |operation: Operation, cancelled: bool| {
+            let end = now(operation.finish());
+            assert_eq!(end.cancelled, cancelled, "{ending:?}");
+            assert_eq!(end.exchanges_opened, 1, "{ending:?}");
+        };
         match ending {
             Ending::Clean => {
-                now(exchange.finish());
-                now(operation.finish());
+                finished(exchange, Disposition::Reusable);
+                ended(operation, false);
             }
             Ending::Cancelled => {
                 assert_eq!(operation.cancel_handle().cancel(), CancelState::Cancelled);
-                now(exchange.finish());
-                now(operation.finish());
+                finished(exchange, Disposition::Discarded);
+                ended(operation, true);
             }
             Ending::Abandoned => {
                 drop(exchange);
                 drop(operation);
             }
             Ending::ReceiptDropped => {
-                now(exchange.finish());
+                finished(exchange, Disposition::Reusable);
                 drop(operation.finish());
             }
             Ending::Aborted => {
                 exchange.abort();
-                now(operation.finish());
+                ended(operation, false);
             }
             Ending::CancelledAndDropped => {
                 assert_eq!(operation.cancel_handle().cancel(), CancelState::Cancelled);
@@ -238,10 +279,9 @@ impl Workload {
     fn run_one(&mut self, i: usize) {
         let https = i % 4 == 1;
         let name = format!("req-{}", i % EXTERNAL_IDS);
-        let context = auth((i % 3) as u8, "ctx");
         let permit = now(self
             .handle
-            .admit(prepared_with(&name, 1, context))
+            .admit(prepared_with(&name, profile_of(i), fresh_auth(i)))
             .unwrap()
             .acquire())
         .unwrap();
@@ -278,9 +318,11 @@ impl Workload {
         } else {
             self.end(flight);
         }
-        // The logical clock moves a little each time, and the host's driver runs.
-        self.rig.clock.advance(7);
+        // The logical clock moves a little each time, and the host's driver runs. The cleanup domain's retainer takes
+        // the retired instances' disposals.
+        self.rig.clock.advance(STEP_MS);
         self.rig.progress.run();
+        self.rig.retention.step_all();
         self.sample();
     }
 
@@ -305,13 +347,19 @@ impl Workload {
         now(operation.finish());
     }
 
-    /// Ends everything in flight, as a clean operation does, and lets the idle connections expire.
+    /// Ends everything in flight, as a clean operation does, and lets the idle connections expire (by the clock).
     fn quiesce(&mut self) -> Tables {
         while let Some(mut flight) = self.ring.pop_front() {
             flight.ending = Ending::Clean;
             self.end(flight);
         }
         self.rig.progress.run();
+        self.sample();
+        // Nothing is left to wait for and no call wakes the host any more: the logical clock passes the idle timeout and
+        // the host's driver alone must expire every idle connection.
+        self.rig.clock.advance(IDLE_MS + 1);
+        self.rig.progress.run();
+        self.rig.retention.step_all();
         self.sample();
         self.tables()
     }
@@ -325,37 +373,39 @@ impl Workload {
     }
 }
 
-/// What a table may hold with nothing in flight: everything per-operation is empty, and what is left belongs to the idle
-/// connections (one setup record each, at most one scope token each) that the pool still holds.
+/// What a table may hold with nothing in flight and the idle timeout passed: everything is empty. The connections, their
+/// setup records and the scope tokens expired with the clock, and every instance the registry retired was disposed of
+/// by the cleanup domain.
 fn assert_at_bound(tables: Tables, workload: &Workload) {
     let counts = workload.handle.snapshot().connections;
-    assert_eq!(
-        counts.leased, 0,
-        "a lease outlived its operation: {counts:?}"
-    );
-    assert_eq!(
-        counts.opening, 0,
-        "a connect outlived its opening: {counts:?}"
-    );
+    assert_eq!(counts.total(), 0, "a connection did not expire: {counts:?}");
     assert_eq!(tables.bindings, 0, "bindings: {tables:?}");
     assert_eq!(tables.claims, 0, "claims: {tables:?}");
     assert_eq!(tables.queued, 0, "queued admissions: {tables:?}");
     assert_eq!(tables.active, 0, "active slots: {tables:?}");
     assert_eq!(tables.charged, 0, "retained charge: {tables:?}");
-    let instance = tables.instance;
-    assert_eq!(instance.openings, 0, "openings: {tables:?}");
-    assert_eq!(instance.authorizing, 0, "reuse proofs: {tables:?}");
-    assert_eq!(instance.settling, 0, "unsettled exchanges: {tables:?}");
-    assert_eq!(instance.requests, 0, "pool requests: {tables:?}");
     assert_eq!(
-        instance.connections,
-        counts.total(),
-        "a setup record without a connection, or the reverse: {tables:?} {counts:?}"
+        tables.instance,
+        InstanceTables::default(),
+        "an instance table did not empty: {tables:?}"
     );
+    assert!(tables.instances <= INSTANCES, "{tables:?}");
+    let world = &workload.rig.world;
     assert!(
-        instance.scope_tokens <= instance.connections,
-        "a scope token without a connection: {tables:?}"
+        world.connected_ids().is_empty(),
+        "the adapters still hold connections"
     );
+    assert_eq!(
+        world.closes() + world.cancelled_connects.load(Ordering::SeqCst),
+        world.connects(),
+        "every connection was closed or its connect cancelled"
+    );
+    assert_eq!(
+        world.disposed(),
+        world.created.load(Ordering::SeqCst) - tables.instances,
+        "every retired instance's adapter was disposed of"
+    );
+    assert_eq!(workload.handle.snapshot().retained_cleanup, 0);
     assert!(
         workload
             .bindings
@@ -398,7 +448,17 @@ fn ten_thousand_operations_keep_every_table_and_the_connections_at_their_bounds(
         "{} physical",
         report.peak_physical
     );
-    assert_eq!(tables.instances, 1, "one profile, one instance");
+    assert_eq!(
+        tables.instances, INSTANCES,
+        "forty-three profiles through the host's sixteen instances"
+    );
+    assert!(report.peak.instances <= INSTANCES, "{:?}", report.peak);
+    let world = &workload.rig.world;
+    assert!(
+        world.created.load(Ordering::SeqCst) > INSTANCES + N / 10 / 2,
+        "{} instances made: the registry retired unbound ones to admit new profiles",
+        world.created.load(Ordering::SeqCst)
+    );
     // The workload really did what it says: every ending and the stale events happened, binding ids are not reused
     // (the 256 per-session bound is crossed forty times over with no host-wide registration bound in sight), and the
     // host's one driver task served all of it.
@@ -433,14 +493,11 @@ fn ten_thousand_operations_keep_every_table_and_the_connections_at_their_bounds(
     );
 }
 
-/// Every table but the idle connections' own records: the ones that must not depend on how long the host has lived.
+/// Every table but the instance count (a short run has met fewer profiles than the host has instances): the ones that
+/// must not depend on how long the host has lived.
 fn per_operation(tables: Tables) -> Tables {
     Tables {
-        instance: InstanceTables {
-            connections: 0,
-            scope_tokens: 0,
-            ..tables.instance
-        },
+        instances: 0,
         ..tables
     }
 }
@@ -459,15 +516,8 @@ fn no_host_wide_table_grows_with_the_number_of_operations() {
     assert_at_bound(at_100, &small);
     assert_at_bound(at_10_000, &large);
     assert_eq!(per_operation(at_10_000), per_operation(at_100));
-    assert_eq!(
-        per_operation(at_100),
-        Tables {
-            instances: 1,
-            ..Tables::default()
-        }
-    );
-    assert!(at_10_000.instance.connections <= PHYSICAL, "{at_10_000:?}");
-    assert!(at_100.instance.connections <= PHYSICAL, "{at_100:?}");
+    assert_eq!(per_operation(at_100), Tables::default());
+    assert!(at_100.instances <= at_10_000.instances && at_10_000.instances <= INSTANCES);
     assert!(large.report.peak_physical <= PHYSICAL && small.report.peak_physical <= PHYSICAL);
     assert!(large.report.peak.bindings <= CONCURRENT && small.report.peak.bindings <= CONCURRENT);
     assert_eq!(

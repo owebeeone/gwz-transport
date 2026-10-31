@@ -95,10 +95,12 @@ fn finish_a_then_b_reuses_the_idle_connection() {
 #[test]
 fn r3_a_and_b_overlap_a_is_cancelled_b_completes_and_c_reuses_the_idle_connection() {
     // Plan section 3, R3: creations <= 2; A Cancelled, B Ok; C reuses (`reused: true`) the connection B left idle.
+    // A, B and C carry the same external operation name, as clients that repeat a request identifier do (contract section
+    // 14 A3 and A5), so cancelling A reaches B only if cancellation is keyed by that name (Phase 1 Code P3-1, R3-M2).
     let rig = Rig::new();
     let (_owner, handle) = rig.host(1);
-    let a = registered(&rig, &handle, "op-a", 1);
-    let b = registered(&rig, &handle, "op-b", 1);
+    let a = registered(&rig, &handle, "request-1", 1);
+    let b = registered(&rig, &handle, "request-1", 1);
     let mut exchange_a = now(a.open(exchange_spec()).unwrap().wait()).unwrap();
     let mut exchange_b = now(b.open(exchange_spec()).unwrap().wait()).unwrap();
     assert_eq!(
@@ -126,7 +128,7 @@ fn r3_a_and_b_overlap_a_is_cancelled_b_completes_and_c_reuses_the_idle_connectio
     assert_eq!(handle.snapshot().connections.idle, 1);
     assert_eq!(rig.world.connected_ids(), vec![conn_b]);
     // C is admitted afterwards and takes B's idle connection: no third connect, and its exchange runs on conn_b.
-    let c = registered(&rig, &handle, "op-c", 1);
+    let c = registered(&rig, &handle, "request-1", 1);
     let mut exchange_c = now(c.open(exchange_spec()).unwrap().wait()).unwrap();
     assert!(exchange_c.reused(), "C reused the idle connection");
     assert_eq!(rig.world.connects(), 2, "no connection was made for C");

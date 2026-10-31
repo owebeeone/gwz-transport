@@ -3,10 +3,11 @@
 //! completes its connects (and confirms its exchanges' ends) only when the test says, and then wakes the waker the
 //! host gave it, as a real adapter's worker does; the stepped executor runs the driver only inside `progress.run()`,
 //! so a row sees exactly what the driver did and that no application poll did it.
-use crate::fakes::{Rig, exchange_spec, now, prepared, ssh_key};
+use crate::fakes::{Rig, auth, exchange_spec, now, poll_once, prepared, profile, ssh_key};
 use crate::{
-    AdmissionError, AdmissionPermit, ExchangeSpec, GitService, HostPhase, InvalidInput,
-    OpenFailure, Operation, TerminalReason,
+    AdmissionError, AdmissionPermit, CancelState, EndpointRoute, ExchangeSpec, GitService,
+    HostPhase, InvalidInput, OpenFailure, Operation, OperationPolicy, PreparedOperation,
+    TerminalReason,
 };
 use gwz_transport::{pool::Identity, protocol::Disposition};
 use std::{
@@ -224,5 +225,202 @@ fn the_exchange_spec_carries_a_typed_git_service_and_path_to_the_adapter() {
         *rig.world.last_spec.lock().unwrap(),
         Some((GitService::ReceivePackExchange, "/srv/team/repo.git".into()))
     );
+    now(op.finish());
+}
+
+// Phase 1 remediation R1 (dev-docs/GwzPhase1-RemPlan.md, Code P2-1 = State P2-1): a caller-driven pump (a submission, a
+// settlement, a release, an abandonment, a cancellation) can create or move a pool deadline, so it re-arms the driver;
+// otherwise a host that is quiet beyond the application's own calls never enforces the bound. Each row parks the driver
+// first (`progress.run()` while the deadline does not yet exist) and then moves the logical clock to the bound exactly.
+
+/// The pool's allocation bound, the one an opening waiting for capacity or for a proof is given.
+fn allocation_ms() -> u64 {
+    gwz_transport::pool::Config::default().allocation_timeout_ms
+}
+/// The pool's idle timeout.
+const IDLE_MS: u64 = 60_000;
+
+/// An operation limited to one connection per host, so a second opening waits for the first one's lease.
+fn registered_one_per_host(handle: &crate::HostHandle, name: &str) -> Operation {
+    let prepared = PreparedOperation::new(
+        name,
+        EndpointRoute::ssh_and_https(),
+        profile(1),
+        auth(0, "none"),
+        OperationPolicy::new(4, 1, 3).unwrap(),
+    )
+    .unwrap();
+    let permit: AdmissionPermit = now(handle.admit(prepared).unwrap().acquire()).unwrap();
+    permit.register()
+}
+
+#[test]
+fn a_waiting_opening_ends_at_its_allocation_bound_on_a_driver_that_parked_first() {
+    // PROBE-ALLOC. E1 holds the one connection the operation may have; the driver ran and parked with no deadline; E2's
+    // submission then creates its allocation deadline, which only the submission's own pump knows.
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    let op = registered_one_per_host(&handle, "op-a");
+    let first = now(op.open(exchange_spec()).unwrap().wait()).unwrap();
+    rig.progress.run();
+    let mut second = op.open(exchange_spec()).unwrap().wait();
+    assert!(!second.is_ready(), "no capacity for a second connection");
+    rig.clock.advance(allocation_ms() - 1);
+    rig.progress.run();
+    assert!(!second.is_ready(), "still within the bound");
+    rig.clock.advance(1);
+    rig.progress.run();
+    assert!(second.is_ready(), "the driver decided it at the bound");
+    assert!(matches!(
+        poll_once(&mut second),
+        Poll::Ready(Err(OpenFailure::Pool(
+            gwz_transport::pool::Error::AllocationTimeout
+        )))
+    ));
+    drop(second);
+    now(first.finish());
+    now(op.finish());
+}
+
+#[test]
+fn an_opening_waiting_for_a_proof_ends_at_its_allocation_bound_on_a_driver_that_parked_first() {
+    // PROBE-PROOF. A's connection is idle (the driver sleeps until its 60 s expiry); B leases it and waits for a proof
+    // that never ends. B's own deadline (30 s) is earlier than the driver's wake, and only B's submission knows it.
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    let a = registered(&handle, "op-a");
+    now(now(a.open(exchange_spec()).unwrap().wait())
+        .unwrap()
+        .finish());
+    now(a.finish());
+    assert_eq!(handle.snapshot().connections.idle, 1);
+    rig.progress.run();
+    rig.world.hold_reuse.store(true, Ordering::SeqCst);
+    let b = registered(&handle, "op-b");
+    let mut wait = b.open(exchange_spec()).unwrap().wait();
+    assert_eq!(rig.world.reuses().len(), 1, "B waits for its proof");
+    rig.clock.advance(allocation_ms() - 1);
+    rig.progress.run();
+    assert!(!wait.is_ready(), "still within the bound");
+    rig.clock.advance(1);
+    rig.progress.run();
+    assert!(wait.is_ready(), "the driver decided it at the bound");
+    assert!(matches!(
+        poll_once(&mut wait),
+        Poll::Ready(Err(OpenFailure::Pool(
+            gwz_transport::pool::Error::AllocationTimeout
+        )))
+    ));
+    drop(wait);
+    now(b.finish());
+}
+
+#[test]
+fn idle_connections_expire_on_a_quiet_host_however_the_driver_ran_before() {
+    // The p1c-crate finding (2026-10-31-p1c-crate/raw/finding-idle-expiry-repro.rs): an exchange released to idle by a
+    // caller-driven pump after the driver has run does not re-arm it. The driver ran never, once, or twice first.
+    for runs in 0..3 {
+        let rig = Rig::new();
+        let (_owner, handle) = rig.host(1);
+        let a = registered(&handle, "op-a");
+        let exchange = now(a.open(exchange_spec()).unwrap().wait()).unwrap();
+        if runs >= 1 {
+            rig.progress.run();
+        }
+        if runs >= 2 {
+            rig.clock.advance(7);
+            rig.progress.run();
+        }
+        now(exchange.finish());
+        now(a.finish());
+        assert_eq!(handle.snapshot().connections.idle, 1, "runs {runs}");
+        rig.clock.advance(IDLE_MS - 1);
+        rig.progress.run();
+        assert_eq!(
+            handle.snapshot().connections.idle,
+            1,
+            "runs {runs}: not yet"
+        );
+        rig.clock.advance(1);
+        rig.progress.run();
+        assert_eq!(handle.snapshot().connections.idle, 0, "runs {runs}");
+        assert_eq!(rig.world.closes(), 1, "runs {runs}");
+    }
+}
+
+#[test]
+fn two_overlapping_exchanges_idle_connections_both_expire_on_a_quiet_host() {
+    // The same finding with the exchanges overlapping: both connections end up idle, and both must expire.
+    let rig = Rig::new();
+    let (_owner, handle) = rig.host(1);
+    let (a, b) = (registered(&handle, "op-a"), registered(&handle, "op-b"));
+    let first = now(a.open(exchange_spec()).unwrap().wait()).unwrap();
+    let second = now(b.open(exchange_spec()).unwrap().wait()).unwrap();
+    rig.progress.run();
+    now(first.finish());
+    now(second.finish());
+    now(a.finish());
+    now(b.finish());
+    assert_eq!(handle.snapshot().connections.idle, 2);
+    rig.clock.advance(IDLE_MS);
+    rig.progress.run();
+    assert_eq!(handle.snapshot().connections.idle, 0);
+    assert_eq!(rig.world.closes(), 2);
+}
+
+/// The pool's bound on a connection's disposal, after which it asks the adapter to close again.
+const CLEANUP_MS: u64 = 5_000;
+
+/// A leased exchange on a host whose driver has run and parked, and whose adapter will not confirm a close: whatever
+/// discards the lease starts the pool's cleanup bound, which only a caller-driven pump knows about.
+fn parked_with_a_stalled_close() -> (Rig, crate::HostOwner, crate::HostHandle, Operation) {
+    let rig = Rig::new();
+    let (owner, handle) = rig.host(1);
+    let op = registered(&handle, "op-a");
+    rig.progress.run();
+    rig.world.hold_close.store(true, Ordering::SeqCst);
+    (rig, owner, handle, op)
+}
+/// The close the pool asks for at the cleanup bound: the adapter is asked to close the connection a second time.
+fn assert_closed_again_at_the_cleanup_bound(rig: &Rig) {
+    assert_eq!(rig.world.closes(), 1, "the first close is asked at once");
+    rig.clock.advance(CLEANUP_MS - 1);
+    rig.progress.run();
+    assert_eq!(rig.world.closes(), 1, "still within the bound");
+    rig.clock.advance(1);
+    rig.progress.run();
+    assert_eq!(rig.world.closes(), 2, "the driver ran the cleanup bound");
+}
+
+#[test]
+fn an_aborted_exchanges_cleanup_bound_is_enforced_on_a_driver_that_parked_first() {
+    let (rig, _owner, _handle, op) = parked_with_a_stalled_close();
+    let exchange = now(op.open(exchange_spec()).unwrap().wait()).unwrap();
+    rig.progress.run();
+    exchange.abort();
+    assert_closed_again_at_the_cleanup_bound(&rig);
+    now(op.finish());
+}
+
+#[test]
+fn an_abandoned_openings_cleanup_bound_is_enforced_on_a_driver_that_parked_first() {
+    // The opening was leased a connection (its slot filled) and went before taking it: the lease is discarded.
+    let (rig, _owner, _handle, op) = parked_with_a_stalled_close();
+    let wait = op.open(exchange_spec()).unwrap().wait();
+    assert!(wait.is_ready());
+    rig.progress.run();
+    drop(wait);
+    assert_closed_again_at_the_cleanup_bound(&rig);
+    now(op.finish());
+}
+
+#[test]
+fn a_cancelled_operations_cleanup_bound_is_enforced_on_a_driver_that_parked_first() {
+    let (rig, _owner, _handle, op) = parked_with_a_stalled_close();
+    let exchange = now(op.open(exchange_spec()).unwrap().wait()).unwrap();
+    rig.progress.run();
+    assert_eq!(op.cancel_handle().cancel(), CancelState::Cancelled);
+    assert_closed_again_at_the_cleanup_bound(&rig);
+    drop(exchange);
     now(op.finish());
 }
