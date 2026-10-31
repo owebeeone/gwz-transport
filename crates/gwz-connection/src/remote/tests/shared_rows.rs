@@ -215,7 +215,7 @@ fn a_binding_the_carrier_faulted_ends_alone_at_the_core_and_at_the_client() {
     w.carrier.fault_at_core(&session(&w, 0));
     w.settle();
     assert!(matches!(
-        live.stream().write(b"x"),
+        live.stream().try_write(b"x"),
         Err(StreamError::Failed {
             code: ErrorCode::Protocol,
             ..

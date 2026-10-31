@@ -53,7 +53,7 @@ pub(super) fn read_exact(w: &World, exchange: &mut Exchange, wanted: usize) -> V
         if out.len() >= wanted {
             return out;
         }
-        match exchange.stream().read(&mut buffer) {
+        match exchange.stream().try_read(&mut buffer) {
             Ok(count) => out.extend_from_slice(&buffer[..count]),
             Err(error) if would_block(&error) => w.settle(),
             Err(error) => panic!("read: {error:?}"),
@@ -67,7 +67,7 @@ pub(super) fn write_all(w: &World, exchange: &mut Exchange, data: &[u8]) {
         if rest.is_empty() {
             return;
         }
-        match exchange.stream().write(rest) {
+        match exchange.stream().try_write(rest) {
             Ok(count) => rest = &rest[count..],
             Err(error) if would_block(&error) => w.settle(),
             Err(error) => panic!("write: {error:?}"),
@@ -475,7 +475,7 @@ fn cancelling_an_operation_cancels_its_exchanges_and_a_later_cancel_finds_it_gon
     assert_eq!(cancel.cancel(), CancelState::AlreadyCancelled);
     w.settle();
     assert!(matches!(
-        exchange.stream().write(b"y"),
+        exchange.stream().try_write(b"y"),
         Err(StreamError::Cancelled)
     ));
     drop(exchange);

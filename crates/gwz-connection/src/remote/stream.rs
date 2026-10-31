@@ -255,6 +255,7 @@ impl Future for RemoteFinish {
             Some(end) => Poll::Ready(ExchangeEnd {
                 disposition: end.disposition,
                 cleanup: crate::CleanupStatus::Complete,
+                effect: end.failure.map_or(Effect::None, |(_, effect)| effect),
                 failure: end.failure,
             }),
             None => Poll::Pending,

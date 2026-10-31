@@ -9,6 +9,7 @@ use crate::{
 };
 use gwz_transport::pool::{ConnectionId, Identity, LeaseId, PoolMachine, Request, RequestId};
 use gwz_transport::protocol::Disposition;
+use gwz_transport::protocol::Effect;
 use gwz_transport::protocol::Scheme;
 use std::{
     collections::BTreeMap,
@@ -74,6 +75,8 @@ pub(super) struct Ending {
     pub(super) deadline: u64,
     pub(super) disposition: Disposition,
     pub(super) end: Cell<ExchangeEnd>,
+    /// The effect of the exchange's request, read from its adapter when the lease was released.
+    pub(super) effect: Effect,
 }
 pub(crate) struct InstanceState {
     pub(crate) adapter: Option<Box<dyn EndpointAdapter>>,
@@ -127,19 +130,22 @@ impl InstanceState {
         )
     }
     /// Sets the receipt of a finished exchange whose lease was just released: at once if its connection stays, else
-    /// when its disposal is confirmed or the cleanup bound passes. `cleanups` is its operation's record.
+    /// when its disposal is confirmed or the cleanup bound passes. `cleanups` is its operation's record, and `effect`
+    /// the one its adapter reported for the exchange's request.
     pub(super) fn report(
         &mut self,
         connection: ConnectionId,
         disposition: Disposition,
         end: Cell<ExchangeEnd>,
         cleanups: &Cleanups,
+        effect: Effect,
     ) {
         match self.closing_ticket(connection) {
             None => end.set(ExchangeEnd {
                 disposition,
                 cleanup: CleanupStatus::Complete,
                 failure: None,
+                effect,
             }),
             Some(ticket) => {
                 cleanups.note(ticket.clone());
@@ -149,6 +155,7 @@ impl InstanceState {
                     deadline,
                     disposition,
                     end,
+                    effect,
                 });
             }
         }
@@ -170,6 +177,7 @@ impl InstanceState {
                     CleanupStatus::Pending(item.ticket.clone())
                 },
                 failure: None,
+                effect: item.effect,
             });
             false
         });
@@ -231,8 +239,9 @@ pub(super) fn settle(state: &mut InstanceState, cx: &mut Context<'_>) -> bool {
         progressed = true;
         let item = state.settling.remove(index);
         let connection = item.lease.connection();
+        let effect = item.io.effect();
         let _ = state.pool.release(item.lease, disposition);
-        state.report(connection, disposition, item.end, &item.cleanups);
+        state.report(connection, disposition, item.end, &item.cleanups, effect);
     }
     progressed
 }

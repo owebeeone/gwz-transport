@@ -22,6 +22,7 @@ pub enum InvalidInput {
     Profile,
     Policy,
     Spec,
+    ResponseHead,
 }
 impl fmt::Display for InvalidInput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -461,7 +462,9 @@ pub enum OpenFailure {
     Sealed,
     Closing(TerminalReason),
     Pool(gwz_transport::pool::Error),
-    Io(std::io::Error),
+    /// The adapter could not start the exchange (`EndpointAdapter::start_exchange_checked`), and what it says of the
+    /// request's effect.
+    Io(StartError),
     /// The opening was offered more connections set up under another authentication context than its key can hold. A
     /// conforming opening misfits at most once (its fresh resubmission opens a connection under its own context), so
     /// this names a broken scope record, never load: nothing was started for this opening.
@@ -476,6 +479,102 @@ pub enum OpenFailure {
     /// A carrier-backed opening: the binding broke a rule of the transport (contract section 6), or the table
     /// refused the spec once the binding was ready: only it ended.
     Fault(ErrorCode),
+}
+
+impl OpenFailure {
+    /// Whether the exchange's request may have reached the peer (contract section 9, HTTPS model A7). A failure before
+    /// the request was handed to the adapter's engine is `None`: cancellation, a seal, a closing host, the pool's
+    /// refusal and a misfit start nothing. An adapter's start failure and a carrier-backed failure carry what was
+    /// reported. `Fault` is `Possible`: the transport rule that broke does not record whether the open had left, and the
+    /// safe answer never claims nothing was sent.
+    pub fn effect(&self) -> Effect {
+        match self {
+            Self::Cancelled
+            | Self::Sealed
+            | Self::Closing(_)
+            | Self::Pool(_)
+            | Self::NoFittingConnection => Effect::None,
+            Self::Io(failure) => failure.effect(),
+            Self::Refused(failure) => failure.effect,
+            Self::CarrierLost { effect } => *effect,
+            Self::Fault(_) => Effect::Possible,
+        }
+    }
+}
+
+/// An adapter could not start an exchange, and says whether the request may have been sent. Per the HTTPS model (A7) an
+/// exchange's effect describes its own request: a failure before the request is handed to the engine is `None`, and
+/// once it is, `Possible` even with no byte acknowledged. The host never replays after `Possible`.
+#[derive(Debug)]
+pub struct StartError {
+    error: std::io::Error,
+    effect: Effect,
+}
+impl StartError {
+    pub fn new(error: std::io::Error, effect: Effect) -> Self {
+        Self { error, effect }
+    }
+    /// A failure before the request was handed to the engine.
+    pub fn none(error: std::io::Error) -> Self {
+        Self::new(error, Effect::None)
+    }
+    pub fn error(&self) -> &std::io::Error {
+        &self.error
+    }
+    pub fn effect(&self) -> Effect {
+        self.effect
+    }
+    pub fn into_error(self) -> std::io::Error {
+        self.error
+    }
+}
+impl fmt::Display for StartError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} (effect {:?})", self.error, self.effect)
+    }
+}
+impl std::error::Error for StartError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+/// The most headers a response head holds, and the most bytes of their names and values together.
+const MAX_HEAD_HEADERS: usize = 256;
+const MAX_HEAD_BYTES: usize = 64 * 1024;
+/// An HTTP exchange's response status and headers: a bounded, owned record (contract section 7.2), separate from the body
+/// bytes `MessageStream` carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpResponseHead {
+    status: u16,
+    headers: Vec<(String, String)>,
+}
+impl HttpResponseHead {
+    /// `status` is 100 to 599; at most 256 headers and 64 KiB of names and values; a name is a nonempty run without
+    /// control characters, spaces or `:`, and a value has no control character but a tab.
+    pub fn new(status: u16, headers: Vec<(String, String)>) -> Result<Self, InvalidInput> {
+        let bytes: usize = headers.iter().map(|(n, v)| n.len() + v.len()).sum();
+        let valid_name = |name: &str| {
+            !name.is_empty() && !name.chars().any(|c| c.is_control() || c == ' ' || c == ':')
+        };
+        let valid_value = |value: &str| !value.chars().any(|c| c.is_control() && c != '\t');
+        if !(100..=599).contains(&status)
+            || headers.len() > MAX_HEAD_HEADERS
+            || bytes > MAX_HEAD_BYTES
+            || headers
+                .iter()
+                .any(|(name, value)| !valid_name(name) || !valid_value(value))
+        {
+            return Err(InvalidInput::ResponseHead);
+        }
+        Ok(Self { status, headers })
+    }
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+    pub fn headers(&self) -> &[(String, String)] {
+        &self.headers
+    }
 }
 
 /// What `OperationCancel::cancel` found.
@@ -505,4 +604,9 @@ pub struct ExchangeEnd {
     /// A carrier-backed exchange that did not end orderly: the code and effect it ended with
     /// (`ErrorCode::CarrierLost` when the carrier ended under it). A local exchange reports none.
     pub failure: Option<(ErrorCode, Effect)>,
+    /// The effect of this exchange's own request, as its adapter reported it when the exchange ended (contract section 9;
+    /// HTTPS model A7: another request's, such as a re-authentication GET inside a POST, does not move it).
+    /// `ExchangeIo::effect` defaults to `None`; a carrier-backed exchange reports its failure's effect, and `None`
+    /// for a clean end.
+    pub effect: Effect,
 }

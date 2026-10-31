@@ -657,7 +657,7 @@ fn pump_running(
             let Some(exchange) = run.exchange.as_mut() else {
                 break;
             };
-            match exchange.stream().write(&run.to_exchange) {
+            match exchange.stream().try_write(&run.to_exchange) {
                 Ok(count) => {
                     run.forwarded += count as u64;
                     run.to_exchange.drain(..count);
@@ -677,7 +677,7 @@ fn pump_running(
                 break;
             };
             if run.to_machine.is_empty() && !run.response_done {
-                match exchange.stream().read(&mut buffer) {
+                match exchange.stream().try_read(&mut buffer) {
                     Ok(0) if run.request_done && run.to_exchange.is_empty() => {
                         let _ = run.machine.end_write();
                         run.response_done = true;

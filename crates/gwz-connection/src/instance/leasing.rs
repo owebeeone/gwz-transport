@@ -1,10 +1,11 @@
 //! The pool's actions to the adapter and the leases it gives openings (movement from `instance.rs`).
 use super::state::*;
-use crate::{AuthContext, ConnectCommand, OpenFailure, ProofId, ReuseCommand};
+use crate::{AuthContext, ConnectCommand, OpenFailure, ProofId, ReuseCommand, StartError};
 use gwz_transport::pool::{
     Action, ConnectionId, Error, LeaseId, MAX_EXCLUDED, PoolMachine, Request,
 };
 use gwz_transport::protocol::Disposition;
+use gwz_transport::protocol::Effect;
 use gwz_transport::protocol::Scheme;
 use std::sync::atomic::Ordering;
 
@@ -177,8 +178,10 @@ pub(super) fn serve(state: &mut InstanceState, pending: Pending, lease: LeaseId)
         .get_mut(&connection)
         .is_some_and(|setup| std::mem::replace(&mut setup.served, true));
     let started = match state.adapter.as_mut() {
-        Some(adapter) => adapter.start_exchange(connection, &pending.spec, &pending.auth),
-        None => Err(std::io::Error::other("endpoint instance is closed")),
+        Some(adapter) => adapter.start_exchange_checked(connection, &pending.spec, &pending.auth),
+        None => Err(StartError::none(std::io::Error::other(
+            "endpoint instance is closed",
+        ))),
     };
     let outcome = match started {
         Ok(io) => {
@@ -188,8 +191,12 @@ pub(super) fn serve(state: &mut InstanceState, pending: Pending, lease: LeaseId)
             Ok((io, lease, reused))
         }
         // The adapter retired the connection after the pool leased it (a failed proof of its key retired it): a lost
-        // lease, as the pool's own `IdleClosed` race makes one, not an I/O failure of the opening.
-        Err(error) if error.kind() == std::io::ErrorKind::NotConnected => {
+        // lease, as the pool's own `IdleClosed` race makes one, not an I/O failure of the opening. Only when the adapter
+        // says the request was not handed over: after that, asking again would replay it (contract section 9).
+        Err(error)
+            if error.error().kind() == std::io::ErrorKind::NotConnected
+                && error.effect() == Effect::None =>
+        {
             let _ = state.pool.release(lease, Disposition::Discarded);
             return lost_lease(state, pending);
         }

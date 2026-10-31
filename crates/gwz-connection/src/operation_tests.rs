@@ -58,9 +58,9 @@ fn finish_a_then_b_reuses_the_idle_connection() {
     let (_owner, handle) = rig.host(1);
     let a = registered(&rig, &handle, "op-a", 1);
     let mut exchange = now(a.open(exchange_spec()).unwrap().wait()).unwrap();
-    assert_eq!(exchange.stream().write(b"ping").unwrap(), 4);
+    assert_eq!(exchange.stream().try_write(b"ping").unwrap(), 4);
     let mut buffer = [0u8; 8];
-    assert_eq!(exchange.stream().read(&mut buffer).unwrap(), 4);
+    assert_eq!(exchange.stream().try_read(&mut buffer).unwrap(), 4);
     assert_eq!(&buffer[..4], b"ping");
     assert_eq!(handle.snapshot().connections.leased, 1);
     let ended = now(exchange.finish());
@@ -114,11 +114,11 @@ fn r3_a_and_b_overlap_a_is_cancelled_b_completes_and_c_reuses_the_idle_connectio
     };
     assert_ne!(conn_a, conn_b);
     assert_eq!(a.cancel_handle().cancel(), CancelState::Cancelled);
-    assert!(exchange_a.stream().write(b"late").is_err());
+    assert!(exchange_a.stream().try_write(b"late").is_err());
     // B completes untouched by A's cancellation.
-    assert_eq!(exchange_b.stream().write(b"b-data").unwrap(), 6);
+    assert_eq!(exchange_b.stream().try_write(b"b-data").unwrap(), 6);
     let mut buffer = [0u8; 8];
-    assert_eq!(exchange_b.stream().read(&mut buffer).unwrap(), 6);
+    assert_eq!(exchange_b.stream().try_read(&mut buffer).unwrap(), 6);
     assert_eq!(&buffer[..6], b"b-data");
     assert_eq!(now(exchange_a.finish()).disposition, Disposition::Discarded);
     assert_eq!(now(exchange_b.finish()).disposition, Disposition::Reusable);
@@ -133,8 +133,8 @@ fn r3_a_and_b_overlap_a_is_cancelled_b_completes_and_c_reuses_the_idle_connectio
     assert!(exchange_c.reused(), "C reused the idle connection");
     assert_eq!(rig.world.connects(), 2, "no connection was made for C");
     assert_eq!(rig.world.exchange_connections.lock().unwrap()[2], conn_b);
-    assert_eq!(exchange_c.stream().write(b"c-data").unwrap(), 6);
-    assert_eq!(exchange_c.stream().read(&mut buffer).unwrap(), 6);
+    assert_eq!(exchange_c.stream().try_write(b"c-data").unwrap(), 6);
+    assert_eq!(exchange_c.stream().try_read(&mut buffer).unwrap(), 6);
     assert_eq!(&buffer[..6], b"c-data");
     assert_eq!(now(exchange_c.finish()).disposition, Disposition::Reusable);
     assert!(!now(c.finish()).cancelled);
@@ -176,11 +176,11 @@ fn cancelling_a_leaves_bs_exchange_intact() {
     assert_eq!(cancel.cancel(), CancelState::Cancelled);
     assert_eq!(cancel.cancel(), CancelState::AlreadyCancelled);
     // A's stream fails with a named error; its connection is closed; B's is untouched.
-    assert!(exchange_a.stream().write(b"late").is_err());
+    assert!(exchange_a.stream().try_write(b"late").is_err());
     assert_eq!(rig.world.closes(), 1);
-    assert_eq!(exchange_b.stream().write(b"still").unwrap(), 5);
+    assert_eq!(exchange_b.stream().try_write(b"still").unwrap(), 5);
     let mut buffer = [0u8; 8];
-    assert_eq!(exchange_b.stream().read(&mut buffer).unwrap(), 5);
+    assert_eq!(exchange_b.stream().try_read(&mut buffer).unwrap(), 5);
     assert_eq!(&buffer[..5], b"still");
     assert!(matches!(a.open(exchange_spec()), Err(OpenError::Cancelled)));
     let ended = now(exchange_a.finish());

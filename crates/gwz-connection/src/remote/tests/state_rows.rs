@@ -447,7 +447,7 @@ fn a_whole_operation_runs_through_the_drivers_and_counting_wakers_with_no_settle
 
     let mut written = 0;
     for _ in 0..100 {
-        match exchange.stream().write(b"hello") {
+        match exchange.stream().try_write(b"hello") {
             Ok(count) => {
                 written = count;
                 break;
@@ -459,7 +459,7 @@ fn a_whole_operation_runs_through_the_drivers_and_counting_wakers_with_no_settle
     let mut echoed = Vec::new();
     for _ in 0..100 {
         let mut buffer = [0u8; 16];
-        match exchange.stream().read(&mut buffer) {
+        match exchange.stream().try_read(&mut buffer) {
             Ok(count) => echoed.extend_from_slice(&buffer[..count]),
             Err(_) => drive(&w),
         }

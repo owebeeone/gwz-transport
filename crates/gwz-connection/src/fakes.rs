@@ -6,14 +6,14 @@ use crate::{
     AuthContext, AuthScope, CleanupDomain, CleanupDomainOwner, Clock, Completion, ConnectCommand,
     DomainConfig, DriverWork, EndpointAdapter, EndpointFactory, EndpointProfile, EndpointRoute,
     EndpointSpec, ExchangeIo, ExchangeSpec, FactoryEnv, FactoryError, FactoryReason, GitService,
-    HostConfig, HostHandle, HostLimits, HostNamespace, HostOwner, HostPorts, OperationPolicy,
-    OwnerSeed, PreparedOperation, ProcessSafety, Progress, ProgressUnavailable, ProofId,
-    RetainedWork, RetentionPort, RetentionRefused, ReuseCommand, ReuseVerdict, SafetyHold,
-    SafetyState, SafetyUnavailable, Sleep, Tick, cleanup_domain,
+    HostConfig, HostHandle, HostLimits, HostNamespace, HostOwner, HostPorts, HttpResponseHead,
+    OperationPolicy, OwnerSeed, PreparedOperation, ProcessSafety, Progress, ProgressUnavailable,
+    ProofId, RetainedWork, RetentionPort, RetentionRefused, ReuseCommand, ReuseVerdict, SafetyHold,
+    SafetyState, SafetyUnavailable, Sleep, StartError, Tick, cleanup_domain,
 };
 use gwz_transport::{
     pool::{ConnectionId, Identity, Key},
-    protocol::Disposition,
+    protocol::{Disposition, Effect},
 };
 use std::{
     collections::VecDeque,
@@ -241,6 +241,8 @@ pub(crate) struct FakeWorld {
     pub(crate) hold_reuse: AtomicBool,
     /// Every proof the host cancelled, in order.
     pub(crate) cancelled_reuses: Mutex<Vec<ProofId>>,
+    /// The next exchange start fails with this error and effect (`start_exchange_checked`).
+    pub(crate) start_error: Mutex<Option<(io::ErrorKind, Effect)>>,
     /// The next exchange start finds its connection retired (the adapter's `NotConnected`).
     pub(crate) start_lost: AtomicBool,
     /// The next this many exchange starts find their connection retired.
@@ -252,6 +254,10 @@ pub(crate) struct FakeWorld {
     /// The validated inputs each adapter was made from, by their tag.
     pub(crate) inputs: Mutex<Vec<Option<String>>>,
     pub(crate) gate: Arc<Gate>,
+    /// New exchanges' reads park (waking on `feed` or `end`) instead of reading the empty loopback as an end.
+    pub(crate) park_streams: AtomicBool,
+    /// The byte state of every exchange started, in order.
+    ios: Mutex<Vec<Arc<Mutex<IoState>>>>,
     pub(crate) safeties: Mutex<Vec<(Arc<dyn ProcessSafety>, SafetyState)>>,
     pub(crate) domains: Mutex<Vec<CleanupDomain>>,
 }
@@ -278,6 +284,7 @@ impl FakeWorld {
             reuse_verdict: Mutex::new(Some(ReuseVerdict::Authorized)),
             hold_reuse: AtomicBool::new(false),
             cancelled_reuses: Mutex::new(Vec::new()),
+            start_error: Mutex::new(None),
             start_lost: AtomicBool::new(false),
             start_lost_n: AtomicUsize::new(0),
             queues: Mutex::new(Vec::new()),
@@ -286,6 +293,8 @@ impl FakeWorld {
             gate: Arc::new(Gate {
                 open: Mutex::new((false, Vec::new())),
             }),
+            park_streams: AtomicBool::new(false),
+            ios: Mutex::new(Vec::new()),
             safeties: Mutex::new(Vec::new()),
             domains: Mutex::new(Vec::new()),
         })
@@ -369,6 +378,10 @@ impl FakeWorld {
         });
     }
     /// The held exchanges' ends are confirmed; the hosts' wakers are woken.
+    /// The peer side of the `n`th exchange started.
+    pub(crate) fn peer(&self, n: usize) -> Peer {
+        Peer(self.ios.lock().unwrap()[n].clone())
+    }
     pub(crate) fn confirm_finishes(&self) {
         self.confirmed.store(true, Ordering::SeqCst);
         self.each_queue(|_| {});
@@ -438,21 +451,111 @@ struct FakeAdapter {
     done: bool,
     queue: Arc<Mutex<Queue>>,
 }
-/// A loopback exchange: what is written is what is read.
+/// One fake exchange's bytes. What is written is what is read (a loopback), and the peer side (`Peer`) can add bytes,
+/// end the response, take written bytes away and bound the room, waking whoever waits.
+#[derive(Default)]
+struct IoState {
+    buffer: VecDeque<u8>,
+    /// Reads of an empty buffer wait for `feed` or `end` rather than return `Ok(0)`.
+    park: bool,
+    ended: bool,
+    /// The most bytes the buffer holds; a write beyond it waits for `take`.
+    room: Option<usize>,
+    /// The most one write accepts.
+    chunk: Option<usize>,
+    half_closed: bool,
+    written: u64,
+    reader: Option<Waker>,
+    writer: Option<Waker>,
+    /// The response head the peer has sent and no one has taken, and the waker of a wait for it.
+    head: Option<HttpResponseHead>,
+    head_waker: Option<Waker>,
+    /// What the exchange reports as its request's effect when it ends.
+    effect: Effect,
+}
+/// The test's side of one exchange.
+pub(crate) struct Peer(Arc<Mutex<IoState>>);
+impl Peer {
+    /// Bytes the peer sends: the next read gets them.
+    pub(crate) fn feed(&self, data: &[u8]) {
+        let waker = {
+            let mut state = self.0.lock().unwrap();
+            state.buffer.extend(data);
+            state.reader.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+    /// The peer ends its response: a read of an empty buffer is `Ok(0)`.
+    pub(crate) fn end(&self) {
+        let waker = {
+            let mut state = self.0.lock().unwrap();
+            state.ended = true;
+            state.reader.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+    /// The peer consumes `n` written bytes, making room.
+    pub(crate) fn take(&self, n: usize) -> Vec<u8> {
+        let (taken, waker) = {
+            let mut state = self.0.lock().unwrap();
+            let n = n.min(state.buffer.len());
+            (state.buffer.drain(..n).collect(), state.writer.take())
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        taken
+    }
+    /// The peer sends its response status and headers.
+    pub(crate) fn send_head(&self, head: HttpResponseHead) {
+        let waker = {
+            let mut state = self.0.lock().unwrap();
+            state.head = Some(head);
+            state.head_waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+    /// What the exchange reports as its request's effect from now on.
+    pub(crate) fn set_effect(&self, effect: Effect) {
+        self.0.lock().unwrap().effect = effect;
+    }
+    pub(crate) fn set_room(&self, room: usize) {
+        self.0.lock().unwrap().room = Some(room);
+    }
+    pub(crate) fn set_chunk(&self, chunk: usize) {
+        self.0.lock().unwrap().chunk = Some(chunk);
+    }
+    pub(crate) fn half_closed(&self) -> bool {
+        self.0.lock().unwrap().half_closed
+    }
+    /// Bytes the exchange has accepted from its writer in all.
+    pub(crate) fn written(&self) -> u64 {
+        self.0.lock().unwrap().written
+    }
+}
 struct FakeIo {
     world: Arc<FakeWorld>,
     queue: Arc<Mutex<Queue>>,
-    buffer: VecDeque<u8>,
+    state: Arc<Mutex<IoState>>,
 }
 impl ExchangeIo for FakeIo {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        self.buffer.extend(data);
+        let mut state = self.state.lock().unwrap();
+        state.written += data.len() as u64;
+        state.buffer.extend(data);
         Ok(data.len())
     }
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let mut state = self.state.lock().unwrap();
         let mut n = 0;
         while n < out.len() {
-            match self.buffer.pop_front() {
+            match state.buffer.pop_front() {
                 Some(byte) => {
                     out[n] = byte;
                     n += 1;
@@ -461,6 +564,52 @@ impl ExchangeIo for FakeIo {
             }
         }
         Ok(n)
+    }
+    fn poll_read(&mut self, cx: &mut Context<'_>, out: &mut [u8]) -> Poll<io::Result<usize>> {
+        let mut state = self.state.lock().unwrap();
+        if state.buffer.is_empty() && state.park && !state.ended {
+            state.reader = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+        let n = out.len().min(state.buffer.len());
+        for (slot, byte) in out.iter_mut().zip(state.buffer.drain(..n)) {
+            *slot = byte;
+        }
+        Poll::Ready(Ok(n))
+    }
+    fn poll_write(&mut self, cx: &mut Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
+        let mut state = self.state.lock().unwrap();
+        if state.half_closed {
+            return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+        }
+        let free = state
+            .room
+            .map_or(usize::MAX, |room| room.saturating_sub(state.buffer.len()));
+        if free == 0 {
+            state.writer = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+        let n = data.len().min(free).min(state.chunk.unwrap_or(usize::MAX));
+        state.written += n as u64;
+        state.buffer.extend(&data[..n]);
+        Poll::Ready(Ok(n))
+    }
+    fn poll_shutdown_write(&mut self, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.state.lock().unwrap().half_closed = true;
+        Poll::Ready(Ok(()))
+    }
+    fn poll_response_head(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<HttpResponseHead>> {
+        let mut state = self.state.lock().unwrap();
+        match state.head.take() {
+            Some(head) => Poll::Ready(Ok(head)),
+            None => {
+                state.head_waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        }
+    }
+    fn effect(&self) -> Effect {
+        self.state.lock().unwrap().effect
     }
     fn poll_finish(&mut self, cx: &mut Context<'_>) -> Poll<Disposition> {
         if self.world.hold_finish.load(Ordering::SeqCst)
@@ -557,11 +706,28 @@ impl EndpointAdapter for FakeAdapter {
             .lock()
             .unwrap()
             .push(("exchange", tag_of(auth)));
+        let state = Arc::new(Mutex::new(IoState {
+            park: self.world.park_streams.load(Ordering::SeqCst),
+            ..IoState::default()
+        }));
+        self.world.ios.lock().unwrap().push(state.clone());
         Ok(Box::new(FakeIo {
             world: self.world.clone(),
             queue: self.queue.clone(),
-            buffer: VecDeque::new(),
+            state,
         }))
+    }
+    fn start_exchange_checked(
+        &mut self,
+        connection: ConnectionId,
+        spec: &ExchangeSpec,
+        auth: &AuthContext,
+    ) -> Result<Box<dyn ExchangeIo>, StartError> {
+        if let Some((kind, effect)) = self.world.start_error.lock().unwrap().take() {
+            return Err(StartError::new(kind.into(), effect));
+        }
+        self.start_exchange(connection, spec, auth)
+            .map_err(StartError::none)
     }
     fn authorize_reuse(&mut self, command: ReuseCommand) -> bool {
         let Some(verdict) = *self.world.reuse_verdict.lock().unwrap() else {

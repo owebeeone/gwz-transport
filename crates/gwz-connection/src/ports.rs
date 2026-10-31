@@ -3,11 +3,11 @@
 //! (core's adapters over today's endpoints in step 1.3, fakes in this crate's tests).
 use crate::{
     AuthContext, BindingId, CleanupDomain, CleanupStatus, EndpointProfile, ExchangeSpec,
-    safety::SharedProcessSafety,
+    HttpResponseHead, StartError, safety::SharedProcessSafety,
 };
 use gwz_transport::{
     pool::{ConnectionId, Identity, Key},
-    protocol::{Disposition, Failure},
+    protocol::{Disposition, Effect, Failure},
 };
 use std::{
     fmt,
@@ -201,11 +201,83 @@ pub enum ReuseVerdict {
     /// not finish: the connection goes back to idle for the binding that used it, and the opening asks for a new one.
     Unprovable,
 }
-/// One exchange on a leased connection, in the adapter's own terms. Each call returns at once: a call that cannot
-/// proceed returns `WouldBlock`, never blocks the caller.
+/// One exchange on a leased connection, in the adapter's own terms.
+///
+/// The byte path is the `poll_*` methods (contract section 9): each takes the caller's `Context` and, when it cannot
+/// proceed, returns `Pending` having registered that waker, so a caller is woken by the data, the room or the
+/// shutdown it waits for and never sleep-polls. The synchronous `read` and `write` are the earlier port, kept for the
+/// adapters that have not moved yet (step R2b) and for `MessageStream::try_read` and `try_write`.
+///
+/// **Transitional defaults (retired by R2b).** `poll_read` and `poll_write` default to the synchronous call and, on
+/// `WouldBlock`, wake the waker at once and return `Pending`: correct, but it re-polls the caller in a busy loop, so an
+/// adapter must implement the `poll_*` methods itself to be woken by its data. The synchronous `read` and `write`
+/// default to `Unsupported`, so an adapter written for the poll port implements only that. `poll_shutdown_write`
+/// defaults to `Unsupported`: an adapter that cannot half-close says so, rather than claiming an end it did not send.
 pub trait ExchangeIo: Send {
-    fn write(&mut self, data: &[u8]) -> io::Result<usize>;
-    fn read(&mut self, out: &mut [u8]) -> io::Result<usize>;
+    /// Accepts a prefix of `data` (at least one byte, or an error); returns at once. `WouldBlock` means not yet.
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        let _ = data;
+        Err(io::ErrorKind::Unsupported.into())
+    }
+    /// Reads into `out`; `Ok(0)` is the validated end of the response. Returns at once. `WouldBlock` means not yet.
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let _ = out;
+        Err(io::ErrorKind::Unsupported.into())
+    }
+    /// Reads into `out` (never empty), or registers `cx` to be woken when data or the end arrives. `Ready(Ok(0))` is
+    /// the validated end. A poll that returns `Pending` has consumed nothing.
+    fn poll_read(&mut self, cx: &mut Context<'_>, out: &mut [u8]) -> Poll<io::Result<usize>> {
+        match self.read(out) {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            ready => Poll::Ready(ready),
+        }
+    }
+    /// Accepts a nonzero prefix of `data` (never empty), or registers `cx` to be woken when there is room. A poll that
+    /// returns `Pending` has accepted nothing.
+    fn poll_write(&mut self, cx: &mut Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
+        match self.write(data) {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            ready => Poll::Ready(ready),
+        }
+    }
+    /// Pushes out whatever the adapter buffered for the peer. The default has nothing buffered.
+    fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let _ = cx;
+        Poll::Ready(Ok(()))
+    }
+    /// Ends the request's writes and keeps the response readable (a POST body's end). `Ready(Ok)` means the adapter
+    /// sent that end; later writes fail. Polling again after `Ready` is `Ready`.
+    fn poll_shutdown_write(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let _ = cx;
+        Poll::Ready(Err(io::ErrorKind::Unsupported.into()))
+    }
+    /// The HTTP response's status and headers (an HTTPS exchange only; contract section 7.2), or registers `cx` to be
+    /// woken when they arrive. `Ready(Ok)` hands the head over once; a `Pending` poll has consumed nothing, so a caller
+    /// that dropped its wait gets the head from the next poll. The default is `Unsupported`: SSH has no head, and an
+    /// HTTPS adapter written for the earlier port has not provided one yet.
+    fn poll_response_head(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<HttpResponseHead>> {
+        let _ = cx;
+        Poll::Ready(Err(io::ErrorKind::Unsupported.into()))
+    }
+    /// Whether this exchange's own request may have reached the peer, read when the exchange ends (contract section 9,
+    /// HTTPS model A7). It is `Possible` from the moment the adapter hands the request to its engine or channel, even
+    /// with no byte acknowledged, and a request of another kind (a re-authentication GET inside a POST) does not move
+    /// it. The default is `None`: **an adapter that has sent a request must override it**, or the host will report an
+    /// exchange that may have pushed as having had no effect.
+    fn effect(&self) -> Effect {
+        Effect::None
+    }
+    /// The highest offset of written bytes the peer is known to have received, or `None` when the adapter cannot say.
+    /// It is not an application-level success acknowledgment (contract section 9).
+    fn peer_confirmed(&self) -> Option<u64> {
+        None
+    }
     /// The orderly end of the exchange. The first poll starts it; `Ready(Reusable)` asserts that the native protocol
     /// confirmed complete request/response cleanup and the connection can serve another exchange, and anything
     /// unproven is `Ready(Discarded)`. The host's driver polls it (not the application), so a `Pending` must wake
@@ -237,6 +309,20 @@ pub trait EndpointAdapter: Send {
         spec: &ExchangeSpec,
         auth: &AuthContext,
     ) -> io::Result<Box<dyn ExchangeIo>>;
+    /// `start_exchange` with the request's effect on failure (contract section 9, HTTPS model A7): what the host calls.
+    /// The default delegates to `start_exchange` and reports `Effect::None`, which is right for an adapter whose start
+    /// fails only before it hands the request to its engine. One that can fail after (an SSH exec submitted, then the
+    /// channel lost) overrides this and reports `Possible`: the host then never retries that opening on a new
+    /// connection, as it would for `NotConnected` with `None`.
+    fn start_exchange_checked(
+        &mut self,
+        connection: ConnectionId,
+        spec: &ExchangeSpec,
+        auth: &AuthContext,
+    ) -> Result<Box<dyn ExchangeIo>, StartError> {
+        self.start_exchange(connection, spec, auth)
+            .map_err(StartError::none)
+    }
     /// Contract section 4.1's `authorize_reuse` (section 7.1; step 1.6): starts the proof `command` names and reports
     /// it as `Completion::Reuse`, or returns `false` when it starts none, which the host takes as `Unprovable`. The
     /// default starts none: an adapter that proves nothing never serves one binding's connection to another.

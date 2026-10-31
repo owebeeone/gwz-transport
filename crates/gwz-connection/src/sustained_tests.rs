@@ -298,9 +298,9 @@ impl Workload {
         }
         let spec = if https { https_spec() } else { exchange_spec() };
         let mut exchange = now(operation.open(spec).unwrap().wait()).unwrap();
-        assert_eq!(exchange.stream().write(b"ping").unwrap(), 4);
+        assert_eq!(exchange.stream().try_write(b"ping").unwrap(), 4);
         let mut echo = [0u8; 8];
-        assert_eq!(exchange.stream().read(&mut echo).unwrap(), 4);
+        assert_eq!(exchange.stream().try_read(&mut echo).unwrap(), 4);
         assert_eq!(&echo[..4], b"ping");
         self.sample();
         let ending = ENDINGS[i % ENDINGS.len()];

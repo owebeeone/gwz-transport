@@ -9,7 +9,7 @@ use crate::{
     tables::InstanceTables,
 };
 use gwz_transport::pool::{Config, Error, LeaseId, PoolMachine, Request};
-use gwz_transport::protocol::Disposition;
+use gwz_transport::protocol::{Disposition, Effect};
 use std::{
     collections::BTreeMap,
     sync::{
@@ -367,14 +367,26 @@ impl Instance {
         self.pumped();
         ticket
     }
-    /// Discards an exchange's lease, as `release` does, and states how its end went in the receipt.
-    pub(crate) fn discard(&self, lease: LeaseId, cleanups: &Cleanups) -> Cell<ExchangeEnd> {
+    /// Discards an exchange's lease, as `release` does, and states how its end went in the receipt, with the `effect` its
+    /// adapter reported for the request.
+    pub(crate) fn discard(
+        &self,
+        lease: LeaseId,
+        cleanups: &Cleanups,
+        effect: Effect,
+    ) -> Cell<ExchangeEnd> {
         let end = Cell::new();
         {
             let mut state = self.lock();
             let connection = lease.connection();
             let _ = state.pool.release(lease, Disposition::Discarded);
-            state.report(connection, Disposition::Discarded, end.clone(), cleanups);
+            state.report(
+                connection,
+                Disposition::Discarded,
+                end.clone(),
+                cleanups,
+                effect,
+            );
             self.pump(&mut state);
         }
         self.pumped();
@@ -466,6 +478,7 @@ impl Instance {
                 disposition: Disposition::Discarded,
                 cleanup,
                 failure: None,
+                effect: item.io.effect(),
             });
         }
         self.wake_waiters();

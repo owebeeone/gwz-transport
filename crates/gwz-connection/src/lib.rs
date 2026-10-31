@@ -42,7 +42,8 @@ pub use domain::{
 };
 pub use exchange::{
     Exchange, ExchangeFinish, MessageStream, OpenWait, Opening, Operation, OperationCancel,
-    OperationFinish, Registered, StreamError,
+    OperationFinish, Registered, ResponseHead, StreamError, StreamFlush, StreamProgress,
+    StreamRead, StreamShutdown, StreamWrite, StreamWriteAll,
 };
 pub use host::{
     AttachError, BuildError, ConfigReason, HostClose, HostClosing, HostConfig, HostHandle,
@@ -50,9 +51,9 @@ pub use host::{
 };
 pub use operation::{
     AdmissionError, AdmitInput, AuthContext, AuthScope, CancelState, EndpointProfile,
-    EndpointRoute, ExchangeEnd, ExchangeSpec, GitService, InvalidInput, MAX_PROFILE_BYTES,
-    OpenError, OpenFailure, OperationEnd, OperationPolicy, OperationRef, PreparedOperation,
-    Registration, TerminalReason,
+    EndpointRoute, ExchangeEnd, ExchangeSpec, GitService, HttpResponseHead, InvalidInput,
+    MAX_PROFILE_BYTES, OpenError, OpenFailure, OperationEnd, OperationPolicy, OperationRef,
+    PreparedOperation, Registration, StartError, TerminalReason,
 };
 pub use ports::{
     Clock, Completion, ConnectCommand, DriverWork, EndpointAdapter, EndpointFactory, EndpointSpec,
@@ -70,7 +71,9 @@ cfg_if::cfg_if! {
         mod lifecycle_tests;
         mod operation_tests;
         mod pump_tests;
+        mod response_tests;
         mod reuse_tests;
+        mod stream_tests;
         mod sustained_tests;
     }
 }

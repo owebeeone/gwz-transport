@@ -48,13 +48,13 @@ fn a_transfer_larger_than_the_window_crosses_in_order_under_flow_control() {
     let mut buffer = [0u8; 8192];
     for _ in 0..4000 {
         if sent < payload.len() {
-            match exchange.stream().write(&payload[sent..]) {
+            match exchange.stream().try_write(&payload[sent..]) {
                 Ok(count) => sent += count,
                 Err(error) if would_block(&error) => {}
                 Err(error) => panic!("write: {error:?}"),
             }
         }
-        match exchange.stream().read(&mut buffer) {
+        match exchange.stream().try_read(&mut buffer) {
             Ok(count) => received.extend_from_slice(&buffer[..count]),
             Err(error) if would_block(&error) => {}
             Err(error) => panic!("read: {error:?}"),
@@ -81,11 +81,11 @@ fn a_full_lane_holds_messages_in_order_and_loses_none() {
     let mut buffer = [0u8; 4096];
     for _ in 0..20_000 {
         if sent < request.len()
-            && let Ok(count) = exchange.stream().write(&request[sent..])
+            && let Ok(count) = exchange.stream().try_write(&request[sent..])
         {
             sent += count;
         }
-        if let Ok(count) = exchange.stream().read(&mut buffer) {
+        if let Ok(count) = exchange.stream().try_read(&mut buffer) {
             received.extend_from_slice(&buffer[..count]);
         }
         w.settle();
@@ -196,13 +196,13 @@ fn carrier_loss_revokes_a_live_binding_and_a_started_receive_pack_exchange_repor
     w.carrier.end();
     w.remote.pump();
     assert!(matches!(
-        exchange.stream().write(b"x"),
+        exchange.stream().try_write(b"x"),
         Err(StreamError::CarrierLost {
             effect: Effect::Possible
         })
     ));
     assert!(matches!(
-        exchange.stream().read(&mut [0u8; 8]),
+        exchange.stream().try_read(&mut [0u8; 8]),
         Err(StreamError::CarrierLost {
             effect: Effect::Possible
         })
@@ -239,7 +239,7 @@ fn carrier_loss_under_a_fetch_exchange_or_an_unsent_push_open_reports_no_effect(
     w.carrier.end();
     w.remote.pump();
     assert!(matches!(
-        exchange.stream().write(b"x"),
+        exchange.stream().try_write(b"x"),
         Err(StreamError::CarrierLost {
             effect: Effect::None
         })
@@ -346,7 +346,7 @@ fn a_frame_that_breaks_one_bindings_rules_faults_that_binding_only() {
     w.carrier.inject(Way::ToCore, ("call-2".into(), hostile));
     w.settle();
     assert!(matches!(
-        exchange.stream().write(b"x"),
+        exchange.stream().try_write(b"x"),
         Err(StreamError::Failed {
             code: ErrorCode::Protocol,
             ..
@@ -381,7 +381,7 @@ fn a_late_frame_for_a_retired_stream_under_another_calls_name_faults_the_binding
     w.carrier.inject(Way::ToCore, ("call-2".into(), late));
     w.settle();
     assert!(matches!(
-        live.stream().write(b"x"),
+        live.stream().try_write(b"x"),
         Err(StreamError::Failed {
             code: ErrorCode::Protocol,
             ..
@@ -421,7 +421,7 @@ fn the_client_ending_the_call_fails_the_cores_open_exchanges_cancelled() {
     w.receiver.end_call("call-1");
     w.settle();
     assert!(matches!(
-        exchange.stream().write(b"x"),
+        exchange.stream().try_write(b"x"),
         Err(StreamError::Cancelled)
     ));
     assert_eq!(w.receiver.bindings(), 0);

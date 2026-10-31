@@ -13,8 +13,8 @@
 //! A lease serves the operation only when its connection was set up under a context of the operation's scope (step
 //! 1.5): a connection set up under another context is retired, never handed over, and the opening asks again.
 use crate::{
-    CancelState, ExchangeEnd, ExchangeIo, ExchangeSpec, OpenError, OpenFailure, OperationEnd,
-    Registration,
+    CancelState, ExchangeEnd, ExchangeIo, ExchangeSpec, HttpResponseHead, OpenError, OpenFailure,
+    OperationEnd, Registration,
     binding::{BindingShared, Cleanups, closing_reason},
     cell::{Cell, Slot},
     host::HostShared,
@@ -27,11 +27,12 @@ use crate::{
 };
 use gwz_transport::{
     pool::{LeaseId, Owner, Request},
-    protocol::{Disposition, Effect, ErrorCode},
+    protocol::{Disposition, Effect, ErrorCode, Scheme},
 };
 use std::{
     fmt,
     future::Future,
+    io,
     pin::Pin,
     sync::{
         Arc, Weak,
@@ -364,6 +365,7 @@ struct LocalOpening {
 impl LocalOpening {
     fn wait(self) -> LocalOpenWait {
         let binding = self.live.binding.clone();
+        let scheme = self.spec.key.scheme;
         let refused = closing_reason(binding.closing.load(Acquire))
             .map(OpenFailure::Closing)
             .or_else(|| {
@@ -405,6 +407,7 @@ impl LocalOpening {
             live: Some(self.live),
             submitted,
             early,
+            scheme,
         }
     }
 }
@@ -430,11 +433,13 @@ impl Future for OpenWait {
         match &mut self.0 {
             OpenWaitKind::Local(wait) => Pin::new(wait).poll(cx),
             OpenWaitKind::Remote(wait) => wait.poll_open(cx).map_ok(|started| Exchange {
-                stream: MessageStream(StreamKind::Remote(started.stream)),
+                stream: MessageStream::new(StreamKind::Remote(started.stream)),
                 back: Back::Remote {
                     reused: started.reused,
                     live: Some(started.live),
                 },
+                scheme: None,
+                head_taken: false,
             }),
         }
     }
@@ -443,6 +448,8 @@ struct LocalOpenWait {
     live: Option<Live>,
     submitted: Option<Arc<Slot<Opened>>>,
     early: Option<OpenFailure>,
+    /// The exchange's scheme, from its spec's key: what `Exchange::response_head` checks.
+    scheme: Scheme,
 }
 impl LocalOpenWait {
     fn is_ready(&self) -> bool {
@@ -481,7 +488,7 @@ impl Future for LocalOpenWait {
                 this.submitted = None;
                 let live = this.live.take().expect("live checked above");
                 Poll::Ready(Ok(Exchange {
-                    stream: MessageStream(StreamKind::Local {
+                    stream: MessageStream::new(StreamKind::Local {
                         io: Some(io),
                         binding: binding.clone(),
                     }),
@@ -494,6 +501,8 @@ impl Future for LocalOpenWait {
                         reused,
                         _live: Some(live),
                     },
+                    scheme: Some(this.scheme),
+                    head_taken: false,
                 }))
             }
         }
@@ -549,10 +558,38 @@ pub enum StreamError {
     Closed,
     /// A carrier-backed exchange: the stream broke a rule of the transport.
     Protocol,
+    /// `Exchange::response_head` on an exchange whose scheme has no response head (SSH).
+    WrongScheme,
+    /// `Exchange::response_head` after it already resolved.
+    WrongState,
 }
+/// How much of a stream's bytes have moved: fixed-size and monotonic, so a caller whose `write_all` future was dropped
+/// resolves it by reading `accepted_write`, never by resending the original buffer (contract section 9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct StreamProgress {
+    /// Bytes the stream accepted for the peer, a prefix of everything written, which a dropped future cannot retract.
+    pub accepted_write: u64,
+    /// Bytes the caller has read.
+    pub consumed_read: u64,
+    /// The highest written offset the peer is known to have received (not an application acknowledgment); `None` when
+    /// the adapter cannot say.
+    pub peer_confirmed: Option<u64>,
+}
+
 /// One exchange's byte stream, over the adapter's own I/O (or, carrier-backed, over the lane). Reads and writes are
-/// serialized by `&mut`, and a call that cannot proceed returns `Io(WouldBlock)`, never blocks.
-pub struct MessageStream(StreamKind);
+/// serialized by `&mut`. `read`, `write`, `write_all`, `flush` and `shutdown_write` are futures that wait on the
+/// adapter's waker and never sleep-poll; `try_read` and `try_write` are the non-waiting calls, which return
+/// `Io(WouldBlock)` when they cannot proceed.
+///
+/// A local exchange implements all of them over `ExchangeIo`. A carrier-backed stream's data path gives no wake yet
+/// (Phase 2, step 2.3g): its `read`, `write` and `write_all` re-poll their task in a busy loop until the lane moves,
+/// and its `flush` and `shutdown_write` return `Io(Unsupported)`.
+pub struct MessageStream {
+    kind: StreamKind,
+    accepted: u64,
+    consumed: u64,
+}
 enum StreamKind {
     Local {
         /// Taken only by the exchange's end, which consumes the exchange.
@@ -562,20 +599,70 @@ enum StreamKind {
     Remote(RemoteStream),
 }
 impl MessageStream {
-    pub fn write(&mut self, data: &[u8]) -> Result<usize, StreamError> {
-        match &mut self.0 {
-            StreamKind::Remote(stream) => stream.write(data),
-            StreamKind::Local { .. } => self.io()?.write(data).map_err(StreamError::Io),
+    fn new(kind: StreamKind) -> Self {
+        Self {
+            kind,
+            accepted: 0,
+            consumed: 0,
         }
     }
-    pub fn read(&mut self, out: &mut [u8]) -> Result<usize, StreamError> {
-        match &mut self.0 {
-            StreamKind::Remote(stream) => stream.read(out),
-            StreamKind::Local { .. } => self.io()?.read(out).map_err(StreamError::Io),
+    /// Accepts a nonzero prefix of `data`, or waits for room. An empty `data` is accepted at once, as a no-op.
+    pub fn write<'a>(&'a mut self, data: &'a [u8]) -> StreamWrite<'a> {
+        StreamWrite { stream: self, data }
+    }
+    /// Accepts all of `data`. When the future is dropped or fails, `progress().accepted_write` says how much of it
+    /// the stream took; the rest was not sent.
+    pub fn write_all<'a>(&'a mut self, data: &'a [u8]) -> StreamWriteAll<'a> {
+        StreamWriteAll {
+            stream: self,
+            data,
+            taken: 0,
         }
+    }
+    /// Reads into `out`: `Ok(0)` is the validated end of the response, or an empty `out`. A dropped future consumed no
+    /// bytes.
+    pub fn read<'a>(&'a mut self, out: &'a mut [u8]) -> StreamRead<'a> {
+        StreamRead { stream: self, out }
+    }
+    /// Resolves when the adapter has pushed out what it buffered.
+    pub fn flush(&mut self) -> StreamFlush<'_> {
+        StreamFlush { stream: self }
+    }
+    /// Ends the request's writes and leaves the response readable (a POST's body end). Later writes fail.
+    pub fn shutdown_write(&mut self) -> StreamShutdown<'_> {
+        StreamShutdown { stream: self }
+    }
+    /// The bytes moved so far.
+    pub fn progress(&self) -> StreamProgress {
+        StreamProgress {
+            accepted_write: self.accepted,
+            consumed_read: self.consumed,
+            peer_confirmed: match &self.kind {
+                StreamKind::Local { io, .. } => io.as_ref().and_then(|io| io.peer_confirmed()),
+                StreamKind::Remote(_) => None,
+            },
+        }
+    }
+    /// A write that does not wait: `Io(WouldBlock)` when it cannot proceed.
+    pub fn try_write(&mut self, data: &[u8]) -> Result<usize, StreamError> {
+        let count = match &mut self.kind {
+            StreamKind::Remote(stream) => stream.write(data)?,
+            StreamKind::Local { .. } => self.io()?.write(data).map_err(StreamError::Io)?,
+        };
+        self.accepted += count as u64;
+        Ok(count)
+    }
+    /// A read that does not wait: `Io(WouldBlock)` when it cannot proceed.
+    pub fn try_read(&mut self, out: &mut [u8]) -> Result<usize, StreamError> {
+        let count = match &mut self.kind {
+            StreamKind::Remote(stream) => stream.read(out)?,
+            StreamKind::Local { .. } => self.io()?.read(out).map_err(StreamError::Io)?,
+        };
+        self.consumed += count as u64;
+        Ok(count)
     }
     fn io(&mut self) -> Result<&mut Box<dyn ExchangeIo>, StreamError> {
-        let StreamKind::Local { io, binding } = &mut self.0 else {
+        let StreamKind::Local { io, binding } = &mut self.kind else {
             return Err(StreamError::Closed);
         };
         if binding.cancelled.load(Acquire) {
@@ -583,18 +670,189 @@ impl MessageStream {
         }
         io.as_mut().ok_or(StreamError::Cancelled)
     }
+    /// Runs one adapter poll for a local stream, after registering `cx` with the instance so a cancellation wakes it.
+    /// The waker is registered before the cancelled flag is read, so a cancellation cannot fall between the two.
+    fn poll_local<R>(
+        &mut self,
+        cx: &mut Context<'_>,
+        poll: impl FnOnce(&mut dyn ExchangeIo, &mut Context<'_>) -> Poll<io::Result<R>>,
+    ) -> Poll<Result<R, StreamError>> {
+        if let StreamKind::Local { binding, .. } = &self.kind {
+            binding.instance.wait(cx.waker());
+        }
+        match self.io() {
+            Ok(io) => poll(io.as_mut(), cx).map(|result| result.map_err(StreamError::Io)),
+            Err(error) => Poll::Ready(Err(error)),
+        }
+    }
+    /// A carrier-backed call as a poll: "not yet" re-polls the task (the lane gives no wake yet, step 2.3g).
+    fn poll_remote<R>(
+        cx: &mut Context<'_>,
+        call: Result<R, StreamError>,
+    ) -> Poll<Result<R, StreamError>> {
+        match call {
+            Err(StreamError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            ready => Poll::Ready(ready),
+        }
+    }
+    fn poll_write(
+        &mut self,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<Result<usize, StreamError>> {
+        if data.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        let polled = match &mut self.kind {
+            StreamKind::Remote(stream) => Self::poll_remote(cx, stream.write(data)),
+            StreamKind::Local { .. } => self.poll_local(cx, |io, cx| io.poll_write(cx, data)),
+        };
+        if let Poll::Ready(Ok(count)) = &polled {
+            self.accepted += *count as u64;
+        }
+        polled
+    }
+    fn poll_read(
+        &mut self,
+        cx: &mut Context<'_>,
+        out: &mut [u8],
+    ) -> Poll<Result<usize, StreamError>> {
+        if out.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        let polled = match &mut self.kind {
+            StreamKind::Remote(stream) => Self::poll_remote(cx, stream.read(out)),
+            StreamKind::Local { .. } => self.poll_local(cx, |io, cx| io.poll_read(cx, out)),
+        };
+        if let Poll::Ready(Ok(count)) = &polled {
+            self.consumed += *count as u64;
+        }
+        polled
+    }
     /// The local exchange's adapter I/O, taken by the exchange's end.
     fn take_io(&mut self) -> Option<Box<dyn ExchangeIo>> {
-        match &mut self.0 {
+        match &mut self.kind {
             StreamKind::Local { io, .. } => io.take(),
             StreamKind::Remote(_) => None,
         }
     }
     fn local_binding(&self) -> Option<&Arc<BindingShared>> {
-        match &self.0 {
+        match &self.kind {
             StreamKind::Local { binding, .. } => Some(binding),
             StreamKind::Remote(_) => None,
         }
+    }
+}
+
+/// See [`MessageStream::write`].
+pub struct StreamWrite<'a> {
+    stream: &'a mut MessageStream,
+    data: &'a [u8],
+}
+impl Future for StreamWrite<'_> {
+    type Output = Result<usize, StreamError>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = &mut *self;
+        this.stream.poll_write(cx, this.data)
+    }
+}
+/// See [`MessageStream::write_all`].
+pub struct StreamWriteAll<'a> {
+    stream: &'a mut MessageStream,
+    data: &'a [u8],
+    taken: usize,
+}
+impl Future for StreamWriteAll<'_> {
+    type Output = Result<(), StreamError>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = &mut *self;
+        while this.taken < this.data.len() {
+            match this.stream.poll_write(cx, &this.data[this.taken..]) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                // An adapter that accepts nothing and does not fail would loop forever.
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(StreamError::Io(io::ErrorKind::WriteZero.into())));
+                }
+                Poll::Ready(Ok(count)) => this.taken += count,
+            }
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+/// See [`MessageStream::read`].
+pub struct StreamRead<'a> {
+    stream: &'a mut MessageStream,
+    out: &'a mut [u8],
+}
+impl Future for StreamRead<'_> {
+    type Output = Result<usize, StreamError>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = &mut *self;
+        this.stream.poll_read(cx, this.out)
+    }
+}
+/// See [`MessageStream::flush`].
+pub struct StreamFlush<'a> {
+    stream: &'a mut MessageStream,
+}
+impl Future for StreamFlush<'_> {
+    type Output = Result<(), StreamError>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match &self.stream.kind {
+            StreamKind::Remote(_) => {
+                Poll::Ready(Err(StreamError::Io(io::ErrorKind::Unsupported.into())))
+            }
+            StreamKind::Local { .. } => self.stream.poll_local(cx, |io, cx| io.poll_flush(cx)),
+        }
+    }
+}
+/// See [`MessageStream::shutdown_write`].
+pub struct StreamShutdown<'a> {
+    stream: &'a mut MessageStream,
+}
+impl Future for StreamShutdown<'_> {
+    type Output = Result<(), StreamError>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match &self.stream.kind {
+            StreamKind::Remote(_) => {
+                Poll::Ready(Err(StreamError::Io(io::ErrorKind::Unsupported.into())))
+            }
+            StreamKind::Local { .. } => self
+                .stream
+                .poll_local(cx, |io, cx| io.poll_shutdown_write(cx)),
+        }
+    }
+}
+
+/// See [`Exchange::response_head`].
+pub struct ResponseHead<'a> {
+    exchange: &'a mut Exchange,
+}
+impl Future for ResponseHead<'_> {
+    type Output = Result<HttpResponseHead, StreamError>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let exchange = &mut *self.exchange;
+        match exchange.scheme {
+            Some(Scheme::Ssh) => return Poll::Ready(Err(StreamError::WrongScheme)),
+            None => {
+                return Poll::Ready(Err(StreamError::Io(io::ErrorKind::Unsupported.into())));
+            }
+            Some(Scheme::Https) => {}
+        }
+        if exchange.head_taken {
+            return Poll::Ready(Err(StreamError::WrongState));
+        }
+        let polled = exchange
+            .stream
+            .poll_local(cx, |io, cx| io.poll_response_head(cx));
+        if matches!(polled, Poll::Ready(Ok(_))) {
+            exchange.head_taken = true;
+        }
+        polled
     }
 }
 
@@ -603,6 +861,10 @@ impl MessageStream {
 pub struct Exchange {
     stream: MessageStream,
     back: Back,
+    /// The key's scheme; `None` for a carrier-backed exchange, which has no response head yet.
+    scheme: Option<Scheme>,
+    /// `response_head` has resolved.
+    head_taken: bool,
 }
 enum Back {
     Local {
@@ -618,6 +880,13 @@ enum Back {
 impl Exchange {
     pub fn stream(&mut self) -> &mut MessageStream {
         &mut self.stream
+    }
+    /// An HTTPS exchange's response status and headers, resolved exactly once (contract sections 4 and 7.2). A second
+    /// call is `WrongState`, an SSH exchange is `WrongScheme`, and a carrier-backed exchange has no head yet
+    /// (`Io(Unsupported)`). Dropping the future cancels only this wait: nothing is consumed until it resolves, so a
+    /// later call still gets the head. The body is the stream's.
+    pub fn response_head(&mut self) -> ResponseHead<'_> {
+        ResponseHead { exchange: self }
     }
     /// Whether the connection served an exchange before this one (the observation's `reused`): it was idle, of this
     /// operation's profile, and set up under a context of this operation's scope. Carrier-backed, the client's
@@ -636,7 +905,7 @@ impl Exchange {
             .local_binding()
             .is_some_and(|binding| binding.cancelled.load(Acquire));
         match &mut self.back {
-            Back::Remote { live, .. } => ExchangeFinish(match (live.take(), &self.stream.0) {
+            Back::Remote { live, .. } => ExchangeFinish(match (live.take(), &self.stream.kind) {
                 (Some(live), StreamKind::Remote(stream)) => FinishKind::Remote(stream.finish(live)),
                 _ => FinishKind::Local(Cell::ready(discarded())),
             }),
@@ -647,9 +916,12 @@ impl Exchange {
                 let id = lease.lease.take().expect("a live lease");
                 if cancelled {
                     io.abort();
-                    return ExchangeFinish(FinishKind::Local(
-                        lease.instance.discard(id, &lease.cleanups),
-                    ));
+                    let effect = io.effect();
+                    return ExchangeFinish(FinishKind::Local(lease.instance.discard(
+                        id,
+                        &lease.cleanups,
+                        effect,
+                    )));
                 }
                 ExchangeFinish(FinishKind::Local(lease.instance.settle(
                     io,
@@ -672,17 +944,19 @@ impl Exchange {
         // A carrier-backed exchange: dropping its `Live` cancels the exchange and the client discards its connection.
     }
 }
+/// The receipt of an exchange that never had an adapter exchange to ask: nothing was sent.
 fn discarded() -> ExchangeEnd {
     ExchangeEnd {
         disposition: Disposition::Discarded,
         cleanup: crate::CleanupStatus::Complete,
         failure: None,
+        effect: Effect::None,
     }
 }
 impl Drop for Exchange {
     fn drop(&mut self) {
         if let Back::Local { lease: Some(_), .. } = &self.back
-            && let StreamKind::Local { io: Some(io), .. } = &mut self.stream.0
+            && let StreamKind::Local { io: Some(io), .. } = &mut self.stream.kind
         {
             io.abort();
         }
