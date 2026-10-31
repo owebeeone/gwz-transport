@@ -146,7 +146,8 @@ pub(super) struct State {
 
 /// What a pending future waits for. A waiter is woken when its condition holds, never by the poll that registered it.
 /// Each value belongs to one future, which is its slot: the same future polled again replaces its waker, and no other
-/// future's waker is ever replaced or evicted.
+/// future's waker is ever replaced or evicted. `Opening` and `Ending` each have exactly one owning future (the one that
+/// owns the exchange's `Live`), so one waiter per such value suffices.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Wait {
     /// The binding's registration is decided. Any number of futures wait for it (`Operation::registered` may be called
