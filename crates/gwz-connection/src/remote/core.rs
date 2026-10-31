@@ -145,10 +145,13 @@ pub(super) struct State {
 }
 
 /// What a pending future waits for. A waiter is woken when its condition holds, never by the poll that registered it.
+/// Each value belongs to one future, which is its slot: the same future polled again replaces its waker, and no other
+/// future's waker is ever replaced or evicted.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Wait {
-    /// The binding's registration is decided.
-    Registered(u64),
+    /// The binding's registration is decided. Any number of futures wait for it (`Operation::registered` may be called
+    /// again), so each carries its own `slot`.
+    Registered { serial: u64, slot: u64 },
     /// The exchange's opening is decided (or its record is gone).
     Opening(u64, u64),
     /// The exchange has ended (or its record is gone).
@@ -158,9 +161,6 @@ pub(super) struct Waiter {
     wait: Wait,
     waker: Waker,
 }
-/// The most wakers kept for one wait: a task polled with a fresh waker each time cannot grow the list.
-const WAKERS_PER_WAIT: usize = 16;
-
 /// The most messages the outbox holds beyond the binds that `register` puts in it unconditionally.
 const OUTBOX_ROOM: usize = 64;
 
@@ -183,33 +183,31 @@ impl State {
         }
     }
 
-    /// Registers `waker` to be woken when `wait` holds. The caller has just seen it not hold, under the same lock.
+    /// Registers `waker` to be woken when `wait` holds. The caller has just seen it not hold, under the same lock. The
+    /// future owning `wait` keeps one waiter: a poll with another waker replaces its waker, so a task polled with a fresh
+    /// waker each time cannot grow the list, and no other future's waker is touched.
     pub(super) fn wait_for(&mut self, wait: Wait, waker: &Waker) {
-        let same: Vec<usize> = self
-            .waiters
-            .iter()
-            .enumerate()
-            .filter(|(_, waiter)| waiter.wait == wait)
-            .map(|(index, _)| index)
-            .collect();
-        if same
-            .iter()
-            .any(|&index| self.waiters[index].waker.will_wake(waker))
-        {
-            return;
+        match self.waiters.iter_mut().find(|waiter| waiter.wait == wait) {
+            Some(waiter) => {
+                if !waiter.waker.will_wake(waker) {
+                    waiter.waker = waker.clone();
+                }
+            }
+            None => self.waiters.push(Waiter {
+                wait,
+                waker: waker.clone(),
+            }),
         }
-        if same.len() >= WAKERS_PER_WAIT {
-            self.waiters.remove(same[0]);
-        }
-        self.waiters.push(Waiter {
-            wait,
-            waker: waker.clone(),
-        });
+    }
+
+    /// The future owning `wait` is gone: its waiter goes with it.
+    pub(super) fn forget(&mut self, wait: Wait) {
+        self.waiters.retain(|waiter| waiter.wait != wait);
     }
 
     fn holds(&self, wait: Wait) -> bool {
         match wait {
-            Wait::Registered(serial) => self
+            Wait::Registered { serial, .. } => self
                 .bindings
                 .get(&serial)
                 .is_none_or(|binding| !matches!(binding.reg, Reg::Pending)),
@@ -670,8 +668,10 @@ impl Binding {
                         }
                         None
                     }
-                    Err(mux::Error::Capacity) => Some(OpenFailure::Fault(ErrorCode::Capacity)),
-                    Err(mux::Error::WouldBlock) => {
+                    // `RemoteOp::open` already holds the exchanges to the binding's streams, so a full mux is a route
+                    // whose terminal is still in flight (an abort at the bound): the exchange waits for it, as it waits
+                    // for room in the outbox.
+                    Err(mux::Error::Capacity | mux::Error::WouldBlock) => {
                         if let Some(exch) = self.exchanges.get_mut(&token) {
                             exch.spec = Some(spec);
                         }

@@ -587,7 +587,8 @@ fn the_bind_bounds_are_the_bindings_window_and_the_muxs_streams() {
         }
     );
     assert_eq!(core(0).streams, 1);
-    assert_eq!(core(5000).streams, 1024);
+    // Held to the client's ceiling (step 2.3b, Code P3-7); `carried_rows` pins it against the client's bound.
+    assert_eq!(core(5000).streams, 64);
     assert_eq!(
         BindBounds::client(),
         BindBounds {

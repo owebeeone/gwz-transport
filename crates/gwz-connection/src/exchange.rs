@@ -21,8 +21,8 @@ use crate::{
     instance::{Instance, Opened, cancel_authorizing},
     operation::TerminalReason,
     remote::{
-        RemoteCancel, RemoteFinish, RemoteLive, RemoteOp, RemoteOpenWait, RemoteOpening,
-        RemoteStream,
+        RegisteredSlot, RemoteCancel, RemoteFinish, RemoteLive, RemoteOp, RemoteOpenWait,
+        RemoteOpening, RemoteStream,
     },
 };
 use gwz_transport::{
@@ -84,7 +84,14 @@ impl Operation {
     }
     /// Resolves once the registration is no longer `Pending`: at once for a local operation.
     pub fn registered(&self) -> Registered<'_> {
-        Registered { operation: self }
+        let slot = match &self.kind {
+            Kind::Remote(op) => Some(op.registered_slot()),
+            _ => None,
+        };
+        Registered {
+            operation: self,
+            slot,
+        }
     }
     /// Cancels this operation only; the handle is weak and `Send + Sync + Clone`.
     pub fn cancel_handle(&self) -> OperationCancel {
@@ -296,12 +303,14 @@ impl OperationCancel {
 /// See [`Operation::registered`].
 pub struct Registered<'a> {
     operation: &'a Operation,
+    /// The future's own waiter slot on a carrier-backed operation (a local one never waits).
+    slot: Option<RegisteredSlot>,
 }
 impl Future for Registered<'_> {
     type Output = Registration;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Registration> {
-        match &self.operation.kind {
-            Kind::Remote(op) => op.poll_registered(cx),
+        match (&self.operation.kind, &self.slot) {
+            (Kind::Remote(op), Some(slot)) => op.poll_registered(slot, cx),
             _ => Poll::Ready(self.operation.registration()),
         }
     }

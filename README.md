@@ -578,6 +578,19 @@ client_port.disconnect();
 `cargo test --doc` type-checks this example. The executable in-memory lifecycle
 and closure regressions are in `tests/mux.rs` and `tests/mux_async.rs`.
 
+### Carrier-backed connections (`gwz-connection::remote`)
+
+Three limits of the `remote` module's carrier-backed handle (step 2.3b):
+
+- `RemoteConfig::streams_per_binding` is held to 64, the streams the client's end of a binding holds (the carrier
+  holds that binding to the same number). A larger value reads as 64, so a core cannot open a stream the lagging
+  client's carrier would fault the binding for; `open` past it answers `OpenError::BindingLimit` at once. A composition
+  passes one `RemoteConfig` to the lane and to `remote::handle_with`.
+- An open issued right after an abort at that bound waits for the aborted stream's route to retire (the client's
+  terminal is still in flight); it never answers `OpenFailure::Fault(Capacity)`.
+- Futures from `Operation::registered` each hold their own waiter slot, so any number of them waiting on one
+  registration are each woken once; dropping one releases its slot.
+
 Native HTTPS policies WindowsConfigured and WindowsDefault are explicit profile
 2/3 capabilities; profile 1 offers remain unchanged. SSPI Facts carry source,
 scheme, observation, selected mechanism and authority. NotStarted never claims

@@ -36,7 +36,8 @@ pub use admission::{
 };
 pub use backend::RemoteConfig;
 pub(crate) use backend::{
-    RemoteAcquire, RemoteAdmission, RemoteCancel, RemoteOp, RemoteOpening, RemotePermit,
+    RegisteredSlot, RemoteAcquire, RemoteAdmission, RemoteCancel, RemoteOp, RemoteOpening,
+    RemotePermit,
 };
 pub use lane::{BindBounds, ClientSession, CoreBinding, Lane, LaneEnded, LaneSend};
 pub use receiver::{Invocation, Invocations, NamedKey, Receiver, RefusalNote, serve_bindings};

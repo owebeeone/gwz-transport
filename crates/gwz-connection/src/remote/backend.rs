@@ -26,7 +26,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex, OnceLock, Weak,
-        atomic::{AtomicBool, Ordering::AcqRel},
+        atomic::{AtomicBool, AtomicU64, Ordering::AcqRel},
     },
     task::{Context, Poll},
 };
@@ -41,14 +41,18 @@ pub struct RemoteConfig {
     pub waiting_admissions: usize,
     /// How long `acquire` may wait for a slot.
     pub admission_bound_ms: u64,
-    /// Streams one binding's mux holds at once (at most 1024).
+    /// Streams one binding's mux holds at once, and so the exchanges one operation may have open: at most 64, the
+    /// client's ceiling (its endpoint half of the binding holds 64 streams, and the carrier holds that binding to the
+    /// same number). A larger value is held to 64, because a core that opened more would fault the binding at the
+    /// client's carrier whenever the client lagged.
     pub streams_per_binding: usize,
     pub deadlines: Deadlines,
 }
 impl RemoteConfig {
-    /// `streams_per_binding` as the binding's mux takes it.
+    /// `streams_per_binding` as the binding's mux takes it, and as the carrier holds the binding to (`BindBounds`): one
+    /// value for the core's mux, its `open` limit and both ends' bounds.
     pub(super) fn streams(&self) -> usize {
-        self.streams_per_binding.clamp(1, 1024)
+        self.streams_per_binding.clamp(1, super::served::STREAMS)
     }
 }
 impl Default for RemoteConfig {
@@ -75,6 +79,8 @@ pub(crate) struct Shared {
     pub(super) config: RemoteConfig,
     state: Mutex<State>,
     driver_spawned: AtomicBool,
+    /// The last slot given to a future waiting on a registration (`Wait::Registered`).
+    slots: AtomicU64,
 }
 impl Shared {
     pub(super) fn new(binding: Arc<dyn CoreBinding>, config: RemoteConfig) -> Arc<Self> {
@@ -83,7 +89,19 @@ impl Shared {
             config,
             state: Mutex::new(State::new()),
             driver_spawned: AtomicBool::new(false),
+            slots: AtomicU64::new(0),
         })
+    }
+    /// A slot no other future waiting on a registration has.
+    fn next_slot(&self) -> u64 {
+        self.slots.fetch_add(1, AcqRel) + 1
+    }
+    /// Drops the waiter of a future that is gone. It takes the lock but does not pump: it changes no binding.
+    fn forget(&self, wait: Wait) {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .forget(wait);
     }
     /// Pumps, runs `f` under the state lock, pumps again, then (lock released) publishes receipts and wakes the waiters
     /// whose condition now holds. A future that registered its waker inside `f` and still waits is not woken by its own
@@ -433,14 +451,29 @@ impl RemoteOp {
                 .unwrap_or(Registration::NeverRegistered(TerminalReason::HostFault)),
         }
     }
+    /// A slot for one future waiting on this registration: its waker is never replaced by another future's, and its
+    /// waiter goes when the slot is dropped.
+    pub(crate) fn registered_slot(&self) -> RegisteredSlot {
+        RegisteredSlot {
+            shared: self.shared.clone(),
+            wait: Wait::Registered {
+                serial: self.serial,
+                slot: self.shared.next_slot(),
+            },
+        }
+    }
     /// Resolves once the registration is no longer pending; the waker is woken when it is decided, not by this poll.
-    pub(crate) fn poll_registered(&self, cx: &mut Context<'_>) -> Poll<Registration> {
+    pub(crate) fn poll_registered(
+        &self,
+        slot: &RegisteredSlot,
+        cx: &mut Context<'_>,
+    ) -> Poll<Registration> {
         let serial = self.serial;
         let waker = cx.waker();
         self.shared.with(|state| {
             let registration = self.registration_in(state, serial);
             if registration == Registration::Pending {
-                state.wait_for(Wait::Registered(serial), waker);
+                state.wait_for(slot.wait, waker);
                 return Poll::Pending;
             }
             Poll::Ready(registration)
@@ -457,7 +490,7 @@ impl RemoteOp {
     /// is polled.
     pub(crate) fn open(&self, spec: ExchangeSpec) -> Result<RemoteOpening, OpenError> {
         let (shared, serial) = (self.shared.clone(), self.serial);
-        let streams = shared.config.streams_per_binding;
+        let streams = shared.config.streams();
         let path_base = {
             let request =
                 shared.with(|state| state.bindings.get(&serial).map(|b| b.request.clone()));
@@ -528,6 +561,19 @@ impl RemoteOp {
         });
     }
 }
+/// The waiter slot of one `Operation::registered` future. Dropping it removes the waiter, so a future that is dropped
+/// unpolled to the end leaves nothing behind. (It is a field, not a `Drop` on the future: the future borrows its
+/// operation, and a `Drop` of its own would keep that borrow to the end of its scope.)
+pub(crate) struct RegisteredSlot {
+    shared: Arc<Shared>,
+    wait: Wait,
+}
+impl Drop for RegisteredSlot {
+    fn drop(&mut self) {
+        self.shared.forget(self.wait);
+    }
+}
+
 /// Cancels one operation; it holds the state weakly, so it keeps nothing alive.
 #[derive(Clone)]
 pub(crate) struct RemoteCancel {
