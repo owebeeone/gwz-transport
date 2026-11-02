@@ -11,7 +11,7 @@ mod io_clock;
 mod machine;
 mod outgoing;
 mod state;
-pub use asynchronous::{MessageEndpoint, Stream};
+pub use asynchronous::{MessageEndpoint, Stream, StreamWaiter};
 pub use state::{Snapshot, StreamMachine};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

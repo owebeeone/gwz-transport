@@ -226,11 +226,13 @@ impl Instance {
     /// and confirmed ends to the pool, until none of them has more.
     pub(crate) fn pump(&self, state: &mut InstanceState) {
         self.observe_epoch(state);
-        state.pool.advance(self.clock.now().get());
+        let now = self.clock.now().get();
+        state.pool.advance(now);
         let waker = Waker::from(self.wakes.clone());
         let mut cx = Context::from_waker(&waker);
         loop {
-            let mut progressed = actions(state);
+            // The pool's clock is at `now` for the whole pump: its connects' deadlines are spans from it.
+            let mut progressed = actions(state, now);
             let mut verdicts = Vec::new();
             if let Some(adapter) = state.adapter.as_mut() {
                 let mut ended = Vec::new();

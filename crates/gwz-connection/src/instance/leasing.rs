@@ -9,9 +9,9 @@ use gwz_transport::protocol::Effect;
 use gwz_transport::protocol::Scheme;
 use std::sync::atomic::Ordering;
 
-/// The pool's actions, to the adapter. A connect is given the context of the opening whose request it is for, and its
-/// scope is recorded. Whether there were any.
-pub(super) fn actions(state: &mut InstanceState) -> bool {
+/// The pool's actions, to the adapter, at `now` (the pool's clock). A connect is given the context of the opening whose
+/// request it is for, and what is left of its network deadline, and its scope is recorded. Whether there were any.
+pub(super) fn actions(state: &mut InstanceState, now: u64) -> bool {
     let mut progressed = false;
     while let Some(action) = state.pool.next_action() {
         progressed = true;
@@ -29,8 +29,8 @@ pub(super) fn actions(state: &mut InstanceState) -> bool {
                 connection,
                 key,
                 identity,
+                network_deadline,
                 tag,
-                ..
             } => {
                 let auth = tag.and_then(|tag| {
                     openings
@@ -53,6 +53,8 @@ pub(super) fn actions(state: &mut InstanceState) -> bool {
                     key,
                     identity,
                     auth,
+                    network_remaining_ms: network_deadline
+                        .map(|deadline| deadline.saturating_sub(now)),
                 })
             }
             Action::CancelConnect { connection, .. } | Action::AbortConnect { connection } => {

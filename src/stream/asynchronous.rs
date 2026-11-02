@@ -140,6 +140,31 @@ impl Drop for Waiter {
     }
 }
 
+/// A caller-held wait registration for [`Stream::poll_read`] and [`Stream::poll_write`]. A `Pending` poll leaves it
+/// registered with the latest waker, holding one place against `max_waiters` however often it is polled, until a poll
+/// returns `Ready` or the slot drops. Hold one slot per direction a task waits on. A slot polled on another stream
+/// leaves its earlier stream and registers on the new one.
+#[derive(Default)]
+pub struct StreamWaiter {
+    waiter: Option<Waiter>,
+}
+impl StreamWaiter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    fn bind(&mut self, shared: &Arc<Shared>) -> &mut Waiter {
+        let bound = self
+            .waiter
+            .as_ref()
+            .is_some_and(|waiter| Arc::ptr_eq(&waiter.shared, shared));
+        if !bound {
+            // Unregister a waiter of another stream before registering here, so it never holds a second place.
+            self.waiter = None;
+        }
+        self.waiter.get_or_insert_with(|| Waiter::new(shared))
+    }
+}
+
 /// File-like asynchronous access to one exchange. Clones share byte positions;
 /// concurrent reads divide the data, they do not create a broadcast subscription.
 pub struct Stream {
@@ -169,12 +194,34 @@ impl Stream {
         ))
     }
     pub async fn read(&self, output: &mut [u8]) -> Result<usize, Error> {
-        let mut waiter = Waiter::new(&self.shared);
-        poll_fn(|cx| waiter.poll(cx, |machine| machine.read(output))).await
+        let mut slot = StreamWaiter::new();
+        poll_fn(|cx| self.poll_read(cx, &mut slot, output)).await
     }
     pub async fn write(&self, input: &[u8]) -> Result<usize, Error> {
-        let mut waiter = Waiter::new(&self.shared);
-        poll_fn(|cx| waiter.poll(cx, |machine| machine.write(input))).await
+        let mut slot = StreamWaiter::new();
+        poll_fn(|cx| self.poll_write(cx, &mut slot, input)).await
+    }
+    /// Reads into `output`, or registers `cx` in `slot` and returns `Pending`; a `Pending` poll consumed nothing.
+    /// The slot stays registered between polls, so the delivery or end that lets the read proceed wakes `cx`.
+    pub fn poll_read(
+        &self,
+        cx: &mut Context<'_>,
+        slot: &mut StreamWaiter,
+        output: &mut [u8],
+    ) -> Poll<Result<usize, Error>> {
+        slot.bind(&self.shared)
+            .poll(cx, |machine| machine.read(output))
+    }
+    /// Accepts a prefix of `input`, or registers `cx` in `slot` and returns `Pending` having accepted nothing. The
+    /// slot stays registered between polls, so the credit or the dispatcher's take that makes room wakes `cx`.
+    pub fn poll_write(
+        &self,
+        cx: &mut Context<'_>,
+        slot: &mut StreamWaiter,
+        input: &[u8],
+    ) -> Poll<Result<usize, Error>> {
+        slot.bind(&self.shared)
+            .poll(cx, |machine| machine.write(input))
     }
     pub async fn write_all(&self, mut input: &[u8]) -> Result<(), Error> {
         while !input.is_empty() {

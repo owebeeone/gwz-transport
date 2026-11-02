@@ -1,8 +1,8 @@
 //! The asynchronous stream of contract section 9 for a local exchange (Phase 1 remediation R2a-1): a pending read is
 //! woken by its data and never sleep-polls, `write_all` and `progress()` stay truthful after a dropped future, a POST
-//! half-closes with `shutdown_write`, and the transitional `ExchangeIo` defaults do what their documentation says.
+//! half-closes with `shutdown_write`, and `try_read` and `try_write` are one poll that ends in `WouldBlock`.
 use crate::fakes::{Rig, exchange_spec, now, prepared};
-use crate::{CancelState, Exchange, ExchangeIo, HostOwner, Operation, StreamError, StreamProgress};
+use crate::{CancelState, Exchange, HostOwner, Operation, StreamError, StreamProgress};
 use std::{
     io,
     pin::pin,
@@ -194,68 +194,34 @@ fn a_cancel_wakes_a_pending_read_with_cancelled() {
     ));
 }
 
-/// An adapter written for the earlier port: only the synchronous calls.
-struct SyncOnly {
-    ready: bool,
-}
-impl ExchangeIo for SyncOnly {
-    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        Ok(data.len())
-    }
-    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        if self.ready {
-            out[0] = 7;
-            Ok(1)
-        } else {
-            Err(io::ErrorKind::WouldBlock.into())
-        }
-    }
-    fn poll_finish(&mut self, _cx: &mut Context<'_>) -> Poll<gwz_transport::protocol::Disposition> {
-        Poll::Ready(gwz_transport::protocol::Disposition::Discarded)
-    }
-    fn abort(&mut self) {}
-}
-/// An adapter written for the poll port: no synchronous calls.
-struct PollOnly;
-impl ExchangeIo for PollOnly {
-    fn poll_finish(&mut self, _cx: &mut Context<'_>) -> Poll<gwz_transport::protocol::Disposition> {
-        Poll::Ready(gwz_transport::protocol::Disposition::Discarded)
-    }
-    fn abort(&mut self) {}
-}
-
 #[test]
-fn the_transitional_defaults_adapt_the_sync_port_and_say_unsupported_otherwise() {
-    let (count, waker) = counting();
-    let mut cx = Context::from_waker(&waker);
-    let mut buffer = [0u8; 2];
-    let mut old = SyncOnly { ready: false };
-    // The shim over a sync adapter: not ready is Pending with the waker woken at once (a busy re-poll, retired by R2b).
-    assert!(old.poll_read(&mut cx, &mut buffer).is_pending());
-    assert_eq!(wakes(&count), 1);
-    old.ready = true;
+fn try_read_and_try_write_are_one_poll_that_ends_in_would_block() {
+    let (rig, _owner, _operation, mut exchange) = parked();
+    let mut buffer = [0u8; 8];
+    assert_eq!(exchange.stream().try_write(b"ping").unwrap(), 4);
+    assert_eq!(exchange.stream().try_read(&mut buffer).unwrap(), 4);
+    // Nothing is there to read, and the stream is not at its end: one poll found it pending.
     assert!(matches!(
-        old.poll_read(&mut cx, &mut buffer),
-        Poll::Ready(Ok(1))
+        exchange.stream().try_read(&mut buffer),
+        Err(StreamError::Io(ref e)) if e.kind() == io::ErrorKind::WouldBlock
     ));
-    assert!(matches!(old.poll_write(&mut cx, b"ab"), Poll::Ready(Ok(2))));
-    // A sync-only adapter cannot half-close, and says so; nothing is buffered, and no peer offset is known.
+    // No room to write: the same.
+    rig.world.peer(0).set_room(0);
     assert!(matches!(
-        old.poll_shutdown_write(&mut cx),
-        Poll::Ready(Err(ref e)) if e.kind() == io::ErrorKind::Unsupported
+        exchange.stream().try_write(b"more"),
+        Err(StreamError::Io(ref e)) if e.kind() == io::ErrorKind::WouldBlock
     ));
-    assert!(matches!(old.poll_flush(&mut cx), Poll::Ready(Ok(()))));
-    assert_eq!(old.peer_confirmed(), None);
-    // A poll-only adapter's sync calls are unsupported.
-    let mut new = PollOnly;
+    let progress = exchange.stream().progress();
     assert_eq!(
-        new.read(&mut buffer).unwrap_err().kind(),
-        io::ErrorKind::Unsupported
+        (progress.accepted_write, progress.consumed_read),
+        (4, 4),
+        "a try that found nothing moved nothing"
     );
-    assert_eq!(
-        new.write(b"x").unwrap_err().kind(),
-        io::ErrorKind::Unsupported
-    );
+    // The data that arrives is read, and the end is read as the end.
+    rig.world.peer(0).feed(b"hi");
+    assert_eq!(exchange.stream().try_read(&mut buffer).unwrap(), 2);
+    rig.world.peer(0).end();
+    assert_eq!(exchange.stream().try_read(&mut buffer).unwrap(), 0);
 }
 
 #[test]

@@ -1,6 +1,6 @@
 use gwz_transport::{
     protocol::*,
-    stream::{Config, Error, MessageEndpoint, Side, Stream},
+    stream::{Config, Error, MessageEndpoint, Side, Stream, StreamWaiter},
 };
 use std::{
     future::Future,
@@ -291,4 +291,173 @@ fn endpoint_failure_is_emitted_before_eof_and_wakes_reader() {
     );
     assert_eq!(initiator.retained_failure_facts(), Some(Facts::default()));
     assert!(endpoint_port.stats().terminal);
+}
+
+fn data(offset: i64, payload: &[u8]) -> Envelope {
+    Envelope {
+        version: 1,
+        session_id: "async".into(),
+        stream_id: 1,
+        kind: MessageKind::Data,
+        data: Some(Data {
+            offset,
+            payload: payload.to_vec(),
+        }),
+        ..Default::default()
+    }
+}
+fn wakes(signal: &Signal) -> usize {
+    signal.0.load(Ordering::Relaxed)
+}
+
+// B1: the slot stays registered between polls, so the data's delivery wakes the caller; nothing wakes it before.
+#[test]
+fn a_pending_poll_read_keeps_its_waiter_and_is_woken_by_delivered_data() {
+    let (stream, port) = endpoint();
+    let signal = Arc::new(Signal::default());
+    let waker = Waker::from(signal.clone());
+    let mut cx = Context::from_waker(&waker);
+    let mut slot = StreamWaiter::new();
+    let mut bytes = [0; 1];
+    assert!(
+        stream
+            .poll_read(&mut cx, &mut slot, &mut bytes)
+            .is_pending()
+    );
+    assert!(
+        stream
+            .poll_read(&mut cx, &mut slot, &mut bytes)
+            .is_pending()
+    );
+    assert_eq!(
+        port.waiter_count(),
+        1,
+        "one registration held between polls"
+    );
+    assert_eq!(wakes(&signal), 0, "no wake before data");
+    port.deliver(data(0, &[42])).unwrap();
+    assert_eq!(wakes(&signal), 1, "the delivery wakes the pending read");
+    assert_eq!(
+        stream.poll_read(&mut cx, &mut slot, &mut bytes),
+        Poll::Ready(Ok(1))
+    );
+    assert_eq!(bytes, [42]);
+    assert_eq!(port.waiter_count(), 0, "a ready poll releases the slot");
+}
+
+// B2: a write pending on a full buffer and no peer credit is woken by the returned credit and by the dispatcher's
+// take that the credit allows, and then accepts its bytes.
+#[test]
+fn a_pending_poll_write_is_woken_by_returned_credit() {
+    let mut config = Config::new("async", 1, Side::Initiator);
+    config.send_buffer = 2;
+    config.max_payload = 2;
+    config.max_waiters = 2;
+    config.peer_receive_window = 2;
+    let (stream, port) = Stream::new(config).unwrap();
+    let signal = Arc::new(Signal::default());
+    let waker = Waker::from(signal.clone());
+    let mut cx = Context::from_waker(&waker);
+    let noop = Waker::noop();
+    let mut quiet = Context::from_waker(noop);
+    let mut slot = StreamWaiter::new();
+    assert_eq!(
+        stream.poll_write(&mut cx, &mut slot, b"ab"),
+        Poll::Ready(Ok(2))
+    );
+    assert!(matches!(
+        pin!(port.next_message()).poll(&mut quiet),
+        Poll::Ready(Ok(Some(_)))
+    ));
+    assert_eq!(
+        stream.poll_write(&mut cx, &mut slot, b"cd"),
+        Poll::Ready(Ok(2))
+    );
+    assert!(stream.poll_write(&mut cx, &mut slot, b"e").is_pending());
+    assert!(stream.poll_write(&mut cx, &mut slot, b"e").is_pending());
+    assert!(pin!(port.next_message()).poll(&mut quiet).is_pending());
+    assert_eq!(port.waiter_count(), 1);
+    assert_eq!(wakes(&signal), 0, "no wake before credit");
+    let mut credit = data(0, &[]);
+    credit.kind = MessageKind::Window;
+    credit.data = None;
+    credit.window = Some(Window { max_offset: 4 });
+    port.deliver(credit).unwrap();
+    let after_credit = wakes(&signal);
+    assert!(after_credit > 0, "the credit wakes the pending write");
+    assert!(matches!(
+        pin!(port.next_message()).poll(&mut quiet),
+        Poll::Ready(Ok(Some(_)))
+    ));
+    assert!(
+        wakes(&signal) > after_credit,
+        "the take that frees room wakes it"
+    );
+    assert_eq!(
+        stream.poll_write(&mut cx, &mut slot, b"e"),
+        Poll::Ready(Ok(1))
+    );
+    assert_eq!(port.waiter_count(), 0);
+}
+
+// B3: dropping a pending slot unregisters it; the stream is not cancelled by that.
+#[test]
+fn dropping_a_pending_slot_unregisters_its_waiter() {
+    let (stream, port) = endpoint();
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut bytes = [0; 1];
+    let mut slot = StreamWaiter::new();
+    assert!(
+        stream
+            .poll_read(&mut cx, &mut slot, &mut bytes)
+            .is_pending()
+    );
+    assert_eq!(port.waiter_count(), 1);
+    drop(slot);
+    assert_eq!(port.waiter_count(), 0);
+    assert!(!port.stats().terminal);
+    // A slot polled on another stream leaves the first one's waiters.
+    let (other, other_port) = endpoint();
+    let mut slot = StreamWaiter::new();
+    assert!(
+        stream
+            .poll_read(&mut cx, &mut slot, &mut bytes)
+            .is_pending()
+    );
+    assert!(other.poll_read(&mut cx, &mut slot, &mut bytes).is_pending());
+    assert_eq!((port.waiter_count(), other_port.waiter_count()), (0, 1));
+}
+
+// B4: repeated polls of one slot hold one place against max_waiters (2 here); a third slot is refused.
+#[test]
+fn a_slot_counts_once_against_max_waiters() {
+    let (stream, port) = endpoint();
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut bytes = [0; 1];
+    let mut first = StreamWaiter::new();
+    let mut second = StreamWaiter::new();
+    let mut third = StreamWaiter::new();
+    for _ in 0..3 {
+        assert!(
+            stream
+                .poll_read(&mut cx, &mut first, &mut bytes)
+                .is_pending()
+        );
+    }
+    assert_eq!(port.waiter_count(), 1);
+    assert!(stream.poll_write(&mut cx, &mut second, b"ab").is_ready());
+    assert!(stream.poll_write(&mut cx, &mut second, b"c").is_pending());
+    assert!(stream.poll_write(&mut cx, &mut second, b"c").is_pending());
+    assert_eq!(port.waiter_count(), 2);
+    assert_eq!(
+        stream.poll_read(&mut cx, &mut third, &mut bytes),
+        Poll::Ready(Err(Error::WaiterCapacity))
+    );
+    drop(first);
+    assert!(
+        stream
+            .poll_read(&mut cx, &mut third, &mut bytes)
+            .is_pending()
+    );
+    assert_eq!(port.waiter_count(), 2);
 }

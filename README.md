@@ -26,6 +26,10 @@ After the host establishes an exchange and agrees its limits, construct
 `MessageEndpoint`. `read`, `write`, `write_all`, `flush`, `end_write` and `close`
 return executor-independent futures. Writes can be partial. Clones share one
 byte position and exchange; dropping the final handle requests cancellation.
+`poll_read` and `poll_write` are the same calls for a caller that implements its
+own poll methods: each takes a caller-held `StreamWaiter` that stays registered
+between `Pending` polls, so a delivery, credit or take wakes the caller; hold one
+slot per direction, and drop it to release its place among the waiters.
 Dropping the message endpoint reports delivery loss to pending operations.
 
 The host takes `MessageEndpoint::next_message()` and passes each typed value to

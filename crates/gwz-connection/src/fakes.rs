@@ -545,26 +545,6 @@ struct FakeIo {
     state: Arc<Mutex<IoState>>,
 }
 impl ExchangeIo for FakeIo {
-    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        let mut state = self.state.lock().unwrap();
-        state.written += data.len() as u64;
-        state.buffer.extend(data);
-        Ok(data.len())
-    }
-    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        let mut state = self.state.lock().unwrap();
-        let mut n = 0;
-        while n < out.len() {
-            match state.buffer.pop_front() {
-                Some(byte) => {
-                    out[n] = byte;
-                    n += 1;
-                }
-                None => break,
-            }
-        }
-        Ok(n)
-    }
     fn poll_read(&mut self, cx: &mut Context<'_>, out: &mut [u8]) -> Poll<io::Result<usize>> {
         let mut state = self.state.lock().unwrap();
         if state.buffer.is_empty() && state.park && !state.ended {

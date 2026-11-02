@@ -38,7 +38,7 @@ use std::{
         Arc, Weak,
         atomic::Ordering::{AcqRel, Acquire, Release},
     },
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
 };
 
 enum Kind {
@@ -652,23 +652,19 @@ impl MessageStream {
             },
         }
     }
-    /// A write that does not wait: `Io(WouldBlock)` when it cannot proceed.
+    /// A write that does not wait: one poll with a waker that does nothing, `Io(WouldBlock)` when it is pending.
     pub fn try_write(&mut self, data: &[u8]) -> Result<usize, StreamError> {
-        let count = match &mut self.kind {
-            StreamKind::Remote(stream) => stream.write(data)?,
-            StreamKind::Local { .. } => self.io()?.write(data).map_err(StreamError::Io)?,
-        };
-        self.accepted += count as u64;
-        Ok(count)
+        match self.poll_write(&mut Context::from_waker(Waker::noop()), data) {
+            Poll::Ready(result) => result,
+            Poll::Pending => Err(StreamError::Io(io::ErrorKind::WouldBlock.into())),
+        }
     }
-    /// A read that does not wait: `Io(WouldBlock)` when it cannot proceed.
+    /// A read that does not wait: one poll with a waker that does nothing, `Io(WouldBlock)` when it is pending.
     pub fn try_read(&mut self, out: &mut [u8]) -> Result<usize, StreamError> {
-        let count = match &mut self.kind {
-            StreamKind::Remote(stream) => stream.read(out)?,
-            StreamKind::Local { .. } => self.io()?.read(out).map_err(StreamError::Io)?,
-        };
-        self.consumed += count as u64;
-        Ok(count)
+        match self.poll_read(&mut Context::from_waker(Waker::noop()), out) {
+            Poll::Ready(result) => result,
+            Poll::Pending => Err(StreamError::Io(io::ErrorKind::WouldBlock.into())),
+        }
     }
     fn io(&mut self) -> Result<&mut Box<dyn ExchangeIo>, StreamError> {
         let StreamKind::Local { io, binding } = &mut self.kind else {

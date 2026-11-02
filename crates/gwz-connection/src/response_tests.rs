@@ -241,9 +241,16 @@ fn an_exchange_that_reports_nothing_ends_with_no_effect() {
     assert_eq!(now(exchange.finish()).effect, Effect::None);
 }
 
-/// The earlier port: an adapter and an exchange that implement only what existed before.
+/// The earlier port: an adapter and an exchange that implement only what existed before the response head, effect and
+/// confirmation (the byte path is the poll port's required two).
 struct Earlier;
 impl ExchangeIo for Earlier {
+    fn poll_read(&mut self, _cx: &mut Context<'_>, _out: &mut [u8]) -> Poll<io::Result<usize>> {
+        Poll::Ready(Ok(0))
+    }
+    fn poll_write(&mut self, _cx: &mut Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
+        Poll::Ready(Ok(data.len()))
+    }
     fn poll_finish(&mut self, _cx: &mut Context<'_>) -> Poll<Disposition> {
         Poll::Ready(Disposition::Discarded)
     }

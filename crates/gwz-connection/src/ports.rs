@@ -141,6 +141,15 @@ pub struct ConnectCommand {
     /// on the connection, and never uses it for a later exchange, which gets its own operation's context from
     /// `start_exchange`.
     pub auth: Option<AuthContext>,
+    /// How long the pool gives the connect, in milliseconds, when the command is issued: its network deadline (the
+    /// earlier of its connect bound and the opening's allocation deadline) less now; `None` when the pool set none.
+    /// The adapter bounds its setup by the earlier of this and its own connect bound, measured from the moment the
+    /// setup starts (Phase 1 State P3-2(e)); a setup that first waits for a shared reservation or job place may run past
+    /// the pool's deadline by that wait, and the pool's `cancel_connect` at its deadline is what ends it then. It is a span, not a
+    /// point, because an adapter's clock is not the host's (as `ReuseCommand::remaining_ms`). Nothing on this crate's
+    /// path pauses the pool's network clock (no interaction or local wait is begun), so the span issued is the whole of
+    /// it; a later pause would need the span issued again.
+    pub network_remaining_ms: Option<u64>,
 }
 /// What an adapter reports about work it was given. Connection identifiers are the pool's and are never reused.
 #[derive(Debug)]
@@ -205,47 +214,18 @@ pub enum ReuseVerdict {
 ///
 /// The byte path is the `poll_*` methods (contract section 9): each takes the caller's `Context` and, when it cannot
 /// proceed, returns `Pending` having registered that waker, so a caller is woken by the data, the room or the
-/// shutdown it waits for and never sleep-polls. The synchronous `read` and `write` are the earlier port, kept for the
-/// adapters that have not moved yet (step R2b) and for `MessageStream::try_read` and `try_write`.
+/// shutdown it waits for and never sleep-polls. `poll_read` and `poll_write` are required, and there is no synchronous
+/// call: `MessageStream::try_read` and `try_write` are one poll with a waker that does nothing.
 ///
-/// **Transitional defaults (retired by R2b).** `poll_read` and `poll_write` default to the synchronous call and, on
-/// `WouldBlock`, wake the waker at once and return `Pending`: correct, but it re-polls the caller in a busy loop, so an
-/// adapter must implement the `poll_*` methods itself to be woken by its data. The synchronous `read` and `write`
-/// default to `Unsupported`, so an adapter written for the poll port implements only that. `poll_shutdown_write`
-/// defaults to `Unsupported`: an adapter that cannot half-close says so, rather than claiming an end it did not send.
+/// `poll_shutdown_write` defaults to `Unsupported`: an adapter that cannot half-close says so, rather than claiming an
+/// end it did not send.
 pub trait ExchangeIo: Send {
-    /// Accepts a prefix of `data` (at least one byte, or an error); returns at once. `WouldBlock` means not yet.
-    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        let _ = data;
-        Err(io::ErrorKind::Unsupported.into())
-    }
-    /// Reads into `out`; `Ok(0)` is the validated end of the response. Returns at once. `WouldBlock` means not yet.
-    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        let _ = out;
-        Err(io::ErrorKind::Unsupported.into())
-    }
     /// Reads into `out` (never empty), or registers `cx` to be woken when data or the end arrives. `Ready(Ok(0))` is
     /// the validated end. A poll that returns `Pending` has consumed nothing.
-    fn poll_read(&mut self, cx: &mut Context<'_>, out: &mut [u8]) -> Poll<io::Result<usize>> {
-        match self.read(out) {
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-            ready => Poll::Ready(ready),
-        }
-    }
+    fn poll_read(&mut self, cx: &mut Context<'_>, out: &mut [u8]) -> Poll<io::Result<usize>>;
     /// Accepts a nonzero prefix of `data` (never empty), or registers `cx` to be woken when there is room. A poll that
     /// returns `Pending` has accepted nothing.
-    fn poll_write(&mut self, cx: &mut Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
-        match self.write(data) {
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-            ready => Poll::Ready(ready),
-        }
-    }
+    fn poll_write(&mut self, cx: &mut Context<'_>, data: &[u8]) -> Poll<io::Result<usize>>;
     /// Pushes out whatever the adapter buffered for the peer. The default has nothing buffered.
     fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let _ = cx;
