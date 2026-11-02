@@ -805,3 +805,36 @@ fn the_receiver_keeps_its_own_record_of_bound_calls_whatever_the_invocation_sour
     );
     assert_eq!(w.receiver.bindings(), 1);
 }
+
+#[test]
+fn h1e_8_a_bind_whose_single_admission_context_is_refused_invalid_input_is_bind_rejected_invalid_request()
+ {
+    // GwzSplitCommandChannel 3.4 (L136-137) and GwzHttpsAuthModel A8: a credential-retaining context is admitted once,
+    // so a served bind over a capture that another admission holds is the core's invalid request, not the host's capacity.
+    let w = World::new();
+    let context = crate::AuthContext::single_admission(
+        64,
+        crate::AuthScope::new([0; 32]),
+        std::sync::Arc::new(String::from("client")),
+    );
+    let prepared = |name: &str| crate::fakes::prepared_with(name, 1, context.clone());
+    let _held = w.host.admit(prepared("elsewhere")).unwrap();
+    w.call_with(
+        "call-1",
+        Invocation::new(prepared("client-call"), ServiceClass::Fetch),
+        None,
+    );
+    let raw = Raw::bind(&w, "call-1", SESSION);
+    w.settle_client();
+    let replies = raw.read(&w);
+    let rejections = rejected(&replies);
+    assert_eq!(rejections.len(), 1, "{replies:?}");
+    let failure = rejections[0].bind_rejected.as_ref().unwrap();
+    assert_eq!(
+        (failure.code, failure.effect),
+        (ErrorCode::InvalidRequest, Effect::None)
+    );
+    assert!(failure.facts.is_none() && failure.detail.is_none());
+    assert_eq!(w.receiver.bindings(), 0, "a refused bind made no state");
+    assert_eq!(w.host.snapshot().bindings, 0);
+}

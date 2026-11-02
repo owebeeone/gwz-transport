@@ -10,7 +10,7 @@ use super::{
         tuple_refusal_text,
     },
     core::stream_config,
-    receiver::{Invocation, NamedKey, OUTBOX_ROOM, rejection},
+    receiver::{Invocation, NamedKey, OUTBOX_ROOM, rejection, rejection_code},
     table::{self, crate_service},
 };
 use crate::{
@@ -233,11 +233,7 @@ impl Served {
         let permit = match result {
             Ok(permit) => permit,
             Err(error) => {
-                let code = match error {
-                    AdmissionError::Closing(_) => ErrorCode::Cancelled,
-                    _ => ErrorCode::Capacity,
-                };
-                reject(outbox, code);
+                reject(outbox, rejection_code(&error));
                 return;
             }
         };

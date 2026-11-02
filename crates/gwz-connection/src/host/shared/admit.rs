@@ -5,7 +5,7 @@ use crate::{
     Admission, AdmissionError, Direction, PreparedOperation,
     binding::{BindingId, BindingShared, CarrierId, Discard, Routed},
     host::HostPhase,
-    operation::{OperationEnd, Registration, TerminalReason},
+    operation::{ClaimHold, OperationEnd, Registration, TerminalReason},
 };
 use gwz_transport::mux::Attachment;
 use std::{
@@ -21,10 +21,21 @@ use std::{
 const MAX_ADMISSION_CHARGE: usize = 16 * 1024 * 1024;
 const MAX_HOST_CHARGE: usize = 64 * 1024 * 1024;
 
-/// A retained-charge reservation; dropping it gives the charge back. Atomics only, so it is safe to drop anywhere.
+/// A retained-charge reservation; dropping it gives the charge back. Atomics only, so it is safe to drop anywhere. It
+/// carries the admission's single-admission claim, if its context has one: dropped unregistered it frees the claim, and
+/// the registration consumes it (contract section 10).
 pub(crate) struct ChargeGuard {
     counter: Arc<AtomicUsize>,
     amount: usize,
+    claim: Option<ClaimHold>,
+}
+impl ChargeGuard {
+    /// The admission registered: its claim, if any, stays taken for good.
+    pub(crate) fn consume_claim(&self) {
+        if let Some(claim) = &self.claim {
+            claim.consume();
+        }
+    }
 }
 impl Drop for ChargeGuard {
     fn drop(&mut self) {
@@ -33,8 +44,12 @@ impl Drop for ChargeGuard {
 }
 
 impl HostShared {
-    /// Reserves `charge` of the retained-input budget, or refuses.
-    fn charge(&self, charge: usize) -> Result<ChargeGuard, AdmissionError> {
+    /// Reserves `charge` of the retained-input budget, or refuses; `claim` travels with the reservation.
+    fn charge(
+        &self,
+        charge: usize,
+        claim: Option<ClaimHold>,
+    ) -> Result<ChargeGuard, AdmissionError> {
         if charge > MAX_ADMISSION_CHARGE {
             return Err(AdmissionError::InputBudget);
         }
@@ -42,6 +57,7 @@ impl HostShared {
         let guard = ChargeGuard {
             counter: self.charged.clone(),
             amount: charge,
+            claim,
         };
         if before + charge > MAX_HOST_CHARGE {
             // `guard` gives the charge back as it drops.
@@ -54,7 +70,9 @@ impl HostShared {
         self: Arc<Self>,
         input: PreparedOperation,
     ) -> Result<Admission, AdmissionError> {
-        let charge = self.charge(input.auth.charge())?;
+        // A single-admission context is refused before it reserves anything; every later refusal frees its claim.
+        let claim = input.auth.take_claim()?;
+        let charge = self.charge(input.auth.charge(), claim)?;
         let id = {
             let mut state = self.lock();
             if state.phase != HostPhase::Open {

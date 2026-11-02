@@ -225,6 +225,8 @@ pub(crate) struct FakeWorld {
     pub(crate) discard_next: AtomicBool,
     /// Connects complete only on `complete_connects`, as a real worker's do.
     pub(crate) asynchronous: AtomicBool,
+    /// An asynchronous connect keeps its `ConnectCommand.auth` until it completes or is cancelled, as SSH setup does.
+    pub(crate) hold_connect_auth: AtomicBool,
     /// Exchanges' ends are confirmed only on `confirm_finishes`.
     pub(crate) hold_finish: AtomicBool,
     /// `close` is counted but `Completion::Closed` is never reported, as an adapter whose disposal stalls: the pool's
@@ -275,6 +277,7 @@ impl FakeWorld {
             exchange_connections: Mutex::new(Vec::new()),
             discard_next: AtomicBool::new(false),
             asynchronous: AtomicBool::new(false),
+            hold_connect_auth: AtomicBool::new(false),
             hold_finish: AtomicBool::new(false),
             hold_close: AtomicBool::new(false),
             confirmed: AtomicBool::new(false),
@@ -314,6 +317,7 @@ impl FakeWorld {
     /// Every adapter's pending connects succeed now; the hosts' wakers are woken (no caller is polled).
     pub(crate) fn complete_connects(&self) {
         self.each_queue(|queue| {
+            queue.connect_auth.clear();
             for (connection, identity) in std::mem::take(&mut queue.connecting) {
                 queue.connected.push(connection);
                 queue.completions.push_back(Completion::Connected {
@@ -405,6 +409,7 @@ impl FakeWorld {
 struct Queue {
     completions: VecDeque<Completion>,
     connecting: Vec<(ConnectionId, Identity)>,
+    connect_auth: Vec<(ConnectionId, Option<AuthContext>)>,
     connected: Vec<ConnectionId>,
     waker: Option<Waker>,
 }
@@ -620,6 +625,9 @@ impl EndpointAdapter for FakeAdapter {
             queue
                 .connecting
                 .push((command.connection, command.identity));
+            if self.world.hold_connect_auth.load(Ordering::SeqCst) {
+                queue.connect_auth.push((command.connection, command.auth));
+            }
             return;
         }
         queue.connected.push(command.connection);
@@ -632,6 +640,7 @@ impl EndpointAdapter for FakeAdapter {
     fn cancel_connect(&mut self, connection: ConnectionId) {
         self.world.cancelled_connects.fetch_add(1, Ordering::SeqCst);
         let mut queue = self.queue.lock().unwrap();
+        queue.connect_auth.retain(|(id, _)| *id != connection);
         // The cancelled connect still reports, after its disposal.
         if let Some(index) = queue
             .connecting

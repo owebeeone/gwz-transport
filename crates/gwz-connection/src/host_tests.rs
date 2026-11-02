@@ -6,4 +6,5 @@ mod close;
 mod misfit;
 mod registry;
 mod shape;
+mod single_admission;
 mod support;

@@ -11,7 +11,14 @@ use gwz_transport::{
     pool::{Capacity, Identity, Key},
     protocol::{AuthPolicy, Effect, EndpointRole, ErrorCode, Failure, Scheme},
 };
-use std::{any::Any, fmt, sync::Arc};
+use std::{
+    any::Any,
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
+};
 
 /// An input was refused at construction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,6 +173,8 @@ pub struct AuthContext {
     charge: usize,
     scope: AuthScope,
     provider: Arc<dyn Any + Send + Sync>,
+    /// The single-admission claim its clones share; `None` for a provider that may be shared (contract section 10).
+    claim: Option<Arc<AtomicU8>>,
 }
 impl AuthContext {
     /// `charge` is the most the provider retains for as long as this context lives, in bytes.
@@ -174,6 +183,20 @@ impl AuthContext {
             charge,
             scope,
             provider,
+            claim: None,
+        }
+    }
+    /// A context whose provider retains credentials (contract section 10): it and every clone of it share one claim,
+    /// so that the provider is admitted once. `admit` takes the claim, and is refused `AdmissionError::InvalidInput`
+    /// while another admission holds it or after one registered; an admission that never registers frees it.
+    pub fn single_admission(
+        charge: usize,
+        scope: AuthScope,
+        provider: Arc<dyn Any + Send + Sync>,
+    ) -> Self {
+        Self {
+            claim: Some(Arc::new(AtomicU8::new(CLAIM_FREE))),
+            ..Self::new(charge, scope, provider)
         }
     }
     pub fn charge(&self) -> usize {
@@ -184,6 +207,36 @@ impl AuthContext {
     }
     pub fn provider(&self) -> &Arc<dyn Any + Send + Sync> {
         &self.provider
+    }
+    /// Takes the single-admission claim for one admission: `Ok(None)` for a shared provider, the held claim, or
+    /// `InvalidInput` when another admission holds or consumed it.
+    pub(crate) fn take_claim(&self) -> Result<Option<ClaimHold>, AdmissionError> {
+        let Some(claim) = &self.claim else {
+            return Ok(None);
+        };
+        claim
+            .compare_exchange(CLAIM_FREE, CLAIM_HELD, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| Some(ClaimHold(claim.clone())))
+            .map_err(|_| AdmissionError::InvalidInput)
+    }
+}
+
+const CLAIM_FREE: u8 = 0;
+const CLAIM_HELD: u8 = 1;
+const CLAIM_CONSUMED: u8 = 2;
+/// One admission's hold of a single-admission claim. It travels with the admission's charge: dropped before
+/// registration it frees the claim; `consume` keeps it taken for good.
+pub(crate) struct ClaimHold(Arc<AtomicU8>);
+impl ClaimHold {
+    pub(crate) fn consume(&self) {
+        self.0.store(CLAIM_CONSUMED, Ordering::Release);
+    }
+}
+impl Drop for ClaimHold {
+    fn drop(&mut self) {
+        let _ =
+            self.0
+                .compare_exchange(CLAIM_HELD, CLAIM_FREE, Ordering::AcqRel, Ordering::Acquire);
     }
 }
 impl fmt::Debug for AuthContext {
@@ -393,6 +446,10 @@ impl OperationRef {
 /// What `HostHandle::admit` takes: a local host takes the operation its composition built, a carrier-backed handle the
 /// reference to the call whose client builds it. Each refuses the other with `AdmissionError::WrongInput`.
 #[derive(Clone, Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "passed by value once per admission and never stored; boxing would change the public variant"
+)]
 pub enum AdmitInput {
     Prepared(PreparedOperation),
     Reference(OperationRef),
@@ -429,6 +486,9 @@ pub enum AdmissionError {
     DuplicateOperation,
     /// A carrier-backed handle: the carrier has ended.
     CarrierLost,
+    /// The input cannot be admitted as given: a single-admission context that another admission holds or has
+    /// registered (contract section 10).
+    InvalidInput,
 }
 impl fmt::Display for AdmissionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

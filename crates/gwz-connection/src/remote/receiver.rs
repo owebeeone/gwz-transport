@@ -318,9 +318,12 @@ impl Receiver {
     }
 }
 
-fn rejection_code(error: &crate::AdmissionError) -> ErrorCode {
+/// The `bind_rejected` code of an admission refusal (GwzSplitCommandChannel 3.4): a closing host is `cancelled`, input the
+/// host cannot admit as given (a single-admission context already admitted) is `invalid_request`, the rest `capacity`.
+pub(super) fn rejection_code(error: &crate::AdmissionError) -> ErrorCode {
     match error {
         crate::AdmissionError::Closing(_) => ErrorCode::Cancelled,
+        crate::AdmissionError::InvalidInput => ErrorCode::InvalidRequest,
         _ => ErrorCode::Capacity,
     }
 }

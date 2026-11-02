@@ -91,6 +91,13 @@ impl LocalAdmission {
     fn acquire(self) -> LocalAcquire {
         LocalAcquire(self)
     }
+    /// The admission ended unregistered and out of the queue: its input and its charge, with any single-admission
+    /// claim, go back now, not when its future is dropped.
+    fn end(&mut self) {
+        self.queued = false;
+        self.input = None;
+        self.charge = None;
+    }
 }
 impl Drop for LocalAdmission {
     fn drop(&mut self) {
@@ -131,17 +138,17 @@ impl Future for LocalAcquire {
                 (claim, serial)
             }
             Slot::Closing(reason) => {
-                admission.queued = false;
+                admission.end();
                 return Poll::Ready(Err(AdmissionError::Closing(reason)));
             }
             Slot::Exhausted => {
-                admission.queued = false;
+                admission.end();
                 return Poll::Ready(Err(AdmissionError::IdentifierExhausted));
             }
             Slot::Wait => {
                 if admission.sleep.as_mut().poll(cx).is_ready() {
                     host.dequeue(admission.id);
-                    admission.queued = false;
+                    admission.end();
                     return Poll::Ready(Err(AdmissionError::AdmissionTimeout));
                 }
                 return Poll::Pending;
@@ -200,7 +207,7 @@ impl Future for LocalAcquire {
             next_exchange: AtomicU64::new(0),
             done: Cell::new(),
             cleanups: Arc::new(Cleanups::default()),
-            _charge: charge,
+            charge,
         });
         Poll::Ready(Ok(LocalPermit {
             host,
@@ -242,7 +249,10 @@ impl LocalPermit {
             return Operation::terminal(TerminalReason::HostFault);
         };
         match self.host.publish(claim, &binding) {
-            Ok(()) => Operation::live(self.host.clone(), binding),
+            Ok(()) => {
+                binding.charge.consume_claim();
+                Operation::live(self.host.clone(), binding)
+            }
             Err(reason) => Operation::terminal(reason),
         }
     }

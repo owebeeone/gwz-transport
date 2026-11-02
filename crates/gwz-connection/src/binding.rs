@@ -220,8 +220,9 @@ pub(crate) struct BindingShared {
     pub(crate) done: Cell<OperationEnd>,
     /// The disposals its exchanges left unconfirmed, which its end states.
     pub(crate) cleanups: Arc<Cleanups>,
-    /// Held for the binding's life: the retained-input charge goes back when it does.
-    pub(crate) _charge: crate::host::ChargeGuard,
+    /// Held for the binding's life: the retained-input charge goes back when it does. Its single-admission claim is
+    /// freed if the binding never registers and consumed when it does.
+    pub(crate) charge: crate::host::ChargeGuard,
 }
 pub(crate) fn closing_code(reason: TerminalReason) -> usize {
     match reason {
