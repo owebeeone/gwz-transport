@@ -12,6 +12,10 @@ pub(super) struct Pending {
     pub absolute_deadline: Option<u64>,
     pub state: RequestState,
     pub eviction: Option<ConnectionId>,
+    /// The wait for `Request::prefer`: the lease the preferred connection held when the request was made (the
+    /// exchange that was finishing on it) and when the wait lapses, `prefer_wait_ms` from the request and never past
+    /// `deadline`. It ends once that lease does: a later lease of the connection, to any request, is not waited for.
+    pub prefer_wait: Option<(LeaseId, u64)>,
 }
 #[derive(Clone, Copy)]
 pub(super) enum RequestState {
@@ -243,6 +247,17 @@ impl PoolMachine {
         let deadline = absolute_deadline.map_or(allocation_deadline, |absolute| {
             allocation_deadline.min(absolute)
         });
+        // The wait is for the lease the preferred connection holds now: its binding's finishing exchange.
+        let finishing =
+            request
+                .prefer
+                .and_then(|connection| match self.entries.get(&connection)?.state {
+                    State::Leased { lease, .. } => Some(lease),
+                    _ => None,
+                });
+        let prefer_wait = finishing
+            .zip(request.prefer_wait_ms)
+            .map(|(lease, wait)| (lease, self.now.saturating_add(wait).min(deadline)));
         self.requests.insert(
             id,
             Pending {
@@ -251,6 +266,7 @@ impl PoolMachine {
                 absolute_deadline,
                 state: RequestState::Waiting,
                 eviction: None,
+                prefer_wait,
             },
         );
         self.schedule();

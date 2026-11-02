@@ -117,9 +117,17 @@ impl PoolMachine {
     pub fn next_deadline(&self) -> Option<u64> {
         let queue = self
             .requests
-            .values()
-            .filter_map(|pending| match pending.state {
-                RequestState::Waiting => Some(pending.deadline),
+            .iter()
+            .filter_map(|(id, pending)| match pending.state {
+                RequestState::Waiting => Some(
+                    pending.deadline.min(
+                        pending
+                            .prefer_wait
+                            .map(|(_, until)| until)
+                            .filter(|_| self.prefer_waits(*id))
+                            .unwrap_or(u64::MAX),
+                    ),
+                ),
                 RequestState::Opening(id)
                     if matches!(self.entries[&id].state, State::Opening { clock: None, .. }) =>
                 {

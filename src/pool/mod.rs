@@ -239,6 +239,17 @@ pub struct Request {
     /// The limits of the operation that makes this request (reuse design section 5): its owner's opening and leased
     /// entries stay below them. `None` is the pool's own capacity.
     pub limits: Option<Capacity>,
+    /// A connection this request would rather be leased (contract section 8): its binding's own previous exchange
+    /// ran on it. It is leased first when it is idle, of equal key and identity, reusable, not excluded and the
+    /// owner is not full; otherwise the pool decides as if none were named. An id the pool does not hold (closed,
+    /// or another pool's) names nothing. A `fresh` request ignores it.
+    pub prefer: Option<ConnectionId>,
+    /// How long, from the request, it waits for `prefer` while the lease that connection holds when the request is
+    /// made (its binding's finishing exchange) runs: it then opens, evicts and leases nothing, and decides as if none
+    /// were named once that lease ends or the wait lapses, at its allocation deadline at the latest. A connection
+    /// idle when the request is made, or leased next to another request, is not waited for. Only with `prefer`, and
+    /// at most the cleanup bound (`Config::cleanup_timeout_ms`).
+    pub prefer_wait_ms: Option<u64>,
 }
 /// How many idle connections one request may exclude.
 pub const MAX_EXCLUDED: usize = 64;
@@ -255,6 +266,8 @@ impl Request {
             tag: None,
             exclude: Vec::new(),
             limits: None,
+            prefer: None,
+            prefer_wait_ms: None,
         }
     }
     fn valid(&self, config: &Config) -> bool {
@@ -270,6 +283,9 @@ impl Request {
                 .is_none_or(|v| v > 0 && v <= config.interaction_timeout_ms)
             && self.exclude.len() <= MAX_EXCLUDED
             && self.limits.is_none_or(Capacity::valid)
+            && self.prefer_wait_ms.is_none_or(|wait| {
+                self.prefer.is_some() && wait > 0 && wait <= config.cleanup_timeout_ms
+            })
     }
 }
 fn network_timeout_valid(value: Option<u64>, configured: u64) -> bool {

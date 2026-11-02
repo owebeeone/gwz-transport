@@ -19,13 +19,23 @@ impl PoolMachine {
             if request.fresh || self.owner_full(request) {
                 continue;
             }
-            let idle = self.entries.iter().find_map(|(connection, entry)| {
-                (matches!(entry.state, State::Idle { .. })
-                    && entry.key == request.key
-                    && entry.reusable
-                    && entry.identity == request.identity
-                    && !request.exclude.contains(connection))
-                .then_some(*connection)
+            // A preferred connection is leased first when it is idle; while the lease it held when the request was
+            // made runs and the request's wait has not lapsed, the request takes nothing else (contract section 8).
+            let preferred = request.prefer.filter(|connection| {
+                self.entries.get(connection).is_some_and(|entry| {
+                    matches!(entry.state, State::Idle { .. })
+                        && compatible(request, connection, entry)
+                })
+            });
+            if preferred.is_none() && self.prefer_waits(*id) {
+                continue;
+            }
+            let idle = preferred.or_else(|| {
+                self.entries.iter().find_map(|(connection, entry)| {
+                    (matches!(entry.state, State::Idle { .. })
+                        && compatible(request, connection, entry))
+                    .then_some(*connection)
+                })
             });
             if let Some(connection) = idle {
                 match self.lease_id(connection) {
@@ -60,6 +70,7 @@ impl PoolMachine {
                 || pending.eviction.is_some_and(|victim| {
                     self.entries.contains_key(&victim) || self.holds.contains_key(&victim)
                 })
+                || self.prefer_waits(id)
             {
                 continue;
             }
@@ -101,6 +112,27 @@ impl PoolMachine {
         }
     }
 
+    /// Whether waiting request `id` waits for its preferred connection: one that would serve it is still leased
+    /// under the lease it held when the request was made, and the request's wait has not lapsed. It then opens,
+    /// evicts and leases nothing. Once that lease ends the wait is over, even if another request is leased the
+    /// connection next (contract section 8: only a finishing exchange is waited for).
+    pub(super) fn prefer_waits(&self, id: RequestId) -> bool {
+        let Some(pending) = self.requests.get(&id) else {
+            return false;
+        };
+        let request = &pending.request;
+        let (Some(connection), Some((finishing, until))) = (request.prefer, pending.prefer_wait)
+        else {
+            return false;
+        };
+        !request.fresh
+            && self.now < until
+            && self.entries.get(&connection).is_some_and(|entry| {
+                matches!(entry.state, State::Leased { lease, .. } if lease == finishing)
+                    && compatible(request, &connection, entry)
+            })
+    }
+
     /// Opens a connection for waiting request `id` when the endpoint total,
     /// the host and user-host caps and the site limit leave room for one.
     /// Held slots count in all but the endpoint total.
@@ -108,7 +140,7 @@ impl PoolMachine {
         let Some(pending) = self.requests.get(&id) else {
             return;
         };
-        if !matches!(pending.state, RequestState::Waiting) {
+        if !matches!(pending.state, RequestState::Waiting) || self.prefer_waits(id) {
             return;
         }
         let key = &pending.request.key;
@@ -319,4 +351,13 @@ impl PoolMachine {
         self.touch();
         Ok(())
     }
+}
+
+/// Whether `request` may be leased `connection` (`entry`) once it is idle: equal key and identity, reusable, not
+/// excluded.
+fn compatible(request: &Request, connection: &ConnectionId, entry: &Entry) -> bool {
+    entry.key == request.key
+        && entry.reusable
+        && entry.identity == request.identity
+        && !request.exclude.contains(connection)
 }
