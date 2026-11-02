@@ -258,6 +258,14 @@ pub trait ExchangeIo: Send {
     fn peer_confirmed(&self) -> Option<u64> {
         None
     }
+    /// Whether, once its response has begun, this exchange's connection is authenticated by a mechanism that lives on
+    /// the connection (NTLM or Negotiate; contract section 4.1 as amended by HTTPS model A10). The host reads it when
+    /// the exchange's first response byte is delivered and once more when the exchange finishes, and while it is true
+    /// the binding prefers this connection for its next exchange of the same key and path. The default is `false`:
+    /// SSH, and an HTTPS request that carries its credential itself.
+    fn connection_bound(&self) -> bool {
+        false
+    }
     /// The orderly end of the exchange. The first poll starts it; `Ready(Reusable)` asserts that the native protocol
     /// confirmed complete request/response cleanup and the connection can serve another exchange, and anything
     /// unproven is `Ready(Discarded)`. The host's driver polls it (not the application), so a `Pending` must wake

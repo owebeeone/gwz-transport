@@ -64,6 +64,7 @@ pub use safety::{ProcessSafety, SafetyHold, SafetyState, SafetyUnavailable, Shar
 
 cfg_if::cfg_if! {
     if #[cfg(test)] {
+        mod affinity_tests;
         mod capacity_tests;
         mod connect_deadline_tests;
         mod domain_tests;

@@ -207,6 +207,7 @@ impl Future for LocalAcquire {
             next_exchange: AtomicU64::new(0),
             done: Cell::new(),
             cleanups: Arc::new(Cleanups::default()),
+            affinity: Default::default(),
             charge,
         });
         Poll::Ready(Ok(LocalPermit {

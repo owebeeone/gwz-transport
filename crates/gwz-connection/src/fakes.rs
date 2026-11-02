@@ -477,6 +477,8 @@ struct IoState {
     head_waker: Option<Waker>,
     /// What the exchange reports as its request's effect when it ends.
     effect: Effect,
+    /// What the exchange reports as `connection_bound` (the default `false`).
+    bound: bool,
 }
 /// The test's side of one exchange.
 pub(crate) struct Peer(Arc<Mutex<IoState>>);
@@ -529,6 +531,10 @@ impl Peer {
     /// What the exchange reports as its request's effect from now on.
     pub(crate) fn set_effect(&self, effect: Effect) {
         self.0.lock().unwrap().effect = effect;
+    }
+    /// What the exchange reports as `connection_bound` from now on.
+    pub(crate) fn set_bound(&self, bound: bool) {
+        self.0.lock().unwrap().bound = bound;
     }
     pub(crate) fn set_room(&self, room: usize) {
         self.0.lock().unwrap().room = Some(room);
@@ -595,6 +601,9 @@ impl ExchangeIo for FakeIo {
     }
     fn effect(&self) -> Effect {
         self.state.lock().unwrap().effect
+    }
+    fn connection_bound(&self) -> bool {
+        self.state.lock().unwrap().bound
     }
     fn poll_finish(&mut self, cx: &mut Context<'_>) -> Poll<Disposition> {
         if self.world.hold_finish.load(Ordering::SeqCst)

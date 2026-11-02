@@ -7,8 +7,8 @@
 //! link). After the Bind/Bound bootstrap the muxes carry registration and cancellation; stream data crosses the adapter's
 //! `ExchangeIo` until the ordered-stream seam of contract section 6.1 exists in gwz-transport.
 use crate::{
-    AuthContext, CleanupStatus, CleanupTicket, EndpointRoute, HostNamespace, OperationEnd,
-    TicketStatus,
+    AuthContext, CleanupStatus, CleanupTicket, EndpointRoute, ExchangeSpec, HostNamespace,
+    OperationEnd, TicketStatus,
     cell::Cell,
     instance::{Instance, InstanceHold},
     operation::TerminalReason,
@@ -16,11 +16,15 @@ use crate::{
 use gwz_transport::{
     binding as transport_binding,
     mux::{self, Attachment, Mux},
+    pool::{ConnectionId, Key},
     protocol::Limits,
 };
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, AtomicU64, AtomicUsize},
+use std::{
+    collections::VecDeque,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize},
+    },
 };
 
 /// A binding's identifier: its host's namespace and a serial the host never issues twice.
@@ -193,6 +197,57 @@ impl Cleanups {
     }
 }
 
+/// The most entries a binding's affinity table holds; past it the oldest goes (HTTPS model 3.1).
+pub(crate) const AFFINITY_ENTRIES: usize = 256;
+/// The longest repository path the affinity table records, in bytes; a longer one is not recorded.
+pub(crate) const AFFINITY_PATH_BYTES: usize = 1024;
+
+/// What an exchange's connection is noted under in its binding's affinity table: its pool key and repository path.
+pub(crate) struct AffinityKey {
+    key: Key,
+    path: String,
+}
+impl AffinityKey {
+    /// `spec`'s key and path, or `None` for a path the table does not record (over [`AFFINITY_PATH_BYTES`]).
+    pub(crate) fn of(spec: &ExchangeSpec) -> Option<Self> {
+        (spec.path().len() <= AFFINITY_PATH_BYTES).then(|| Self {
+            key: spec.key().clone(),
+            path: spec.path().into(),
+        })
+    }
+}
+
+/// The connection each (pool key, repository path) of this binding last ran on while that connection was authenticated by
+/// a mechanism that lives on it (`ExchangeIo::connection_bound`; HTTPS model 3.1, Consistency P3-4): the binding's next
+/// exchange of the key and path prefers it (`Request::prefer`). Binding state, so a hint never crosses bindings, and a
+/// hint never replaces `authorize_reuse`. Bounded to [`AFFINITY_ENTRIES`], the oldest evicted; the pool `Key` is
+/// `PartialEq` only, so it is scanned linearly. A connection id is never reused, so a stale entry names nothing.
+#[derive(Default)]
+pub(crate) struct Affinity(Mutex<VecDeque<(AffinityKey, ConnectionId)>>);
+impl Affinity {
+    /// Records that `at` ran on `connection`, replacing (and renewing) an entry of the same key and path.
+    pub(crate) fn note(&self, at: AffinityKey, connection: ConnectionId) {
+        let mut entries = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        entries.retain(|(known, _)| known.key != at.key || known.path != at.path);
+        if entries.len() >= AFFINITY_ENTRIES {
+            entries.pop_front();
+        }
+        entries.push_back((at, connection));
+    }
+    /// The connection the binding prefers for an exchange of `spec`'s key and path, if any.
+    pub(crate) fn preferred(&self, spec: &ExchangeSpec) -> Option<ConnectionId> {
+        let entries = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        entries
+            .iter()
+            .find(|(known, _)| known.key == *spec.key() && known.path == spec.path())
+            .map(|(_, connection)| *connection)
+    }
+    #[allow(dead_code, reason = "the affinity rows read the table's size")]
+    pub(crate) fn len(&self) -> usize {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+}
+
 /// What the host table and the operation both hold for one registered binding.
 pub(crate) struct BindingShared {
     pub(crate) id: BindingId,
@@ -220,6 +275,8 @@ pub(crate) struct BindingShared {
     pub(crate) done: Cell<OperationEnd>,
     /// The disposals its exchanges left unconfirmed, which its end states.
     pub(crate) cleanups: Arc<Cleanups>,
+    /// The connections its exchanges prefer, by key and path (HTTPS model 3.1).
+    pub(crate) affinity: Affinity,
     /// Held for the binding's life: the retained-input charge goes back when it does. Its single-admission claim is
     /// freed if the binding never registers and consumed when it does.
     pub(crate) charge: crate::host::ChargeGuard,

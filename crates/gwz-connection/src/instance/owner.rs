@@ -312,7 +312,22 @@ impl Instance {
             let mut request = request;
             request.identity =
                 state.pool_identity(&request.key, request.identity.clone(), auth.scope());
+            // A resubmission (a misfit, a lost lease, an unproven reuse) asks again later and never waits for the
+            // preferred connection: the template has no wait.
             let template = request.clone();
+            // The request waits for its preferred connection only while this instance settles the exchange that
+            // finished on it (its binding's previous exchange, whose lease is not yet released), at most the cleanup
+            // bound (contract section 8; HTTPS model 3.1). A connection busy with an exchange still running is not
+            // waited for.
+            request.prefer_wait_ms = request
+                .prefer
+                .filter(|preferred| {
+                    state
+                        .settling
+                        .iter()
+                        .any(|item| item.lease.connection() == *preferred)
+                })
+                .map(|_| state.cleanup_ms);
             let request = state.pool.request(request)?;
             state.openings.push(Pending {
                 request,
