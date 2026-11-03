@@ -689,3 +689,47 @@ fn a_bind_rejected_under_another_calls_name_is_a_fault_of_the_binding_not_a_refu
         "a rejection for another call is not this binding's refusal"
     );
 }
+
+#[test]
+fn a_served_exchange_refused_by_its_adapters_budget_reaches_the_core_as_capacity_with_no_detail() {
+    // GwzHttpsAuthModel 3(b) and A9: an adapter's budget refusal (the HTTPS operation's credential record, a stream
+    // error of kind `QuotaExceeded` at the client) reaches the core under `cli` as `Failed { code: Capacity }` with no
+    // `capacity` detail. Any other failure of the client's stream is still `Io`.
+    for (kind, code) in [
+        (std::io::ErrorKind::QuotaExceeded, ErrorCode::Capacity),
+        (std::io::ErrorKind::ConnectionReset, ErrorCode::Io),
+    ] {
+        let w = World::new();
+        let op = bound(&w, "call-1");
+        let mut exchange = open(&w, &op, exchange_spec());
+        w.rig.world.peer(0).fail(kind);
+        let mut buffer = [0u8; 64];
+        let mut failure = None;
+        for _ in 0..100 {
+            w.settle();
+            match exchange.stream().try_read(&mut buffer) {
+                Err(error) if would_block(&error) => {}
+                other => {
+                    failure = Some(other);
+                    break;
+                }
+            }
+        }
+        assert!(
+            matches!(failure, Some(Err(StreamError::Failed { code: read, effect: Effect::None })) if read == code),
+            "{kind:?}: {failure:?}"
+        );
+        let sent = w.carrier.sent(Way::ToCore, MessageKind::Failed);
+        assert_eq!(sent.len(), 1, "{kind:?}");
+        let failed = sent[0].1.failed.as_ref().unwrap();
+        assert_eq!(
+            (failed.code, failed.effect),
+            (code, Effect::None),
+            "{kind:?}"
+        );
+        assert!(
+            failed.detail.is_none() && failed.facts.is_none(),
+            "{kind:?}: the refusal carries no detail"
+        );
+    }
+}

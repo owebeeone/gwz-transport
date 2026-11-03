@@ -746,10 +746,15 @@ fn pump_running(
     quiet && run.machine.stats().terminal
 }
 
-/// The owner's stream failed: the exchange ends with a terminal failure the core receives.
+/// The owner's stream failed: the exchange ends with a terminal failure the core receives. An adapter's budget refusal
+/// (a stream error of kind `QuotaExceeded`: the HTTPS operation's credential record, contract section 11's `InputBudget`
+/// class) is `capacity`, with no detail; any other failure is `io`.
 fn fail(run: &mut Running, error: &crate::StreamError) {
     let code = match error {
         crate::StreamError::Cancelled => ErrorCode::Cancelled,
+        crate::StreamError::Io(error) if error.kind() == ErrorKind::QuotaExceeded => {
+            ErrorCode::Capacity
+        }
         _ => ErrorCode::Io,
     };
     let effect = effect_after(run.service, run.forwarded);

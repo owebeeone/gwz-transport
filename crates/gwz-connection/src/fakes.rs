@@ -479,6 +479,8 @@ struct IoState {
     effect: Effect,
     /// What the exchange reports as `connection_bound` (the default `false`).
     bound: bool,
+    /// Once the buffer is drained, reads fail with this kind, as an adapter's failed exchange does.
+    failure: Option<io::ErrorKind>,
 }
 /// The test's side of one exchange.
 pub(crate) struct Peer(Arc<Mutex<IoState>>);
@@ -488,6 +490,17 @@ impl Peer {
         let waker = {
             let mut state = self.0.lock().unwrap();
             state.buffer.extend(data);
+            state.reader.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+    /// The exchange fails: once the buffer is drained, its reads fail with `kind`.
+    pub(crate) fn fail(&self, kind: io::ErrorKind) {
+        let waker = {
+            let mut state = self.0.lock().unwrap();
+            state.failure = Some(kind);
             state.reader.take()
         };
         if let Some(waker) = waker {
@@ -558,6 +571,9 @@ struct FakeIo {
 impl ExchangeIo for FakeIo {
     fn poll_read(&mut self, cx: &mut Context<'_>, out: &mut [u8]) -> Poll<io::Result<usize>> {
         let mut state = self.state.lock().unwrap();
+        if let (true, Some(kind)) = (state.buffer.is_empty(), state.failure) {
+            return Poll::Ready(Err(kind.into()));
+        }
         if state.buffer.is_empty() && state.park && !state.ended {
             state.reader = Some(cx.waker().clone());
             return Poll::Pending;
